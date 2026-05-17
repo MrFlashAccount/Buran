@@ -1,0 +1,5 @@
+# Runtime state: raw packet snapshots and execution journals must stay local.
+/registry/
+/.openclaw-runtime/
+/artifacts/
+/logs/
