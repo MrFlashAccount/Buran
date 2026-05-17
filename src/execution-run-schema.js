@@ -1,6 +1,8 @@
 import path from "node:path";
 
 import {
+  ARTIFACT_STAGE_NAMES,
+  ARTIFACT_STAGE_STATE_BY_NAME,
   GATE_NAMES,
   GATE_RESULT_STATUSES,
   GATE_STATE_BY_NAME,
@@ -14,6 +16,7 @@ import { isRecord } from "./utils.js";
 
 const LEASE_STATUSES = new Set(["not_requested", "acquired", "blocked", "released", "stale_recovered"]);
 const NON_EMPTY_GATE_NAMES = new Set(GATE_NAMES);
+const NON_EMPTY_ARTIFACT_STAGE_NAMES = new Set(ARTIFACT_STAGE_NAMES);
 const GATE_RESULT_STATUS_SET = new Set(GATE_RESULT_STATUSES);
 
 function hasOwn(value, key) {
@@ -42,6 +45,10 @@ function isPositiveInteger(value) {
 
 function isNonNegativeInteger(value) {
   return Number.isSafeInteger(value) && value >= 0;
+}
+
+function artifactStageAllowsEpochZero(stageName) {
+  return stageName === "workspace_preparation";
 }
 
 function isSafeRelativeArtifactPath(value) {
@@ -161,11 +168,13 @@ function validateRecordedArtifactSummary(summary, errors, fieldPath) {
   else if (!isSafeRelativeArtifactPath(summary.path)) errors.push(`run.json field ${fieldPath}.path must be a safe relative path`);
   if (!nonEmptyString(summary.sha256)) errors.push(`run.json field ${fieldPath}.sha256 must be a non-empty string`);
   if (!isNonNegativeInteger(summary.bytes)) errors.push(`run.json field ${fieldPath}.bytes must be a non-negative integer`);
-  if (!NON_EMPTY_GATE_NAMES.has(summary.gate_name)) errors.push(`run.json field ${fieldPath}.gate_name has unsupported value: ${summary.gate_name}`);
-  if (!isPositiveInteger(summary.execution_epoch)) errors.push(`run.json field ${fieldPath}.execution_epoch must be a positive integer`);
+  if (!NON_EMPTY_ARTIFACT_STAGE_NAMES.has(summary.gate_name)) errors.push(`run.json field ${fieldPath}.gate_name has unsupported value: ${summary.gate_name}`);
+  if (artifactStageAllowsEpochZero(summary.gate_name)) {
+    if (!isNonNegativeInteger(summary.execution_epoch)) errors.push(`run.json field ${fieldPath}.execution_epoch must be a non-negative integer`);
+  } else if (!isPositiveInteger(summary.execution_epoch)) errors.push(`run.json field ${fieldPath}.execution_epoch must be a positive integer`);
   if (!isPositiveInteger(summary.gate_attempt)) errors.push(`run.json field ${fieldPath}.gate_attempt must be a positive integer`);
   if (!nonEmptyString(summary.recorded_from_state)) errors.push(`run.json field ${fieldPath}.recorded_from_state must be a non-empty string`);
-  else if (summary.gate_name && GATE_STATE_BY_NAME[summary.gate_name] !== summary.recorded_from_state) {
+  else if (summary.gate_name && ARTIFACT_STAGE_STATE_BY_NAME[summary.gate_name] !== summary.recorded_from_state) {
     errors.push(`run.json field ${fieldPath}.recorded_from_state must match gate ${summary.gate_name}`);
   }
   if (!isTimestampString(summary.recorded_at)) errors.push(`run.json field ${fieldPath}.recorded_at must be a timestamp string`);
@@ -221,11 +230,13 @@ export function validateArtifactRecordedPayload(payload, { fieldPath = "event.ev
   else if (!isSafeRelativeArtifactPath(payload.path)) errors.push(`${fieldPath}.path must be a safe relative path`);
   if (!nonEmptyString(payload.sha256)) errors.push(`${fieldPath}.sha256 must be a non-empty string`);
   if (!isNonNegativeInteger(payload.bytes)) errors.push(`${fieldPath}.bytes must be a non-negative integer`);
-  if (!NON_EMPTY_GATE_NAMES.has(payload.gate_name)) errors.push(`${fieldPath}.gate_name has unsupported value: ${payload.gate_name}`);
-  if (!isPositiveInteger(payload.execution_epoch)) errors.push(`${fieldPath}.execution_epoch must be a positive integer`);
+  if (!NON_EMPTY_ARTIFACT_STAGE_NAMES.has(payload.gate_name)) errors.push(`${fieldPath}.gate_name has unsupported value: ${payload.gate_name}`);
+  if (artifactStageAllowsEpochZero(payload.gate_name)) {
+    if (!isNonNegativeInteger(payload.execution_epoch)) errors.push(`${fieldPath}.execution_epoch must be a non-negative integer`);
+  } else if (!isPositiveInteger(payload.execution_epoch)) errors.push(`${fieldPath}.execution_epoch must be a positive integer`);
   if (!isPositiveInteger(payload.gate_attempt)) errors.push(`${fieldPath}.gate_attempt must be a positive integer`);
   if (!nonEmptyString(payload.recorded_from_state)) errors.push(`${fieldPath}.recorded_from_state must be a non-empty string`);
-  else if (payload.gate_name && GATE_STATE_BY_NAME[payload.gate_name] !== payload.recorded_from_state) errors.push(`${fieldPath}.recorded_from_state must match gate ${payload.gate_name}`);
+  else if (payload.gate_name && ARTIFACT_STAGE_STATE_BY_NAME[payload.gate_name] !== payload.recorded_from_state) errors.push(`${fieldPath}.recorded_from_state must match gate ${payload.gate_name}`);
   if (!isTimestampString(payload.recorded_at)) errors.push(`${fieldPath}.recorded_at must be a timestamp string`);
   if (!nonEmptyString(payload.actor)) errors.push(`${fieldPath}.actor must be a non-empty string`);
   if (!isRecord(payload.provenance)) errors.push(`${fieldPath}.provenance must be an object`);

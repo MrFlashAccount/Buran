@@ -1,12 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 
 import { runBuranCli } from "../src/cli.js";
+import { recoverRegistry } from "../src/recovery.js";
 import { runLocalMission } from "../src/runner.js";
-import { createRunFromPacketReport, getRunPaths, readEventsFile, readRunSnapshot } from "../src/registry-store.js";
+import { createRunFromPacketReport, getRunPaths, readEventsFile, readRunSnapshot, writeRunSnapshot } from "../src/registry-store.js";
+
+const execFileAsync = promisify(execFile);
 
 async function makeTempDir() {
   return fs.mkdtemp(path.join(os.tmpdir(), "buran-runner-test-"));
@@ -14,6 +19,18 @@ async function makeTempDir() {
 
 async function readJson(filePath) {
   return JSON.parse(await fs.readFile(filePath, "utf8"));
+}
+
+async function createLocalGitWorkspace(rootDir, branchName, { dirty = false } = {}) {
+  const workspacePath = path.join(rootDir, `workspace-${branchName.replace(/[^a-z0-9._-]+/gi, "-")}`);
+  await fs.mkdir(workspacePath, { recursive: true });
+  await execFileAsync("git", ["init"], { cwd: workspacePath });
+  await execFileAsync("git", ["checkout", "-b", branchName], { cwd: workspacePath });
+  await fs.writeFile(path.join(workspacePath, "tracked.txt"), "local workspace\n", "utf8");
+  await execFileAsync("git", ["add", "tracked.txt"], { cwd: workspacePath });
+  await execFileAsync("git", ["-c", "user.name=Test Runner", "-c", "user.email=test@example.com", "commit", "-m", "initial workspace"], { cwd: workspacePath });
+  if (dirty) await fs.writeFile(path.join(workspacePath, "dirty.txt"), "dirty workspace\n", "utf8");
+  return workspacePath;
 }
 
 function packetReport(runId = "run_runner_good", overrides = {}) {
@@ -94,7 +111,9 @@ test("local runner stages queued run into waiting_for_lock and reruns idempotent
 test("local runner can acquire a local lease when workspace info is provided and then stops before dispatch", async () => {
   const tempDir = await makeTempDir();
   const registryRoot = path.join(tempDir, "registry");
-  const created = await createRunFromPacketReport(packetReport("run_runner_lease"), {
+  const intendedBranch = "sergey/run_runner_lease";
+  const workspacePath = await createLocalGitWorkspace(tempDir, intendedBranch);
+  const created = await createRunFromPacketReport(packetReport("run_runner_lease", { intendedBranch }), {
     registryRoot,
     clock: () => new Date("2026-05-16T13:52:00.000Z"),
   });
@@ -103,6 +122,7 @@ test("local runner can acquire a local lease when workspace info is provided and
     registryRoot,
     runId: created.run.run_id,
     workspaceId: "ws-runner",
+    workspacePath,
     clock: () => new Date("2026-05-16T13:53:00.000Z"),
   });
 
@@ -112,8 +132,12 @@ test("local runner can acquire a local lease when workspace info is provided and
   assert.deepEqual(first.steps_taken.map((step) => [step.action, step.status, step.to_state]), [
     ["transition", "completed", "waiting_for_lock"],
     ["lease_acquire", "completed", "running"],
+    ["workspace_preparation", "completed", "running"],
   ]);
   assert.equal(first.blockers[0].code, "implementation_dispatch_not_implemented");
+  assert.equal(first.workspace_preparation.status, "prepared");
+  assert.equal(first.workspace_preparation.artifact_record_status, "recorded");
+  assert.match(first.workspace_preparation.artifact_ref.path, /^artifacts\/workspace-preparation\/[a-f0-9]{16}\.json$/);
 
   const paths = getRunPaths(registryRoot, created.run.run_id);
   const snapshotAfterFirst = await readRunSnapshot(paths.runPath);
@@ -122,6 +146,8 @@ test("local runner can acquire a local lease when workspace info is provided and
   assert.equal(snapshotAfterFirst.workspace.id, "ws-runner");
   assert.equal(snapshotAfterFirst.workspace.lease_status, "acquired");
   assert.ok(eventsAfterFirst.some((event) => event.type === "lock.lease_acquired"));
+  assert.ok(eventsAfterFirst.some((event) => event.type === "artifact.recorded" && event.evidence.gate_name === "workspace_preparation"));
+  assert.equal(await fs.readFile(path.join(paths.runDir, first.workspace_preparation.artifact_ref.path), "utf8").then((text) => text.includes("workspace-preparation.v1")), true);
 
   const second = await runLocalMission({
     registryRoot,
@@ -134,9 +160,86 @@ test("local runner can acquire a local lease when workspace info is provided and
   assert.equal(second.outcome, "blocked");
   assert.equal(second.previous_state, "running");
   assert.equal(second.current_state, "running");
-  assert.deepEqual(second.steps_taken, []);
+  assert.deepEqual(second.steps_taken.map((step) => [step.action, step.status, step.to_state]), [["workspace_preparation", "noop", "running"]]);
   assert.equal(second.blockers[0].code, "implementation_dispatch_not_implemented");
+  assert.equal(second.workspace_preparation.artifact_record_status, "noop");
+  assert.deepEqual(second.workspace_preparation.artifact_ref, first.workspace_preparation.artifact_ref);
   assert.equal(eventsAfterSecond.length, eventsAfterFirst.length);
+
+  const recovery = await recoverRegistry(registryRoot, { clock: () => new Date("2026-05-16T13:55:00.000Z") });
+  assert.equal(recovery.summary.quarantined_runs, 0);
+});
+
+test("local runner blocks running workspace preparation when workspace path is missing from the active lease snapshot", async () => {
+  const tempDir = await makeTempDir();
+  const registryRoot = path.join(tempDir, "registry");
+  const created = await createRunFromPacketReport(packetReport("run_runner_missing_workspace_path"), {
+    registryRoot,
+    clock: () => new Date("2026-05-16T13:52:00.000Z"),
+  });
+
+  await runLocalMission({
+    registryRoot,
+    runId: created.run.run_id,
+    workspaceId: "ws-runner-missing-path",
+    clock: () => new Date("2026-05-16T13:53:00.000Z"),
+  });
+
+  const paths = getRunPaths(registryRoot, created.run.run_id);
+  const snapshot = await readRunSnapshot(paths.runPath);
+  snapshot.workspace.path = null;
+  await writeRunSnapshot(registryRoot, snapshot);
+
+  const result = await runLocalMission({
+    registryRoot,
+    runId: created.run.run_id,
+    clock: () => new Date("2026-05-16T13:54:00.000Z"),
+  });
+
+  assert.equal(result.outcome, "blocked");
+  assert.equal(result.current_state, "running");
+  assert.equal(result.workspace_preparation.status, "blocked");
+  assert.equal(result.workspace_preparation.blocker.code, "workspace_path_required");
+  assert.equal(result.blockers[0].code, "workspace_path_required");
+  const events = await readEventsFile(paths.eventsPath);
+  assert.equal(events.some((event) => event.type === "artifact.recorded" && event.evidence.gate_name === "workspace_preparation"), false);
+});
+
+test("local runner records a new immutable workspace preparation artifact when local git evidence changes", async () => {
+  const tempDir = await makeTempDir();
+  const registryRoot = path.join(tempDir, "registry");
+  const intendedBranch = "sergey/run_runner_changed_workspace";
+  const workspacePath = await createLocalGitWorkspace(tempDir, intendedBranch);
+  const created = await createRunFromPacketReport(packetReport("run_runner_changed_workspace", { intendedBranch }), {
+    registryRoot,
+    clock: () => new Date("2026-05-16T13:52:00.000Z"),
+  });
+
+  const first = await runLocalMission({
+    registryRoot,
+    runId: created.run.run_id,
+    workspaceId: "ws-runner-change",
+    workspacePath,
+    clock: () => new Date("2026-05-16T13:53:00.000Z"),
+  });
+  const paths = getRunPaths(registryRoot, created.run.run_id);
+  const eventsAfterFirst = await readEventsFile(paths.eventsPath);
+
+  await fs.writeFile(path.join(workspacePath, "new-untracked.txt"), "changed evidence\n", "utf8");
+
+  const second = await runLocalMission({
+    registryRoot,
+    runId: created.run.run_id,
+    clock: () => new Date("2026-05-16T13:54:00.000Z"),
+  });
+  const eventsAfterSecond = await readEventsFile(paths.eventsPath);
+
+  assert.equal(second.outcome, "blocked");
+  assert.equal(second.workspace_preparation.status, "warning");
+  assert.equal(second.workspace_preparation.artifact_record_status, "recorded");
+  assert.notEqual(second.workspace_preparation.artifact_ref.path, first.workspace_preparation.artifact_ref.path);
+  assert.equal(eventsAfterSecond.length, eventsAfterFirst.length + 1);
+  assert.ok(second.warnings.some((warning) => warning.code === "workspace_dirty"));
 });
 
 test("local runner blocks overlapping leases with structured blocked_lock_conflict", async () => {

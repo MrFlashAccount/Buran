@@ -19,6 +19,7 @@ Implemented now:
 - gate-aware transition guards that require fresh current-epoch verification/internal-review results before `verification -> internal_review`, `verification -> fix_loop`, `internal_review -> pr_ready`, and `internal_review -> fix_loop`;
 - local workspace lease acquisition with lock surfaces for workspace, repo checkout, issue, branch, and declared conflict surfaces;
 - local mission runner skeleton that can stage `queued` runs into `waiting_for_lock`, optionally acquire a local lease, and then stop before implementation/verification/review dispatch;
+- local workspace-preparation skeleton for `running` runs that inspects a local git workspace/worktree, records immutable preparation evidence under the artifact ledger, and still stops before implementation dispatch;
 - TTL metadata and stale-lease recovery that reports/reclaims expired local lease records without guessing active ownership;
 - conflict blocking via `blocked_lock_conflict`, with rollback of partial local lock-file acquisition;
 - recovery quarantine for unknown event types instead of accepting arbitrary timestamped events;
@@ -53,7 +54,7 @@ OpenClaw command form:
 
 `--packets` is mandatory for `validate` and `intake`. Buran intentionally has no discovery fallback. `lease acquire` reserves local state only; it does not create a checkout/worktree or run code. `recover` only inspects and repairs local registry indexes/quarantine/lease records; it has no external side effects.
 
-`run` is local-only skeleton orchestration. Without `--workspace-id`, it can safely advance a queued run into `waiting_for_lock` and stop with a structured blocker. With `--workspace-id`, it may acquire a local lease and stop in `running`; it never dispatches implementation workers or fabricates verification/review results.
+`run` is local-only skeleton orchestration. Without `--workspace-id`, it can safely advance a queued run into `waiting_for_lock` and stop with a structured blocker. With `--workspace-id`, it may acquire a local lease, inspect a provided local git workspace/worktree path, and record a `workspace_preparation` artifact before stopping in `running`. It never dispatches implementation workers, creates a branch/worktree, or fabricates verification/review results.
 
 ## Config
 

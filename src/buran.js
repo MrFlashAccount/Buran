@@ -150,6 +150,14 @@ export function formatBuranReport(report) {
     for (const step of report.steps_taken || []) {
       lines.push(`- ${step.action}: ${step.status} (${step.from_state || "<none>"} -> ${step.to_state || "<none>"})`);
     }
+    if (report.workspace_preparation) {
+      const preparation = report.workspace_preparation;
+      if (preparation.artifact_ref?.path) {
+        lines.push(`Workspace preparation: ${preparation.status}; artifact=${preparation.artifact_ref.path}`);
+      } else if (preparation.blocker?.code) {
+        lines.push(`Workspace preparation: ${preparation.status}; blocker=${preparation.blocker.code}`);
+      }
+    }
     if (report.blockers?.length) {
       for (const blocker of report.blockers) lines.push(`Blocker: ${blocker.code}: ${blocker.message}`);
     }

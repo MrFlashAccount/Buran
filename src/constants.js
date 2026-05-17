@@ -34,6 +34,12 @@ export const GATE_STATE_BY_NAME = Object.freeze({
   verification: "verification",
   internal_review: "internal_review",
 });
+export const ARTIFACT_STAGE_STATE_BY_NAME = Object.freeze({
+  workspace_preparation: "running",
+  verification: "verification",
+  internal_review: "internal_review",
+});
+export const ARTIFACT_STAGE_NAMES = Object.freeze(Object.keys(ARTIFACT_STAGE_STATE_BY_NAME));
 export const GATE_RESULT_STATUSES = Object.freeze(["PASS", "FAIL", "BLOCKED"]);
 export const GATE_STATUS = Object.freeze({
   PENDING: "PENDING",

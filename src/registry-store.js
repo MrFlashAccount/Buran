@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
-import { GATE_STATE_BY_NAME, GATE_STATUS, SCHEMA_VERSION, TERMINAL_STATES } from "./constants.js";
+import { ARTIFACT_STAGE_STATE_BY_NAME, GATE_STATE_BY_NAME, GATE_STATUS, SCHEMA_VERSION, TERMINAL_STATES } from "./constants.js";
 import {
   buildBatchId,
   buildBatchSnapshot,
@@ -22,8 +22,8 @@ function artifactRef(runDir, absolutePath, content) {
   };
 }
 
-function gateStateForName(gateName) {
-  return GATE_STATE_BY_NAME[gateName] || "";
+function artifactStateForName(stageName) {
+  return ARTIFACT_STAGE_STATE_BY_NAME[stageName] || "";
 }
 
 function isTerminal(snapshot) {
@@ -54,19 +54,26 @@ function expectedArtifactAttempt(snapshot, gateName) {
   return (gateHead(snapshot, gateName).current_attempt || 0) + 1;
 }
 
-function ensureGateWritePhase(snapshot, { gateName, executionEpoch, gateAttempt, recordedFromState, kind }) {
+function ensureArtifactWritePhase(snapshot, { gateName, executionEpoch, gateAttempt, recordedFromState, kind }) {
   if (!snapshot?.run_id) throw new Error("run snapshot is required");
   if (isTerminal(snapshot)) throw new Error(`${kind} is forbidden in terminal state ${snapshot.state}`);
-  const expectedState = gateStateForName(gateName);
+  const expectedState = artifactStateForName(gateName);
   if (!expectedState) throw new Error(`${kind} requires a supported gate_name`);
   if (snapshot.state !== expectedState) throw new Error(`${kind} requires state ${expectedState}; current state: ${snapshot.state}`);
   if (recordedFromState !== snapshot.state) throw new Error(`${kind} recorded_from_state ${recordedFromState} does not match current state ${snapshot.state}`);
-  if (!Number.isSafeInteger(snapshot.execution?.current_epoch) || snapshot.execution.current_epoch < 1) {
-    throw new Error(`${kind} requires an active execution epoch`);
+  if (!Number.isSafeInteger(snapshot.execution?.current_epoch) || snapshot.execution.current_epoch < 0) {
+    throw new Error(`${kind} requires a valid execution epoch`);
   }
   if (executionEpoch !== snapshot.execution.current_epoch) {
     throw new Error(`${kind} execution_epoch ${executionEpoch} does not match current epoch ${snapshot.execution.current_epoch}`);
   }
+
+  if (!GATE_STATE_BY_NAME[gateName]) {
+    if (gateAttempt !== 1) throw new Error(`${kind} gate_attempt ${gateAttempt} is stale or out of order; expected 1`);
+    return;
+  }
+
+  if (snapshot.execution.current_epoch < 1) throw new Error(`${kind} requires an active execution epoch`);
   const gate = gateHead(snapshot, gateName);
   if (gate.status !== GATE_STATUS.PENDING) {
     throw new Error(`${kind} cannot write after gate ${gateName} already resolved with status ${gate.status}`);
@@ -497,7 +504,7 @@ export async function recordArtifact(registryRoot, runId, {
     };
   }
 
-  ensureGateWritePhase(snapshot, {
+  ensureArtifactWritePhase(snapshot, {
     gateName: gate_name,
     executionEpoch: execution_epoch,
     gateAttempt: gate_attempt,
@@ -557,7 +564,7 @@ export async function recordGateResult(registryRoot, runId, payload = {}) {
     throw new Error(`gate result idempotency key ${payload.idempotency_key} conflicts with an existing payload`);
   }
 
-  ensureGateWritePhase(snapshot, {
+  ensureArtifactWritePhase(snapshot, {
     gateName: payload.gate_name,
     executionEpoch: payload.execution_epoch,
     gateAttempt: payload.gate_attempt,

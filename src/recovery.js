@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
-import { GATE_NAMES, GATE_STATE_BY_NAME, GATE_STATUS, SCHEMA_VERSION, TERMINAL_STATES } from "./constants.js";
+import { ARTIFACT_STAGE_STATE_BY_NAME, GATE_NAMES, GATE_STATE_BY_NAME, GATE_STATUS, SCHEMA_VERSION, TERMINAL_STATES } from "./constants.js";
 import {
   buildGateResultSummary,
   buildGateSummary,
@@ -123,10 +123,16 @@ function expectedAttempt(snapshot, gateName) {
 }
 
 function validateArtifactReplaySemantics(snapshot, payload) {
-  const expectedState = GATE_STATE_BY_NAME[payload.gate_name] || "";
+  const expectedState = ARTIFACT_STAGE_STATE_BY_NAME[payload.gate_name] || "";
   if (!expectedState || snapshot.state !== expectedState) return `artifact.recorded requires current state ${expectedState}; got ${snapshot.state}`;
   if (payload.recorded_from_state !== snapshot.state) return `artifact.recorded recorded_from_state ${payload.recorded_from_state} does not match current state ${snapshot.state}`;
   if (payload.execution_epoch !== snapshot.execution.current_epoch) return `artifact.recorded execution_epoch ${payload.execution_epoch} does not match current epoch ${snapshot.execution.current_epoch}`;
+  if (!GATE_STATE_BY_NAME[payload.gate_name]) {
+    if (payload.gate_attempt !== 1) return `artifact.recorded gate_attempt ${payload.gate_attempt} is stale or out of order; expected 1`;
+    const existingArtifact = snapshot.artifacts.recorded.by_path[payload.path];
+    if (existingArtifact) return `artifact.recorded reuses immutable path ${payload.path}`;
+    return "";
+  }
   if (payload.gate_attempt !== expectedAttempt(snapshot, payload.gate_name)) return `artifact.recorded gate_attempt ${payload.gate_attempt} is stale or out of order; expected ${expectedAttempt(snapshot, payload.gate_name)}`;
   const gate = gateHead(snapshot, payload.gate_name);
   if (gate.status !== GATE_STATUS.PENDING) return `artifact.recorded is not allowed after gate ${payload.gate_name} resolved with ${gate.status}`;

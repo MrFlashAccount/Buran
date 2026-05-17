@@ -1,7 +1,8 @@
 import { SCHEMA_VERSION, TERMINAL_STATES } from "./constants.js";
 import { acquireWorkspaceLease } from "./locks.js";
-import { getRunPaths, readRunSnapshot, transitionRun } from "./registry-store.js";
+import { getRunPaths, readRunSnapshot, recordArtifact, transitionRun } from "./registry-store.js";
 import { nonEmptyString } from "./utils.js";
+import { inspectWorkspacePreparation } from "./workspace-preparation.js";
 
 const RUNNER_MODE = "run_local";
 const RUNNER_ACTOR = "local-mission-runner";
@@ -10,7 +11,7 @@ function hasActiveLease(snapshot) {
   return snapshot?.workspace?.lease_status === "acquired" || snapshot?.locks?.lease_status === "acquired";
 }
 
-function buildStep({ action, status, fromState = "", toState = "", detail = "", sequence = null, workspaceId = "", leaseId = "", expiresAt = "", conflicts = 0, rolledBackRecords = 0 } = {}) {
+function buildStep({ action, status, fromState = "", toState = "", detail = "", sequence = null, workspaceId = "", leaseId = "", expiresAt = "", conflicts = 0, rolledBackRecords = 0, artifactPath = "", artifactSha256 = "" } = {}) {
   const step = {
     action,
     status,
@@ -24,6 +25,8 @@ function buildStep({ action, status, fromState = "", toState = "", detail = "", 
   if (expiresAt) step.expires_at = expiresAt;
   if (conflicts > 0) step.conflicts = conflicts;
   if (rolledBackRecords > 0) step.rolled_back_records = rolledBackRecords;
+  if (artifactPath) step.artifact_path = artifactPath;
+  if (artifactSha256) step.artifact_sha256 = artifactSha256;
   return step;
 }
 
@@ -31,7 +34,7 @@ function buildIssue(code, message, extra = {}) {
   return { code, message, ...extra };
 }
 
-function buildRunnerReport({ registryRoot, runId, previousState = null, currentState = null, outcome, stepsTaken = [], blockers = [], warnings = [] } = {}) {
+function buildRunnerReport({ registryRoot, runId, previousState = null, currentState = null, outcome, stepsTaken = [], blockers = [], warnings = [], workspacePreparation = null } = {}) {
   return {
     schema_version: SCHEMA_VERSION,
     mode: RUNNER_MODE,
@@ -44,6 +47,7 @@ function buildRunnerReport({ registryRoot, runId, previousState = null, currentS
     steps_taken: stepsTaken,
     blockers,
     warnings,
+    workspace_preparation: workspacePreparation,
     external_side_effects: false,
   };
 }
@@ -53,11 +57,15 @@ function leaseRequiredMessage(runId) {
 }
 
 function implementationBoundaryMessage() {
-  return "Local mission runner skeleton stops before implementation dispatch. Slice 4A does not start workers, verification, review, or external writes.";
+  return "Local mission runner skeleton stops before implementation dispatch. This current local runner slice does not start workers, verification, review, or external writes.";
 }
 
 function unsupportedStageMessage(state) {
   return `Local mission runner skeleton does not execute ${state} adapters yet.`;
+}
+
+function stablePreparationRecordedAt(snapshot, fallbackTimestamp) {
+  return snapshot?.workspace?.acquired_at || snapshot?.locks?.acquired_at || snapshot?.created_at || fallbackTimestamp;
 }
 
 export async function runLocalMission({ registryRoot, runId, workspaceId = "", workspacePath = "", ttlMs = "", clock = () => new Date(), actor = RUNNER_ACTOR } = {}) {
@@ -86,6 +94,7 @@ export async function runLocalMission({ registryRoot, runId, workspaceId = "", w
 
   const previousState = snapshot.state;
   let current = snapshot;
+  let workspacePreparation = null;
 
   if (TERMINAL_STATES.has(current.state)) {
     return buildRunnerReport({
@@ -94,6 +103,7 @@ export async function runLocalMission({ registryRoot, runId, workspaceId = "", w
       previousState,
       currentState: current.state,
       outcome: "blocked",
+      workspacePreparation,
       blockers: [buildIssue("terminal_state", `Run ${runId} is already terminal in state ${current.state}.`)],
     });
   }
@@ -105,6 +115,7 @@ export async function runLocalMission({ registryRoot, runId, workspaceId = "", w
       previousState,
       currentState: current.state,
       outcome: "blocked",
+      workspacePreparation,
       blockers: [buildIssue("run_not_intaken", `Run ${runId} is still in packet_received and is not ready for local runner staging.`)],
     });
   }
@@ -139,6 +150,7 @@ export async function runLocalMission({ registryRoot, runId, workspaceId = "", w
         stepsTaken,
         blockers,
         warnings,
+        workspacePreparation,
       });
     }
 
@@ -184,6 +196,7 @@ export async function runLocalMission({ registryRoot, runId, workspaceId = "", w
         stepsTaken,
         blockers,
         warnings,
+        workspacePreparation,
       });
     }
   }
@@ -193,7 +206,58 @@ export async function runLocalMission({ registryRoot, runId, workspaceId = "", w
       warnings.push(buildIssue("lease_not_active", `Run ${runId} is in running without an active local lease snapshot.`));
       blockers.push(buildIssue("lease_required", leaseRequiredMessage(runId)));
     } else {
-      blockers.push(buildIssue("implementation_dispatch_not_implemented", implementationBoundaryMessage()));
+      const inspected = await inspectWorkspacePreparation(current.workspace?.path || "", {
+        intendedBranch: current.github?.intended_branch || "",
+      });
+
+      if (!inspected.ok) {
+        workspacePreparation = {
+          status: "blocked",
+          artifact_ref: null,
+          artifact_record_status: "not_recorded",
+          blocker: inspected.blocker,
+          warnings: inspected.warnings || [],
+        };
+        blockers.push(inspected.blocker);
+        warnings.push(...(inspected.warnings || []));
+      } else {
+        const recorded = await recordArtifact(registryRoot, runId, {
+          artifactPath: inspected.artifact_path,
+          content: inspected.content,
+          gate_name: "workspace_preparation",
+          execution_epoch: current.execution?.current_epoch || 0,
+          gate_attempt: 1,
+          recorded_from_state: "running",
+          actor,
+          recorded_at: stablePreparationRecordedAt(current, clock().toISOString()),
+          provenance: {
+            kind: "workspace-preparation-report",
+            workspace_id: current.workspace?.id || "",
+            workspace_snapshot_id: inspected.report.workspace_snapshot_id,
+          },
+        });
+        current = recorded.run;
+        workspacePreparation = {
+          status: inspected.preparation_status,
+          artifact_ref: recorded.artifact_ref,
+          artifact_record_status: recorded.status,
+          blocker: null,
+          warnings: inspected.warnings,
+        };
+        stepsTaken.push(buildStep({
+          action: "workspace_preparation",
+          status: recorded.status === "noop" ? "noop" : "completed",
+          fromState: "running",
+          toState: "running",
+          detail: "Local workspace intent was inspected and recorded without creating a branch, checkout, or worktree.",
+          sequence: recorded.event?.sequence ?? null,
+          workspaceId: current.workspace?.id || "",
+          artifactPath: recorded.artifact_ref.path,
+          artifactSha256: recorded.artifact_ref.sha256,
+        }));
+        warnings.push(...inspected.warnings);
+        blockers.push(buildIssue("implementation_dispatch_not_implemented", implementationBoundaryMessage()));
+      }
     }
     return buildRunnerReport({
       registryRoot,
@@ -204,6 +268,7 @@ export async function runLocalMission({ registryRoot, runId, workspaceId = "", w
       stepsTaken,
       blockers,
       warnings,
+      workspacePreparation,
     });
   }
 
@@ -218,6 +283,7 @@ export async function runLocalMission({ registryRoot, runId, workspaceId = "", w
       stepsTaken,
       blockers,
       warnings,
+      workspacePreparation,
     });
   }
 
@@ -231,5 +297,6 @@ export async function runLocalMission({ registryRoot, runId, workspaceId = "", w
     stepsTaken,
     blockers,
     warnings,
+    workspacePreparation,
   });
 }
