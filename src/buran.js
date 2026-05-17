@@ -166,6 +166,16 @@ export function formatBuranReport(report) {
         lines.push(`Implementation dispatch: ${dispatch.status}; blocker=${dispatch.blocker.code}`);
       }
     }
+    if (report.verification) {
+      const verification = report.verification;
+      if (verification.artifact_ref?.path) {
+        lines.push(`Verification: ${verification.status}; artifact=${verification.artifact_ref.path}`);
+      } else if (verification.artifact_refs?.[0]?.path) {
+        lines.push(`Verification: ${verification.status}; artifact=${verification.artifact_refs[0].path}`);
+      } else if (verification.problem?.code) {
+        lines.push(`Verification: ${verification.status}; blocker=${verification.problem.code}`);
+      }
+    }
     if (report.blockers?.length) {
       for (const blocker of report.blockers) lines.push(`Blocker: ${blocker.code}: ${blocker.message}`);
     }

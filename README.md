@@ -18,7 +18,7 @@ Implemented now:
 - local recovery/replay command that validates schema, event sequence, transition edges, snapshot/event consistency, and artifact hashes;
 - gate-aware transition guards that require fresh current-epoch verification/internal-review results before `verification -> internal_review`, `verification -> fix_loop`, `internal_review -> pr_ready`, and `internal_review -> fix_loop`;
 - local workspace lease acquisition with lock surfaces for workspace, repo checkout, issue, branch, and declared conflict surfaces;
-- local mission runner skeleton that can stage `queued` runs into `waiting_for_lock`, optionally acquire a local lease, record immutable workspace-preparation evidence plus an implementation-dispatch handoff artifact, and then stop before implementation/verification/review dispatch;
+- local mission runner skeleton that can stage `queued` runs into `waiting_for_lock`, optionally acquire a local lease, record immutable workspace-preparation evidence plus an implementation-dispatch handoff artifact, execute packet-selected direct allowlisted verification commands for `verification` runs, and still stop before implementation worker execution or internal review dispatch;
 - local workspace-preparation skeleton for `running` runs that inspects a local git workspace/worktree, records immutable preparation evidence under the artifact ledger, derives a deterministic implementation-dispatch handoff artifact, and still stops before implementation worker execution;
 - TTL metadata and stale-lease recovery that reports/reclaims expired local lease records without guessing active ownership;
 - conflict blocking via `blocked_lock_conflict`, with rollback of partial local lock-file acquisition;
@@ -26,7 +26,7 @@ Implemented now:
 - quarantine of corrupt, malformed, incomplete, or ambiguous local run state under `registry/quarantine/` with `quarantine-report.json`;
 - rebuildable `indexes/active-runs.json`, `indexes/workspace-leases.json`, and `indexes/recovery-report.json`;
 - structured local operational logs and per-invocation diagnostic reports with trace ids, outcome/duration fields, and sanitization/redaction;
-- no autonomous discovery, remote writes, implementation worker dispatch, verification/review adapter execution, checkout/worktree setup, PR creation, or projection adapter.
+- no autonomous discovery, remote writes, implementation worker dispatch, internal-review adapter execution, checkout/worktree setup, PR creation, or projection adapter.
 
 See [docs/observability.md](docs/observability.md) for the boundary between durable registry journals, operational logs, and diagnostic reports. Logs and diagnostics are local debugging aids only; registry state remains the source of truth and no external telemetry is emitted.
 
@@ -41,6 +41,8 @@ node ./bin/buran.js lease acquire --run <run_id> --workspace-id ws-1 --registry 
 node ./bin/buran.js recover --registry /tmp/buran-registry
 ```
 
+`npm test` and project-level commands such as `npm run check` remain valid manual/maintainer repo checks, but they are not part of Buran's packet-selected local verification allowlist.
+
 OpenClaw command form:
 
 ```text
@@ -54,7 +56,7 @@ OpenClaw command form:
 
 `--packets` is mandatory for `validate` and `intake`. Buran intentionally has no discovery fallback. `lease acquire` reserves local state only; it does not create a checkout/worktree or run code. `recover` only inspects and repairs local registry indexes/quarantine/lease records; it has no external side effects.
 
-`run` is local-only skeleton orchestration. Without `--workspace-id`, it can safely advance a queued run into `waiting_for_lock` and stop with a structured blocker. With `--workspace-id`, it may acquire a local lease, inspect a provided local git workspace/worktree path, record a `workspace_preparation` artifact, then record a deterministic `implementation_dispatch` handoff artifact and stop in `running` with `dispatch_ready_not_started`. Reruns are idempotent for identical evidence; if workspace-preparation evidence changes, Buran records a fresh immutable handoff artifact instead of pretending the earlier handoff is still current. It never dispatches implementation workers, creates a branch/worktree, or fabricates verification/review results.
+`run` is local-only orchestration. Without `--workspace-id`, it can safely advance a queued run into `waiting_for_lock` and stop with a structured blocker. With `--workspace-id`, it may acquire a local lease, inspect a provided local git workspace/worktree path, record a `workspace_preparation` artifact, then record a deterministic `implementation_dispatch` handoff artifact and stop in `running` with `dispatch_ready_not_started`. For runs already in `verification`, packet-selected local verification supports only the safe direct-command allowlisted shape implemented in code (`node --test test/runner.test.js`, `node --test test/gate-ledger.test.js`). Package-script delegation such as `npm test` or `npm run check` is rejected for packet verification, though maintainers may still run those project-level checks manually outside packet verification. Buran records one immutable verification artifact plus one `gate.result_recorded`, and advances only through the documented verification outcomes. Reruns are idempotent for identical evidence; if a verification result was already recorded for the current epoch/attempt, Buran reuses it instead of duplicating the gate event. It never dispatches implementation workers, creates a branch/worktree, or fabricates internal-review/PR results.
 
 ## Config
 

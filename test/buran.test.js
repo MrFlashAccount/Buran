@@ -328,6 +328,25 @@ test("state machine allows documented transitions and rejects forbidden transiti
   assert.match(terminal.reason, /terminal state/);
 });
 
+test("state machine routes verification BLOCKED to blocked_needs_human instead of fix_loop", async () => {
+  const blockedSnapshot = {
+    state: "verification",
+    execution: { current_epoch: 1 },
+    gates: {
+      verification: {
+        status: "BLOCKED",
+        current_epoch: 1,
+        current_attempt: 1,
+      },
+    },
+  };
+
+  assert.equal(validateTransition({ fromState: "verification", toState: "blocked_needs_human", snapshot: blockedSnapshot }).ok, true);
+  const blockedToFixLoop = validateTransition({ fromState: "verification", toState: "fix_loop", snapshot: blockedSnapshot });
+  assert.equal(blockedToFixLoop.ok, false);
+  assert.match(blockedToFixLoop.reason, /requires a current verification FAIL result/);
+});
+
 test("registry transitions persist run snapshot and event journal consistently", async () => {
   const tempDir = await makeTempDir();
   const registryRoot = path.join(tempDir, "registry");

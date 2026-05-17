@@ -57,8 +57,13 @@ function validateGateTransitionGuard(snapshot, fromState, toState) {
     }
   }
   if (fromState === "verification" && toState === "fix_loop") {
-    if (!freshGateStatus(snapshot, "verification", [GATE_STATUS.FAIL, GATE_STATUS.BLOCKED])) {
-      return { ok: false, reason: "transition verification -> fix_loop requires a current verification FAIL or BLOCKED result" };
+    if (!freshGateStatus(snapshot, "verification", [GATE_STATUS.FAIL])) {
+      return { ok: false, reason: "transition verification -> fix_loop requires a current verification FAIL result" };
+    }
+  }
+  if (fromState === "verification" && toState === "blocked_needs_human") {
+    if (!freshGateStatus(snapshot, "verification", [GATE_STATUS.BLOCKED])) {
+      return { ok: false, reason: "transition verification -> blocked_needs_human requires a current verification BLOCKED result" };
     }
   }
   if (fromState === "internal_review" && toState === "pr_ready") {

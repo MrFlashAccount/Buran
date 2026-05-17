@@ -7,9 +7,10 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 import { runBuranCli } from "../src/cli.js";
+import { acquireWorkspaceLease } from "../src/locks.js";
 import { recoverRegistry } from "../src/recovery.js";
 import { runLocalMission } from "../src/runner.js";
-import { createRunFromPacketReport, getRunPaths, readEventsFile, readRunSnapshot, writeRunSnapshot } from "../src/registry-store.js";
+import { createRunFromPacketReport, getRunPaths, readEventsFile, readRunSnapshot, transitionRun, writeRunSnapshot } from "../src/registry-store.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -62,6 +63,73 @@ function weakPacketReport(runId = "run_runner_weak") {
     missing_fields: ["implementation.instructions"],
     sufficient: false,
   };
+}
+
+async function createVerificationWorkspace(rootDir, { testFile = "test/runner.test.js", passing = true, testScript = "", checkScript = "", testSource = "" } = {}) {
+  const workspacePath = path.join(rootDir, `verification-workspace-${Math.random().toString(16).slice(2, 10)}`);
+  await fs.mkdir(path.join(workspacePath, path.dirname(testFile)), { recursive: true });
+  await fs.writeFile(path.join(workspacePath, "package.json"), `${JSON.stringify({
+    name: "buran-verification-workspace",
+    private: true,
+    type: "module",
+    scripts: {
+      test: testScript || `node --test ${testFile}`,
+      check: checkScript || testScript || `node --test ${testFile}`,
+    },
+  }, null, 2)}\n`, "utf8");
+  await fs.writeFile(path.join(workspacePath, testFile), testSource || [
+    'import test from "node:test";',
+    'import assert from "node:assert/strict";',
+    `test("verification ${passing ? "passes" : "fails"}", () => { ${passing ? "assert.equal(1, 1);" : "assert.equal(1, 2);"} });`,
+    "",
+  ].join("\n"), "utf8");
+  return workspacePath;
+}
+
+async function prepareVerificationRun(registryRoot, workspacePath, { runId = "run_runner_verification", commands = ["node --test test/runner.test.js"], taskId = "runner-verification", issueNumber = 192 } = {}) {
+  const base = packetReport(runId, { taskId, issueNumber, conflictSurface: "src/verification" });
+  const created = await createRunFromPacketReport({
+    ...base,
+    raw: {
+      task_id: taskId,
+      approved: true,
+      github: {
+        repo: base.github.repo,
+        issue_number: base.github.issue_number,
+        intended_branch: base.github.intended_branch,
+      },
+      scope: {
+        goal: "Run local verification inside the approved packet envelope.",
+        acceptance_criteria: ["Verification result is recorded locally"],
+      },
+      implementation: {
+        instructions: "Implementation already completed in the leased workspace.",
+      },
+      verification: {
+        commands,
+      },
+      review: {
+        criteria: ["Review the recorded verification artifact"],
+      },
+      conflict_surface: base.conflict_surface,
+    },
+  }, {
+    registryRoot,
+    clock: () => new Date("2026-05-16T13:52:00.000Z"),
+  });
+
+  await acquireWorkspaceLease(registryRoot, created.run.run_id, {
+    workspaceId: `ws-${runId}`,
+    workspacePath,
+    clock: () => new Date("2026-05-16T13:53:00.000Z"),
+  });
+  await transitionRun(registryRoot, created.run.run_id, {
+    toState: "verification",
+    actor: "runner-verification-test",
+    evidence: { reason: "implementation completed" },
+    clock: () => new Date("2026-05-16T13:54:00.000Z"),
+  });
+  return created.run.run_id;
 }
 
 test("local runner stages queued run into waiting_for_lock and reruns idempotently without a lease", async () => {
@@ -332,6 +400,251 @@ test("local runner blocks overlapping leases with structured blocked_lock_confli
   assert.equal(second.blockers[0].code, "blocked_lock_conflict");
   assert.deepEqual([...new Set(second.blockers[0].conflicts.map((conflict) => conflict.surface))].sort(), ["branch", "conflict_surface", "issue"]);
   assert.equal(second.blockers[0].conflicts.every((conflict) => conflict.owner_run_id === firstCreated.run.run_id), true);
+});
+
+test("local runner executes allowlisted verification, records the gate ledger, and advances to internal_review", async () => {
+  const tempDir = await makeTempDir();
+  const registryRoot = path.join(tempDir, "registry");
+  const workspacePath = await createVerificationWorkspace(tempDir, {
+    testFile: "test/runner.test.js",
+    passing: true,
+  });
+  const runId = await prepareVerificationRun(registryRoot, workspacePath, {
+    runId: "run_runner_verification_pass",
+  });
+
+  const result = await runLocalMission({
+    registryRoot,
+    runId,
+    clock: () => new Date("2026-05-16T13:55:00.000Z"),
+  });
+
+  assert.equal(result.outcome, "completed");
+  assert.equal(result.previous_state, "verification");
+  assert.equal(result.current_state, "internal_review");
+  assert.deepEqual(result.steps_taken.map((step) => [step.action, step.status, step.to_state]), [
+    ["verification_artifact", "completed", "verification"],
+    ["gate_result_recorded", "completed", "verification"],
+    ["transition", "completed", "internal_review"],
+  ]);
+  assert.equal(result.verification.status, "PASS");
+  assert.equal(result.verification.command_results[0].status, "PASS");
+  assert.match(result.verification.artifact_ref.path, /^artifacts\/verification\/[a-f0-9]{16}\.json$/);
+
+  const paths = getRunPaths(registryRoot, runId);
+  const snapshot = await readRunSnapshot(paths.runPath);
+  const events = await readEventsFile(paths.eventsPath);
+  assert.equal(snapshot.state, "internal_review");
+  assert.equal(snapshot.gates.verification.status, "PASS");
+  assert.equal(snapshot.gates.verification.current_epoch, 1);
+  assert.equal(snapshot.gates.verification.current_attempt, 1);
+  assert.equal(events.filter((event) => event.type === "artifact.recorded" && event.evidence.gate_name === "verification").length, 1);
+  assert.equal(events.filter((event) => event.type === "gate.result_recorded").length, 1);
+  assert.equal(events.at(-1).state_after, "internal_review");
+
+  const verificationArtifact = JSON.parse(await fs.readFile(path.join(paths.runDir, result.verification.artifact_ref.path), "utf8"));
+  assert.equal(verificationArtifact.schema_version, "verification-report.v1");
+  assert.equal(verificationArtifact.status, "PASS");
+  assert.deepEqual(verificationArtifact.packet_verification.commands, ["node --test test/runner.test.js"]);
+});
+
+test("local runner reuses a recorded verification result without duplicating gate events", async () => {
+  const tempDir = await makeTempDir();
+  const registryRoot = path.join(tempDir, "registry");
+  const workspacePath = await createVerificationWorkspace(tempDir, {
+    testFile: "test/runner.test.js",
+    passing: true,
+  });
+  const runId = await prepareVerificationRun(registryRoot, workspacePath, {
+    runId: "run_runner_verification_resume",
+  });
+
+  await runLocalMission({
+    registryRoot,
+    runId,
+    clock: () => new Date("2026-05-16T13:55:00.000Z"),
+  });
+
+  const paths = getRunPaths(registryRoot, runId);
+  const snapshot = await readRunSnapshot(paths.runPath);
+  const eventsBeforeRetry = await readEventsFile(paths.eventsPath);
+  await writeRunSnapshot(registryRoot, {
+    ...snapshot,
+    state: "verification",
+    updated_at: "2026-05-16T13:55:30.000Z",
+  });
+
+  const retried = await runLocalMission({
+    registryRoot,
+    runId,
+    clock: () => new Date("2026-05-16T13:56:00.000Z"),
+  });
+  const eventsAfterRetry = await readEventsFile(paths.eventsPath);
+
+  assert.equal(retried.outcome, "completed");
+  assert.equal(retried.current_state, "internal_review");
+  assert.equal(retried.verification.status, "PASS");
+  assert.equal(retried.verification.resumed_recorded_result, true);
+  assert.deepEqual(retried.steps_taken.map((step) => [step.action, step.status, step.to_state]), [
+    ["verification_resume", "noop", "verification"],
+    ["transition", "completed", "internal_review"],
+  ]);
+  assert.equal(eventsAfterRetry.filter((event) => event.type === "gate.result_recorded").length, 1);
+  assert.equal(eventsAfterRetry.length, eventsBeforeRetry.length + 1);
+});
+
+test("local runner blocks verification resume when the recorded artifact is missing", async () => {
+  const tempDir = await makeTempDir();
+  const registryRoot = path.join(tempDir, "registry");
+  const workspacePath = await createVerificationWorkspace(tempDir, {
+    testFile: "test/runner.test.js",
+    passing: true,
+  });
+  const runId = await prepareVerificationRun(registryRoot, workspacePath, {
+    runId: "run_runner_verification_resume_missing_artifact",
+  });
+
+  const first = await runLocalMission({
+    registryRoot,
+    runId,
+    clock: () => new Date("2026-05-16T13:55:00.000Z"),
+  });
+
+  const paths = getRunPaths(registryRoot, runId);
+  const verificationArtifactPath = path.join(paths.runDir, first.verification.artifact_ref.path);
+  await fs.rm(verificationArtifactPath, { force: true });
+  const snapshot = await readRunSnapshot(paths.runPath);
+  const eventsBeforeRetry = await readEventsFile(paths.eventsPath);
+  await writeRunSnapshot(registryRoot, {
+    ...snapshot,
+    state: "verification",
+    updated_at: "2026-05-16T13:55:30.000Z",
+  });
+
+  const retried = await runLocalMission({
+    registryRoot,
+    runId,
+    clock: () => new Date("2026-05-16T13:56:00.000Z"),
+  });
+  const eventsAfterRetry = await readEventsFile(paths.eventsPath);
+
+  assert.equal(retried.outcome, "blocked");
+  assert.equal(retried.current_state, "verification");
+  assert.equal(retried.verification.status, "PASS");
+  assert.equal(retried.verification.resumed_recorded_result, false);
+  assert.equal(retried.verification.gate_result_status, "stale_recorded_result");
+  assert.equal(retried.verification.problem.code, "verification_artifact_missing");
+  assert.deepEqual(retried.steps_taken.map((step) => [step.action, step.status, step.to_state]), [
+    ["verification_resume", "blocked", "verification"],
+  ]);
+  assert.equal(eventsAfterRetry.length, eventsBeforeRetry.length);
+  assert.equal(eventsAfterRetry.filter((event) => event.type === "gate.result_recorded").length, 1);
+});
+
+test("local runner executes verification with a minimal environment and does not inherit caller secrets", async () => {
+  const tempDir = await makeTempDir();
+  const registryRoot = path.join(tempDir, "registry");
+  const previousSecret = process.env.BURAN_TEST_SECRET;
+  process.env.BURAN_TEST_SECRET = "top-secret-value";
+
+  try {
+    const workspacePath = await createVerificationWorkspace(tempDir, {
+      testFile: "test/runner.test.js",
+      testSource: [
+        'import test from "node:test";',
+        'import assert from "node:assert/strict";',
+        'test("verification env is minimal", () => {',
+        '  assert.equal(process.env.BURAN_TEST_SECRET, undefined);',
+        '});',
+        "",
+      ].join("\n"),
+    });
+    const runId = await prepareVerificationRun(registryRoot, workspacePath, {
+      runId: "run_runner_verification_minimal_env",
+    });
+
+    const result = await runLocalMission({
+      registryRoot,
+      runId,
+      clock: () => new Date("2026-05-16T13:55:00.000Z"),
+    });
+
+    assert.equal(result.outcome, "completed");
+    assert.equal(result.current_state, "internal_review");
+    assert.equal(result.verification.status, "PASS");
+  } finally {
+    if (previousSecret === undefined) delete process.env.BURAN_TEST_SECRET;
+    else process.env.BURAN_TEST_SECRET = previousSecret;
+  }
+});
+
+test("local runner records FAIL verification results and advances to fix_loop", async () => {
+  const tempDir = await makeTempDir();
+  const registryRoot = path.join(tempDir, "registry");
+  const workspacePath = await createVerificationWorkspace(tempDir, {
+    testFile: "test/runner.test.js",
+    passing: false,
+  });
+  const runId = await prepareVerificationRun(registryRoot, workspacePath, {
+    runId: "run_runner_verification_fail",
+    commands: ["node --test test/runner.test.js"],
+  });
+
+  const result = await runLocalMission({
+    registryRoot,
+    runId,
+    clock: () => new Date("2026-05-16T13:55:00.000Z"),
+  });
+
+  assert.equal(result.outcome, "completed");
+  assert.equal(result.current_state, "fix_loop");
+  assert.equal(result.verification.status, "FAIL");
+  assert.equal(result.verification.command_results[0].status, "FAIL");
+
+  const paths = getRunPaths(registryRoot, runId);
+  const snapshot = await readRunSnapshot(paths.runPath);
+  const events = await readEventsFile(paths.eventsPath);
+  assert.equal(snapshot.state, "fix_loop");
+  assert.equal(snapshot.gates.verification.status, "FAIL");
+  assert.equal(events.filter((event) => event.type === "gate.result_recorded").length, 1);
+  assert.equal(events.at(-1).state_after, "fix_loop");
+});
+
+test("local runner blocks unsafe package-script verification commands and records BLOCKED gate evidence", async () => {
+  const tempDir = await makeTempDir();
+  const registryRoot = path.join(tempDir, "registry");
+  const workspacePath = await createVerificationWorkspace(tempDir, {
+    testFile: "test/runner.test.js",
+    passing: true,
+  });
+  const runId = await prepareVerificationRun(registryRoot, workspacePath, {
+    runId: "run_runner_verification_blocked",
+    commands: ["npm test"],
+  });
+
+  const result = await runLocalMission({
+    registryRoot,
+    runId,
+    clock: () => new Date("2026-05-16T13:55:00.000Z"),
+  });
+
+  assert.equal(result.outcome, "completed");
+  assert.equal(result.current_state, "blocked_needs_human");
+  assert.equal(result.verification.status, "BLOCKED");
+  assert.equal(result.verification.problem.code, "unsupported_verification_shape");
+  assert.match(result.verification.problem.message, /must not delegate through package scripts/i);
+  assert.equal(result.verification.artifact_record_status, "recorded");
+  assert.equal(result.verification.gate_result_status, "recorded");
+
+  const paths = getRunPaths(registryRoot, runId);
+  const snapshot = await readRunSnapshot(paths.runPath);
+  const events = await readEventsFile(paths.eventsPath);
+  assert.equal(snapshot.state, "blocked_needs_human");
+  assert.equal(snapshot.gates.verification.status, "BLOCKED");
+  assert.equal(events.filter((event) => event.type === "artifact.recorded" && event.evidence.gate_name === "verification").length, 1);
+  assert.equal(events.filter((event) => event.type === "gate.result_recorded").length, 1);
+  assert.equal(events.filter((event) => event.type === "lock.lease_released").length, 1);
+  assert.equal(events.filter((event) => event.type === "transition").at(-1)?.state_after, "blocked_needs_human");
 });
 
 test("run CLI returns structured JSON for missing and terminal runs", async () => {
