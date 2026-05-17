@@ -8,8 +8,10 @@ import { fileURLToPath } from "node:url";
 import { runBuranCli } from "../src/cli.js";
 import { SCHEMA_VERSION } from "../src/constants.js";
 import { intakePacketListFile, validatePacketListFile } from "../src/buran.js";
+import { validateRunSnapshot } from "../src/execution-run-schema.js";
 import { acquireWorkspaceLease, getLeaseRecordPath } from "../src/locks.js";
 import { normalizeObservabilityConfig, sanitizeForObservability, sanitizePathForOutput, sanitizePublicReportForOutput } from "../src/observability.js";
+import { buildLocalPrProjection } from "../src/pr-projection-adapter.js";
 import { recoverRegistry } from "../src/recovery.js";
 import { transitionRun, writeJsonAtomic } from "../src/registry.js";
 import { validateTransition } from "../src/state-machine.js";
@@ -66,6 +68,125 @@ function goodPacket({ taskId, issue, branch, conflictSurface, repo = "MrFlashAcc
       criteria: ["Confirm lock behavior stays local-only"],
     },
     conflict_surface: Array.isArray(conflictSurface) ? conflictSurface : [conflictSurface],
+  };
+}
+
+function projectionReadySnapshot() {
+  return {
+    schema_version: SCHEMA_VERSION,
+    run_id: "run_projection_ready",
+    task_id: "projection-ready",
+    github: {
+      repo: "MrFlashAccount/example-repo",
+      issue_number: 17,
+      intended_branch: "sergey/feature",
+      base_branch: "develop",
+      pr: {
+        number: 123456,
+        url: "local://github-pr/example/pull/123456",
+        repo: "MrFlashAccount/example-repo",
+        issue_number: 17,
+        head_branch: "sergey/feature",
+        base_branch: "develop",
+        state: "open",
+        draft: false,
+        title: "Buran handoff for feature",
+        projection_mode: "local_fake",
+        projected_at: "2026-05-16T13:57:00.000Z",
+        actor: "runner-test",
+      },
+    },
+    packet: {
+      hash: "hash-projection-ready",
+      source_path: "/tmp/projection-ready.json",
+      approval: { approved: true },
+      sufficiency_status: "PASS",
+      missing_fields: [],
+    },
+    state: "ready_for_manual_review",
+    last_sequence: 7,
+    execution: { current_epoch: 1 },
+    workspace: { id: null, path: null, lease_status: "released" },
+    locks: {
+      repo: "MrFlashAccount/example-repo",
+      issue: 17,
+      branch: "sergey/feature",
+      conflict_surface: ["src/feature"],
+      lease_status: "released",
+    },
+    gates: {
+      verification: {
+        status: "PASS",
+        current_epoch: 1,
+        current_attempt: 1,
+        recorded_from_state: "verification",
+        artifact_refs: [{ path: "artifacts/verification/report.json", sha256: "a".repeat(64) }],
+        recorded_at: "2026-05-16T13:55:00.000Z",
+        actor: "verification-test",
+        idempotency_key: "run:verification:1",
+      },
+      internal_review: {
+        status: "PASS",
+        current_epoch: 1,
+        current_attempt: 1,
+        recorded_from_state: "internal_review",
+        artifact_refs: [{ path: "artifacts/internal-review/report.json", sha256: "b".repeat(64) }],
+        recorded_at: "2026-05-16T13:56:00.000Z",
+        actor: "review-test",
+        idempotency_key: "run:internal-review:1",
+      },
+    },
+    artifacts: {
+      packet: { path: "artifacts/packet.md", sha256: "c".repeat(64) },
+      recorded: { by_path: {} },
+    },
+    projections: {
+      github_pr: {
+        projection_name: "github_pr",
+        projection_target: "github.pr",
+        adapter: "local-github-pr-projection",
+        mode: "local_fake",
+        execution_epoch: 1,
+        recorded_from_state: "pr_ready",
+        last_intent: {
+          artifact_ref: { path: "artifacts/pr/projection-intent-abc123.json", sha256: "d".repeat(64) },
+          recorded_at: "2026-05-16T13:57:00.000Z",
+          actor: "runner-test",
+          idempotency_key: "run:projection:intent",
+          execution_epoch: 1,
+          recorded_from_state: "pr_ready",
+          sequence: 5,
+        },
+        last_result: {
+          status: "projected_local",
+          artifact_ref: { path: "artifacts/pr/projection-result-abc123.json", sha256: "e".repeat(64) },
+          recorded_at: "2026-05-16T13:57:00.000Z",
+          actor: "runner-test",
+          idempotency_key: "run:projection:result",
+          intent_idempotency_key: "run:projection:intent",
+          execution_epoch: 1,
+          recorded_from_state: "pr_ready",
+          sequence: 6,
+          github_pr: {
+            number: 123456,
+            url: "local://github-pr/example/pull/123456",
+            repo: "MrFlashAccount/example-repo",
+            issue_number: 17,
+            head_branch: "sergey/feature",
+            base_branch: "develop",
+            state: "open",
+            draft: false,
+            title: "Buran handoff for feature",
+            projection_mode: "local_fake",
+            projected_at: "2026-05-16T13:57:00.000Z",
+            actor: "runner-test",
+          },
+        },
+      },
+    },
+    created_at: "2026-05-16T13:52:00.000Z",
+    updated_at: "2026-05-16T13:57:00.000Z",
+    terminal_reason: "PR handoff recorded",
   };
 }
 
@@ -345,6 +466,228 @@ test("state machine routes verification BLOCKED to blocked_needs_human instead o
   const blockedToFixLoop = validateTransition({ fromState: "verification", toState: "fix_loop", snapshot: blockedSnapshot });
   assert.equal(blockedToFixLoop.ok, false);
   assert.match(blockedToFixLoop.reason, /requires a current verification FAIL result/);
+});
+
+test("state machine requires a recorded PR projection result before ready_for_manual_review", () => {
+  const missingProjection = validateTransition({
+    fromState: "pr_ready",
+    toState: "ready_for_manual_review",
+    snapshot: {
+      state: "pr_ready",
+      execution: { current_epoch: 1 },
+      github: { repo: "MrFlashAccount/example-repo", issue_number: 17, intended_branch: "sergey/feature", base_branch: "develop", pr: null },
+      projections: {},
+    },
+  });
+  assert.equal(missingProjection.ok, false);
+  assert.match(missingProjection.reason, /recorded PR projection result/i);
+
+  const readyProjection = validateTransition({
+    fromState: "pr_ready",
+    toState: "ready_for_manual_review",
+    snapshot: {
+      state: "pr_ready",
+      execution: { current_epoch: 1 },
+      github: {
+        repo: "MrFlashAccount/example-repo",
+        issue_number: 17,
+        intended_branch: "sergey/feature",
+        base_branch: "develop",
+        pr: {
+          number: 123456,
+          url: "local://github-pr/example/pull/123456",
+          repo: "MrFlashAccount/example-repo",
+          issue_number: 17,
+          head_branch: "sergey/feature",
+          base_branch: "develop",
+          state: "open",
+          draft: false,
+          title: "Buran handoff for feature",
+        },
+      },
+      projections: {
+        github_pr: {
+          execution_epoch: 1,
+          projection_name: "github_pr",
+          projection_target: "github.pr",
+          adapter: "local-github-pr-projection",
+          mode: "local_fake",
+          recorded_from_state: "pr_ready",
+          last_result: {
+            execution_epoch: 1,
+            recorded_from_state: "pr_ready",
+            idempotency_key: "run:projection:result",
+            intent_idempotency_key: "run:projection:intent",
+            status: "projected_local",
+            artifact_ref: { path: "artifacts/pr/projection-result-abc123.json", sha256: "a".repeat(64) },
+            recorded_at: "2026-05-16T13:57:00.000Z",
+            actor: "runner-test",
+            sequence: 7,
+            github_pr: {
+              number: 123456,
+              url: "local://github-pr/example/pull/123456",
+              repo: "MrFlashAccount/example-repo",
+              issue_number: 17,
+              head_branch: "sergey/feature",
+              base_branch: "develop",
+              state: "open",
+              draft: false,
+              title: "Buran handoff for feature",
+            },
+          },
+        },
+      },
+    },
+  });
+  assert.equal(readyProjection.ok, true);
+
+  const failedStatusProjection = validateTransition({
+    fromState: "pr_ready",
+    toState: "ready_for_manual_review",
+    snapshot: {
+      state: "pr_ready",
+      execution: { current_epoch: 1 },
+      github: {
+        repo: "MrFlashAccount/example-repo",
+        issue_number: 17,
+        intended_branch: "sergey/feature",
+        base_branch: "develop",
+        pr: {
+          number: 123456,
+          url: "local://github-pr/example/pull/123456",
+          repo: "MrFlashAccount/example-repo",
+          issue_number: 17,
+          head_branch: "sergey/feature",
+          base_branch: "develop",
+          state: "open",
+          draft: false,
+          title: "Buran handoff for feature",
+        },
+      },
+      projections: {
+        github_pr: {
+          execution_epoch: 1,
+          projection_name: "github_pr",
+          projection_target: "github.pr",
+          adapter: "local-github-pr-projection",
+          mode: "local_fake",
+          recorded_from_state: "pr_ready",
+          last_result: {
+            execution_epoch: 1,
+            recorded_from_state: "pr_ready",
+            idempotency_key: "run:projection:result",
+            intent_idempotency_key: "run:projection:intent",
+            status: "failed_remote_write",
+            artifact_ref: { path: "artifacts/pr/projection-result-abc123.json", sha256: "a".repeat(64) },
+            recorded_at: "2026-05-16T13:57:00.000Z",
+            actor: "runner-test",
+            sequence: 7,
+            github_pr: {},
+          },
+        },
+      },
+    },
+  });
+  assert.equal(failedStatusProjection.ok, false);
+  assert.match(failedStatusProjection.reason, /recorded PR projection result/i);
+
+  const missingUrlProjection = validateTransition({
+    fromState: "pr_ready",
+    toState: "ready_for_manual_review",
+    snapshot: {
+      state: "pr_ready",
+      execution: { current_epoch: 1 },
+      github: {
+        repo: "MrFlashAccount/example-repo",
+        issue_number: 17,
+        intended_branch: "sergey/feature",
+        base_branch: "develop",
+        pr: {
+          number: 123456,
+          url: "",
+          repo: "MrFlashAccount/example-repo",
+          issue_number: 17,
+          head_branch: "sergey/feature",
+          base_branch: "develop",
+          state: "open",
+          draft: false,
+          title: "Buran handoff for feature",
+        },
+      },
+      projections: {
+        github_pr: {
+          execution_epoch: 1,
+          projection_name: "github_pr",
+          projection_target: "github.pr",
+          adapter: "local-github-pr-projection",
+          mode: "local_fake",
+          recorded_from_state: "pr_ready",
+          last_result: {
+            execution_epoch: 1,
+            recorded_from_state: "pr_ready",
+            idempotency_key: "run:projection:result",
+            intent_idempotency_key: "run:projection:intent",
+            status: "projected_local",
+            artifact_ref: { path: "artifacts/pr/projection-result-abc123.json", sha256: "a".repeat(64) },
+            recorded_at: "2026-05-16T13:57:00.000Z",
+            actor: "runner-test",
+            sequence: 7,
+            github_pr: {
+              number: 123456,
+              url: "",
+              repo: "MrFlashAccount/example-repo",
+              issue_number: 17,
+              head_branch: "sergey/feature",
+              base_branch: "develop",
+              state: "open",
+              draft: false,
+              title: "Buran handoff for feature",
+            },
+          },
+        },
+      },
+    },
+  });
+  assert.equal(missingUrlProjection.ok, false);
+  assert.match(missingUrlProjection.reason, /recorded PR projection result/i);
+});
+
+test("run snapshot validation rejects corrupt successful projection state", () => {
+  const corruptSnapshot = projectionReadySnapshot();
+  corruptSnapshot.github.pr = {};
+  corruptSnapshot.projections.github_pr.last_result.github_pr = {};
+
+  const decision = validateRunSnapshot(corruptSnapshot, { expectedRunId: "run_projection_ready" });
+  assert.equal(decision.ok, false);
+  assert.match(decision.error, /github\.pr\.url|successful projections\.github_pr\.last_result requires github\.pr/i);
+});
+
+test("projection adapter sanitizes durable projection artifacts", () => {
+  const projection = buildLocalPrProjection({
+    run_id: "run_projection_sanitized",
+    task_id: `task ${GITHUB_PAT_SECRET} /Users/sergey/private/notes.md`,
+    state: "pr_ready",
+    execution: { current_epoch: 1 },
+    gates: {
+      verification: { status: "PASS", current_epoch: 1, current_attempt: 1, artifact_refs: [] },
+      internal_review: { status: "PASS", current_epoch: 1, current_attempt: 1, artifact_refs: [] },
+    },
+    github: {
+      repo: `MrFlashAccount/${GHP_SECRET}`,
+      issue_number: 17,
+      intended_branch: `feature/${GLPAT_SECRET}/Users/sergey/private`,
+      base_branch: `develop/${GITHUB_PAT_SECRET}`,
+    },
+    projections: {},
+  }, {
+    clock: () => new Date("2026-05-16T13:57:00.000Z"),
+    actor: `runner ${GHP_SECRET}`,
+  });
+
+  const durableText = `${projection.intentArtifactContent}\n${projection.resultArtifactContent}`;
+  assertPublicOutputRedactsSyntheticSecrets(durableText);
+  assert.doesNotMatch(durableText, /\/Users\/sergey\//);
+  assert.match(durableText, /<absolute_path>|\[REDACTED_SECRET\]/);
 });
 
 test("state machine routes internal_review BLOCKED to blocked_needs_human instead of fix_loop", async () => {

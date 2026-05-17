@@ -23,7 +23,7 @@ function packetReport(runId = "run_store_good") {
     source_path: "/tmp/store-packets.json",
     packet_hash: "hash-store-good",
     raw: { task_id: "store-good", approved: true },
-    github: { repo: "MrFlashAccount/example-repo", issue_number: 88, intended_branch: "sergey/store-good" },
+    github: { repo: "MrFlashAccount/example-repo", issue_number: 88, intended_branch: "sergey/store-good", base_branch: "develop" },
     approval: { approved: true },
     sufficiency_status: "PASS",
     missing_fields: [],

@@ -117,6 +117,7 @@ export function normalizePacket(rawPacket, { index = 0, sourcePath = "" } = {}) 
       repo: firstNonEmpty(github.repo, rawPacket.repo),
       issue_number: normalizeIssueNumber(github.issue_number ?? github.issueNumber ?? rawPacket.issue_number ?? rawPacket.issueNumber ?? rawPacket.issue),
       intended_branch: firstNonEmpty(github.intended_branch, github.intendedBranch, github.branch, rawPacket.branch, rawPacket.intended_branch, rawPacket.intendedBranch),
+      base_branch: firstNonEmpty(github.base_branch, github.baseBranch, github.base, rawPacket.base_branch, rawPacket.baseBranch, rawPacket.base),
     },
     approval: normalizeApproval(rawPacket),
     scope: normalizeScope(rawPacket),

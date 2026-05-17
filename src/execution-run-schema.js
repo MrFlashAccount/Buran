@@ -11,6 +11,12 @@ import {
   SCHEMA_VERSION,
   TERMINAL_STATES,
 } from "./constants.js";
+import {
+  appendGithubPrContractErrors,
+  appendGithubPrValidationErrors,
+  appendProjectedPrParityErrors,
+  isSuccessfulProjectionResultStatus,
+} from "./projection-contract.js";
 import { isKnownState } from "./state-machine.js";
 import { isRecord } from "./utils.js";
 
@@ -305,6 +311,78 @@ export function validateGateResultRecordedEvent(event, { expectedRunId = "", exp
   return { ok: errors.length === 0, errors, error: errors.join("; ") };
 }
 
+export function validateProjectionIntentPayload(payload, { fieldPath = "event.evidence" } = {}) {
+  const errors = [];
+  if (!isRecord(payload)) {
+    return { ok: false, errors: [`${fieldPath} must be an object`], error: `${fieldPath} must be an object` };
+  }
+  if (!nonEmptyString(payload.projection_name)) errors.push(`${fieldPath}.projection_name must be a non-empty string`);
+  if (!nonEmptyString(payload.projection_target)) errors.push(`${fieldPath}.projection_target must be a non-empty string`);
+  if (!nonEmptyString(payload.adapter)) errors.push(`${fieldPath}.adapter must be a non-empty string`);
+  if (!nonEmptyString(payload.mode)) errors.push(`${fieldPath}.mode must be a non-empty string`);
+  if (!isPositiveInteger(payload.execution_epoch)) errors.push(`${fieldPath}.execution_epoch must be a positive integer`);
+  if (payload.recorded_from_state !== "pr_ready") errors.push(`${fieldPath}.recorded_from_state must be pr_ready`);
+  if (!isTimestampString(payload.recorded_at)) errors.push(`${fieldPath}.recorded_at must be a timestamp string`);
+  if (!nonEmptyString(payload.actor)) errors.push(`${fieldPath}.actor must be a non-empty string`);
+  if (!nonEmptyString(payload.idempotency_key)) errors.push(`${fieldPath}.idempotency_key must be a non-empty string`);
+  validateArtifactRef(payload.artifact_ref, errors, `${fieldPath}.artifact_ref`);
+  return { ok: errors.length === 0, errors, error: errors.join("; ") };
+}
+
+export function validateProjectionResultPayload(payload, { fieldPath = "event.evidence", snapshot = null } = {}) {
+  const intentDecision = validateProjectionIntentPayload(payload, { fieldPath });
+  const errors = [...intentDecision.errors];
+  if (!nonEmptyString(payload?.status)) errors.push(`${fieldPath}.status must be a non-empty string`);
+  if (!nonEmptyString(payload?.intent_idempotency_key)) errors.push(`${fieldPath}.intent_idempotency_key must be a non-empty string`);
+  if (isSuccessfulProjectionResultStatus(payload?.status)) {
+    appendGithubPrValidationErrors(payload.github_pr, errors, `${fieldPath}.github_pr`);
+    if (snapshot) appendGithubPrContractErrors(snapshot, payload.github_pr, errors, `${fieldPath}.github_pr`);
+  } else if (!(payload.github_pr === null || isRecord(payload.github_pr))) {
+    errors.push(`${fieldPath}.github_pr must be an object or null`);
+  }
+  return { ok: errors.length === 0, errors, error: errors.join("; ") };
+}
+
+export function validateProjectionIntentRecordedEvent(event, { expectedRunId = "", expectedSequence } = {}) {
+  if (!isRecord(event)) return { ok: false, errors: ["event is not an object"], error: "event is not an object" };
+  const errors = [];
+  if (event.schema_version !== SCHEMA_VERSION) errors.push(`unsupported event schema_version: ${event.schema_version}`);
+  if (expectedRunId && event.run_id !== expectedRunId) errors.push(`event run_id mismatch: ${event.run_id}`);
+  if (!Number.isSafeInteger(event.sequence)) errors.push("event sequence is not an integer");
+  else if (expectedSequence !== undefined && event.sequence !== expectedSequence) errors.push(`event sequence ${event.sequence} is not expected ${expectedSequence}`);
+  if (event.type !== "projection.intent_recorded") errors.push(`unexpected event type: ${event.type}`);
+  if (!nonEmptyString(event.actor)) errors.push("event actor is missing");
+  if (!nonEmptyString(event.idempotency_key)) errors.push("event idempotency_key is missing");
+  const payloadDecision = validateProjectionIntentPayload(event.evidence, { fieldPath: "event.evidence" });
+  errors.push(...payloadDecision.errors);
+  if (payloadDecision.ok) {
+    if (event.actor !== event.evidence.actor) errors.push("event actor does not match event.evidence.actor");
+    if (event.idempotency_key !== event.evidence.idempotency_key) errors.push("event idempotency_key does not match event.evidence.idempotency_key");
+    if (event.timestamp !== event.evidence.recorded_at) errors.push("event timestamp does not match event.evidence.recorded_at");
+  }
+  return { ok: errors.length === 0, errors, error: errors.join("; ") };
+}
+
+export function validateProjectionResultRecordedEvent(event, { expectedRunId = "", expectedSequence, snapshot = null } = {}) {
+  if (!isRecord(event)) return { ok: false, errors: ["event is not an object"], error: "event is not an object" };
+  const errors = [];
+  if (event.schema_version !== SCHEMA_VERSION) errors.push(`unsupported event schema_version: ${event.schema_version}`);
+  if (expectedRunId && event.run_id !== expectedRunId) errors.push(`event run_id mismatch: ${event.run_id}`);
+  if (!Number.isSafeInteger(event.sequence)) errors.push("event sequence is not an integer");
+  else if (expectedSequence !== undefined && event.sequence !== expectedSequence) errors.push(`event sequence ${event.sequence} is not expected ${expectedSequence}`);
+  if (event.type !== "projection.result_recorded") errors.push(`unexpected event type: ${event.type}`);
+  if (!nonEmptyString(event.actor)) errors.push("event actor is missing");
+  if (!nonEmptyString(event.idempotency_key)) errors.push("event idempotency_key is missing");
+  const payloadDecision = validateProjectionResultPayload(event.evidence, { fieldPath: "event.evidence", snapshot });
+  errors.push(...payloadDecision.errors);
+  if (payloadDecision.ok) {
+    if (event.actor !== event.evidence.actor) errors.push("event actor does not match event.evidence.actor");
+    if (event.idempotency_key !== event.evidence.idempotency_key) errors.push("event idempotency_key does not match event.evidence.idempotency_key");
+    if (event.timestamp !== event.evidence.recorded_at) errors.push("event timestamp does not match event.evidence.recorded_at");
+  }
+  return { ok: errors.length === 0, errors, error: errors.join("; ") };
+}
+
 export function buildInitialRunSnapshot(report, { createdAt, packetArtifactRef }) {
   return {
     schema_version: SCHEMA_VERSION,
@@ -314,6 +392,7 @@ export function buildInitialRunSnapshot(report, { createdAt, packetArtifactRef }
       repo: report.github.repo || "",
       issue_number: report.github.issue_number || null,
       intended_branch: report.github.intended_branch || "",
+      base_branch: report.github.base_branch || "",
       pr: null,
     },
     packet: {
@@ -449,6 +528,97 @@ export function validateLeaseRecord(record) {
   return { ok: errors.length === 0, errors, error: errors.join("; ") };
 }
 
+function validateProjectionLedgerEntry(entry, errors, fieldPath, { requireResult = false } = {}) {
+  if (!isRecord(entry)) {
+    errors.push(`run.json field ${fieldPath} must be an object`);
+    return;
+  }
+  validateArtifactRef(entry.artifact_ref, errors, `${fieldPath}.artifact_ref`);
+  if (!isTimestampString(entry.recorded_at)) errors.push(`run.json field ${fieldPath}.recorded_at must be a timestamp string`);
+  if (!nonEmptyString(entry.actor)) errors.push(`run.json field ${fieldPath}.actor must be a non-empty string`);
+  if (!nonEmptyString(entry.idempotency_key)) errors.push(`run.json field ${fieldPath}.idempotency_key must be a non-empty string`);
+  if (!isPositiveInteger(entry.execution_epoch)) errors.push(`run.json field ${fieldPath}.execution_epoch must be a positive integer`);
+  if (entry.recorded_from_state !== "pr_ready") errors.push(`run.json field ${fieldPath}.recorded_from_state must be pr_ready`);
+  if (!isPositiveInteger(entry.sequence)) errors.push(`run.json field ${fieldPath}.sequence must be a positive integer`);
+  if (requireResult) {
+    if (!nonEmptyString(entry.intent_idempotency_key)) errors.push(`run.json field ${fieldPath}.intent_idempotency_key must be a non-empty string`);
+    if (!nonEmptyString(entry.status)) errors.push(`run.json field ${fieldPath}.status must be a non-empty string`);
+    if (isSuccessfulProjectionResultStatus(entry.status)) {
+      appendGithubPrValidationErrors(entry.github_pr, errors, `${fieldPath}.github_pr`);
+    } else if (!(entry.github_pr === null || isRecord(entry.github_pr))) {
+      errors.push(`run.json field ${fieldPath}.github_pr must be an object or null`);
+    }
+  }
+}
+
+function validateProjectionSummary(snapshot, projections, errors, currentEpoch) {
+  const githubProjection = projections && hasOwn(projections, "github_pr") ? projections.github_pr : null;
+  const githubPr = snapshot.github?.pr;
+
+  if (!(githubPr === null || isRecord(githubPr))) errors.push("run.json field github.pr must be an object or null");
+  else if (isRecord(githubPr)) appendGithubPrValidationErrors(githubPr, errors, "github.pr");
+
+  if (githubProjection === null || githubProjection === undefined) {
+    if (snapshot.state === "ready_for_manual_review") errors.push("run.json ready_for_manual_review requires projections.github_pr");
+    if (isRecord(githubPr)) errors.push("run.json field github.pr requires matching projections.github_pr.last_result");
+    return;
+  }
+
+  if (!isRecord(githubProjection)) {
+    errors.push("run.json field projections.github_pr must be an object");
+    return;
+  }
+
+  requireString(githubProjection, "projection_name", errors, { pathPrefix: "projections.github_pr", nonEmpty: true });
+  requireString(githubProjection, "projection_target", errors, { pathPrefix: "projections.github_pr", nonEmpty: true });
+  requireString(githubProjection, "adapter", errors, { pathPrefix: "projections.github_pr", nonEmpty: true });
+  requireString(githubProjection, "mode", errors, { pathPrefix: "projections.github_pr", nonEmpty: true });
+  requireInteger(githubProjection, "execution_epoch", errors, { pathPrefix: "projections.github_pr", minimum: 1 });
+  requireString(githubProjection, "recorded_from_state", errors, { pathPrefix: "projections.github_pr", nonEmpty: true });
+  if (hasOwn(githubProjection, "recorded_from_state") && githubProjection.recorded_from_state !== "pr_ready") {
+    errors.push("run.json field projections.github_pr.recorded_from_state must be pr_ready");
+  }
+
+  const hasIntent = hasOwn(githubProjection, "last_intent");
+  const hasResult = hasOwn(githubProjection, "last_result");
+  if (!hasIntent && !hasResult) errors.push("run.json field projections.github_pr must include last_intent or last_result");
+
+  if (hasIntent) validateProjectionLedgerEntry(githubProjection.last_intent, errors, "projections.github_pr.last_intent");
+  if (hasResult) validateProjectionLedgerEntry(githubProjection.last_result, errors, "projections.github_pr.last_result", { requireResult: true });
+
+  if (Number.isSafeInteger(currentEpoch) && currentEpoch > 0 && githubProjection.execution_epoch !== currentEpoch) {
+    errors.push("run.json field projections.github_pr.execution_epoch must match execution.current_epoch");
+  }
+  if (isRecord(githubProjection.last_intent) && githubProjection.last_intent.execution_epoch !== githubProjection.execution_epoch) {
+    errors.push("run.json field projections.github_pr.last_intent.execution_epoch must match projections.github_pr.execution_epoch");
+  }
+  if (isRecord(githubProjection.last_result) && githubProjection.last_result.execution_epoch !== githubProjection.execution_epoch) {
+    errors.push("run.json field projections.github_pr.last_result.execution_epoch must match projections.github_pr.execution_epoch");
+  }
+  if (isRecord(githubProjection.last_result) && isRecord(githubProjection.last_intent)
+    && githubProjection.last_result.intent_idempotency_key !== githubProjection.last_intent.idempotency_key) {
+    errors.push("run.json field projections.github_pr.last_result.intent_idempotency_key must match projections.github_pr.last_intent.idempotency_key");
+  }
+
+  if (isRecord(githubProjection.last_result) && isSuccessfulProjectionResultStatus(githubProjection.last_result.status)) {
+    appendGithubPrContractErrors(snapshot, githubProjection.last_result.github_pr, errors, "projections.github_pr.last_result.github_pr");
+    if (!isRecord(githubPr)) {
+      errors.push("run.json successful projections.github_pr.last_result requires github.pr");
+    } else {
+      appendGithubPrContractErrors(snapshot, githubPr, errors, "github.pr");
+      appendProjectedPrParityErrors(githubPr, githubProjection.last_result.github_pr, errors, "github.pr", "projections.github_pr.last_result.github_pr");
+    }
+  } else if (isRecord(githubPr)) {
+    errors.push("run.json field github.pr requires a successful projections.github_pr.last_result");
+  }
+
+  if (snapshot.state === "ready_for_manual_review") {
+    if (!isRecord(githubProjection.last_result) || !isSuccessfulProjectionResultStatus(githubProjection.last_result.status)) {
+      errors.push("run.json ready_for_manual_review requires a successful projections.github_pr.last_result");
+    }
+  }
+}
+
 export function validateRunSnapshot(snapshot, { expectedRunId = "", mode = "recovery" } = {}) {
   if (!isRecord(snapshot)) return { ok: false, errors: ["run.json is not an object"], error: "run.json is not an object", mode };
   if (snapshot.schema_version !== SCHEMA_VERSION) {
@@ -479,6 +649,9 @@ export function validateRunSnapshot(snapshot, { expectedRunId = "", mode = "reco
     else if (!isNullableInteger(github.issue_number)) errors.push("run.json field github.issue_number must be an integer or null");
     else if (!TERMINAL_STATES.has(snapshot.state) && github.issue_number === null) errors.push("run.json field github.issue_number must be non-null for active states");
     requireString(github, "intended_branch", errors, { pathPrefix: "github", nonEmpty: !TERMINAL_STATES.has(snapshot.state) });
+    if (hasOwn(github, "base_branch") && !(github.base_branch === "" || typeof github.base_branch === "string")) {
+      errors.push("run.json field github.base_branch must be a string when present");
+    }
     if (!hasOwn(github, "pr")) errors.push("run.json missing required field: github.pr");
   }
 
@@ -536,7 +709,8 @@ export function validateRunSnapshot(snapshot, { expectedRunId = "", mode = "reco
       }
     }
   }
-  requireRecord(snapshot, "projections", errors);
+  const projections = requireRecord(snapshot, "projections", errors);
+  if (projections) validateProjectionSummary(snapshot, projections, errors, currentEpoch);
 
   return { ok: errors.length === 0, errors, error: errors.join("; "), mode };
 }

@@ -39,6 +39,7 @@ function packetReport(runId = "run_runner_good", overrides = {}) {
   const repo = overrides.repo || "MrFlashAccount/example-repo";
   const issueNumber = overrides.issueNumber ?? 92;
   const intendedBranch = overrides.intendedBranch || `sergey/${runId}`;
+  const baseBranch = overrides.baseBranch ?? "develop";
   const conflictSurface = overrides.conflictSurface || "src/runner";
 
   return {
@@ -47,7 +48,7 @@ function packetReport(runId = "run_runner_good", overrides = {}) {
     source_path: "/tmp/runner-packets.json",
     packet_hash: `hash-${runId}`,
     raw: { task_id: taskId, approved: true },
-    github: { repo, issue_number: issueNumber, intended_branch: intendedBranch },
+    github: { repo, issue_number: issueNumber, intended_branch: intendedBranch, base_branch: baseBranch },
     approval: { approved: true },
     sufficiency_status: "PASS",
     missing_fields: [],
@@ -91,10 +92,11 @@ async function prepareVerificationRun(registryRoot, workspacePath, {
   commands = ["node --test test/runner.test.js"],
   taskId = "runner-verification",
   issueNumber = 192,
+  baseBranch = "develop",
   reviewCriteria = ["Review the recorded verification artifact"],
   reviewerPlan = "",
 } = {}) {
-  const base = packetReport(runId, { taskId, issueNumber, conflictSurface: "src/verification" });
+  const base = packetReport(runId, { taskId, issueNumber, baseBranch, conflictSurface: "src/verification" });
   const created = await createRunFromPacketReport({
     ...base,
     raw: {
@@ -188,6 +190,34 @@ async function seedInternalReviewGateResult(registryRoot, runId, {
   });
 
   return { artifact, gateResult };
+}
+
+async function preparePrReadyRun(registryRoot, tempDir, {
+  runId = "run_runner_pr_ready",
+  issueNumber = 292,
+  baseBranch = "develop",
+} = {}) {
+  const workspacePath = await createVerificationWorkspace(tempDir, {
+    testFile: "test/runner.test.js",
+    passing: true,
+  });
+  const preparedRunId = await prepareVerificationRun(registryRoot, workspacePath, {
+    runId,
+    issueNumber,
+    baseBranch,
+  });
+  await advanceRunToInternalReview(registryRoot, preparedRunId);
+  await seedInternalReviewGateResult(registryRoot, preparedRunId, {
+    status: "PASS",
+    summary: "Seeded passing internal review",
+  });
+  const reviewResult = await runLocalMission({
+    registryRoot,
+    runId: preparedRunId,
+    clock: () => new Date("2026-05-16T13:56:00.000Z"),
+  });
+  assert.equal(reviewResult.current_state, "pr_ready");
+  return preparedRunId;
 }
 
 test("local runner stages queued run into waiting_for_lock and reruns idempotently without a lease", async () => {
@@ -943,6 +973,180 @@ test("local runner blocks internal review resume when the recorded artifact is m
   ]);
   assert.equal(eventsAfterRetry.length, eventsBeforeRetry.length);
   assert.equal(eventsAfterRetry.filter((event) => event.type === "gate.result_recorded" && event.evidence.gate_name === "internal_review").length, 1);
+});
+
+test("local runner records a local PR projection handoff and advances pr_ready to ready_for_manual_review", async () => {
+  const tempDir = await makeTempDir();
+  const registryRoot = path.join(tempDir, "registry");
+  const runId = await preparePrReadyRun(registryRoot, tempDir, {
+    runId: "run_runner_pr_projection_pass",
+  });
+
+  const result = await runLocalMission({
+    registryRoot,
+    runId,
+    clock: () => new Date("2026-05-16T13:57:00.000Z"),
+  });
+
+  assert.equal(result.outcome, "completed");
+  assert.equal(result.previous_state, "pr_ready");
+  assert.equal(result.current_state, "ready_for_manual_review");
+  assert.deepEqual(result.steps_taken.map((step) => [step.action, step.status, step.to_state]), [
+    ["projection_intent_recorded", "completed", "pr_ready"],
+    ["projection_result_recorded", "completed", "pr_ready"],
+    ["transition", "completed", "ready_for_manual_review"],
+  ]);
+  assert.equal(result.projection.status, "projected_local");
+  assert.equal(result.projection.github_pr.projection_mode, "local_fake");
+  assert.match(result.projection.intent_artifact_ref.path, /^artifacts\/pr\/projection-intent-[a-f0-9]{16}\.json$/);
+  assert.match(result.projection.result_artifact_ref.path, /^artifacts\/pr\/projection-result-[a-f0-9]{16}\.json$/);
+
+  const paths = getRunPaths(registryRoot, runId);
+  const snapshot = await readRunSnapshot(paths.runPath);
+  const events = await readEventsFile(paths.eventsPath);
+  assert.equal(snapshot.state, "ready_for_manual_review");
+  assert.equal(snapshot.github.pr.projection_mode, "local_fake");
+  assert.equal(snapshot.projections.github_pr.last_result.status, "projected_local");
+  assert.equal(events.filter((event) => event.type === "projection.intent_recorded").length, 1);
+  assert.equal(events.filter((event) => event.type === "projection.result_recorded").length, 1);
+  assert.equal(events.filter((event) => event.type === "transition").at(-1)?.state_after, "ready_for_manual_review");
+
+  const projectionArtifact = JSON.parse(await fs.readFile(path.join(paths.runDir, result.projection.result_artifact_ref.path), "utf8"));
+  assert.equal(projectionArtifact.schema_version, "github-pr-projection-result.v1");
+  assert.equal(projectionArtifact.status, "projected_local");
+  assert.equal(projectionArtifact.github_pr.url, snapshot.github.pr.url);
+});
+
+test("registry recovery replays projection semantics and preserves ready_for_manual_review runs", async () => {
+  const tempDir = await makeTempDir();
+  const registryRoot = path.join(tempDir, "registry");
+  const runId = await preparePrReadyRun(registryRoot, tempDir, {
+    runId: "run_runner_pr_projection_recovery",
+  });
+
+  await runLocalMission({
+    registryRoot,
+    runId,
+    clock: () => new Date("2026-05-16T13:57:00.000Z"),
+  });
+
+  const recovery = await recoverRegistry(registryRoot, {
+    clock: () => new Date("2026-05-16T13:58:00.000Z"),
+  });
+
+  assert.equal(recovery.summary.quarantined_runs, 0);
+  assert.equal(recovery.summary.valid_runs, 1);
+  assert.equal(recovery.runs[0].state, "ready_for_manual_review");
+});
+
+test("local runner reuses a recorded PR projection handoff without duplicating projection events", async () => {
+  const tempDir = await makeTempDir();
+  const registryRoot = path.join(tempDir, "registry");
+  const runId = await preparePrReadyRun(registryRoot, tempDir, {
+    runId: "run_runner_pr_projection_resume",
+  });
+
+  await runLocalMission({
+    registryRoot,
+    runId,
+    clock: () => new Date("2026-05-16T13:57:00.000Z"),
+  });
+
+  const paths = getRunPaths(registryRoot, runId);
+  const snapshot = await readRunSnapshot(paths.runPath);
+  const eventsBeforeRetry = await readEventsFile(paths.eventsPath);
+  await writeRunSnapshot(registryRoot, {
+    ...snapshot,
+    state: "pr_ready",
+    terminal_reason: "",
+    updated_at: "2026-05-16T13:57:30.000Z",
+  });
+
+  const retried = await runLocalMission({
+    registryRoot,
+    runId,
+    clock: () => new Date("2026-05-16T13:58:00.000Z"),
+  });
+  const eventsAfterRetry = await readEventsFile(paths.eventsPath);
+
+  assert.equal(retried.outcome, "completed");
+  assert.equal(retried.current_state, "ready_for_manual_review");
+  assert.deepEqual(retried.steps_taken.map((step) => [step.action, step.status, step.to_state]), [
+    ["projection_intent_recorded", "noop", "pr_ready"],
+    ["projection_result_recorded", "noop", "pr_ready"],
+    ["transition", "completed", "ready_for_manual_review"],
+  ]);
+  assert.equal(eventsAfterRetry.filter((event) => event.type === "projection.intent_recorded").length, 1);
+  assert.equal(eventsAfterRetry.filter((event) => event.type === "projection.result_recorded").length, 1);
+  assert.equal(eventsAfterRetry.length, eventsBeforeRetry.length + 1);
+});
+
+test("local runner blocks pr_ready when the recorded PR projection artifact is corrupt", async () => {
+  const tempDir = await makeTempDir();
+  const registryRoot = path.join(tempDir, "registry");
+  const runId = await preparePrReadyRun(registryRoot, tempDir, {
+    runId: "run_runner_pr_projection_corrupt",
+  });
+
+  const first = await runLocalMission({
+    registryRoot,
+    runId,
+    clock: () => new Date("2026-05-16T13:57:00.000Z"),
+  });
+
+  const paths = getRunPaths(registryRoot, runId);
+  await fs.writeFile(path.join(paths.runDir, first.projection.result_artifact_ref.path), "corrupt projection\n", "utf8");
+  const snapshot = await readRunSnapshot(paths.runPath);
+  const eventsBeforeRetry = await readEventsFile(paths.eventsPath);
+  await writeRunSnapshot(registryRoot, {
+    ...snapshot,
+    state: "pr_ready",
+    terminal_reason: "",
+    updated_at: "2026-05-16T13:57:30.000Z",
+  });
+
+  const retried = await runLocalMission({
+    registryRoot,
+    runId,
+    clock: () => new Date("2026-05-16T13:58:00.000Z"),
+  });
+  const eventsAfterRetry = await readEventsFile(paths.eventsPath);
+
+  assert.equal(retried.outcome, "blocked");
+  assert.equal(retried.current_state, "pr_ready");
+  assert.equal(retried.projection.problem.code, "pr_projection_artifact_corrupt");
+  assert.deepEqual(retried.steps_taken.map((step) => [step.action, step.status, step.to_state]), [
+    ["projection_intent_recorded", "noop", "pr_ready"],
+    ["projection_result_recorded", "blocked", "pr_ready"],
+  ]);
+  assert.equal(eventsAfterRetry.length, eventsBeforeRetry.length);
+  assert.equal(eventsAfterRetry.filter((event) => event.type === "projection.result_recorded").length, 1);
+});
+
+test("local runner blocks pr_ready when base branch is missing from the local contract", async () => {
+  const tempDir = await makeTempDir();
+  const registryRoot = path.join(tempDir, "registry");
+  const runId = await preparePrReadyRun(registryRoot, tempDir, {
+    runId: "run_runner_pr_projection_missing_base_branch",
+    baseBranch: "",
+  });
+
+  const result = await runLocalMission({
+    registryRoot,
+    runId,
+    clock: () => new Date("2026-05-16T13:57:00.000Z"),
+  });
+
+  const paths = getRunPaths(registryRoot, runId);
+  const events = await readEventsFile(paths.eventsPath);
+  assert.equal(result.outcome, "blocked");
+  assert.equal(result.current_state, "pr_ready");
+  assert.equal(result.projection.problem.code, "pr_projection_missing_base_branch");
+  assert.deepEqual(result.steps_taken.map((step) => [step.action, step.status, step.to_state]), [
+    ["projection_result_recorded", "blocked", "pr_ready"],
+  ]);
+  assert.equal(events.filter((event) => event.type === "projection.intent_recorded").length, 0);
+  assert.equal(events.filter((event) => event.type === "projection.result_recorded").length, 0);
 });
 
 test("run CLI returns structured JSON for missing and terminal runs", async () => {

@@ -2,7 +2,7 @@
 
 Buran executes only approved implementation packets. State is local-first: each transition is recorded in `events.jsonl` and reflected in `run.json`.
 
-`pr_ready` means ready-for-PR creation/update: verification and internal review have passed, but PR creation has not happened yet. The PR exists only after the `pr_ready` -> `ready_for_manual_review` transition records the handoff.
+`pr_ready` means ready-for-PR creation/update: verification and internal review have passed, but PR creation has not happened yet. In the current local-only slice, the `pr_ready` -> `ready_for_manual_review` transition records a deterministic fake/local PR projection handoff without a remote GitHub write.
 
 Gate-bearing states are epoch-aware in `execution-run.v2`: entering `verification` from `running` or `fix_loop` increments `execution.current_epoch` and resets both gate heads to `PENDING` for the new epoch.
 
@@ -64,7 +64,7 @@ Engine rules:
 | `internal_review` | `fix_loop` | Fresh internal-review gate head for the current epoch is `FAIL`, and fixes remain inside approved scope. |
 | `internal_review` | `blocked_needs_human` | Fresh internal-review gate head for the current epoch is `BLOCKED`, so human/manual review evidence is still required. |
 | `fix_loop` | `blocked_needs_human` | Required fix exceeds the approved packet or needs new architecture/planning. |
-| `pr_ready` | `ready_for_manual_review` | PR exists and projection journal records handoff. |
+| `pr_ready` | `ready_for_manual_review` | A coherent PR projection result is recorded in the local journal for the current epoch; the current local adapter may satisfy this with a fake/local handoff artifact instead of a remote write. |
 
 ## Gate rules
 

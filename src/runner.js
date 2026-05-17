@@ -5,8 +5,9 @@ import { SCHEMA_VERSION, TERMINAL_STATES } from "./constants.js";
 import { buildImplementationDispatchIntent } from "./implementation-dispatch.js";
 import { executeInternalReviewGate } from "./internal-review-adapter.js";
 import { acquireWorkspaceLease } from "./locks.js";
+import { buildLocalPrProjection } from "./pr-projection-adapter.js";
 import { executeVerificationGate } from "./verification-adapter.js";
-import { getRunPaths, readRunSnapshot, recordArtifact, recordGateResult, transitionRun } from "./registry-store.js";
+import { getRunPaths, readRunSnapshot, recordArtifact, recordGateResult, recordProjectionIntent, recordProjectionResult, transitionRun } from "./registry-store.js";
 import { nonEmptyString, sha256Hex } from "./utils.js";
 import { inspectWorkspacePreparation } from "./workspace-preparation.js";
 
@@ -53,6 +54,7 @@ function buildRunnerReport({
   implementationDispatch = null,
   verification = null,
   internalReview = null,
+  projection = null,
 } = {}) {
   return {
     schema_version: SCHEMA_VERSION,
@@ -70,6 +72,7 @@ function buildRunnerReport({
     implementation_dispatch: implementationDispatch,
     verification,
     internal_review: internalReview,
+    projection,
     external_side_effects: false,
   };
 }
@@ -108,6 +111,18 @@ function internalReviewTransitionReason(status) {
   if (status === "PASS") return "internal review passed";
   if (status === "FAIL") return "internal review failed inside approved scope";
   return "internal review blocked on unsupported or unsafe surface";
+}
+
+function projectionTransitionReason() {
+  return "PR handoff recorded";
+}
+
+function projectionProblemCode(suffix) {
+  return `pr_projection_${suffix}`;
+}
+
+function buildProjectionProblem(code, message, extra = {}) {
+  return buildIssue(projectionProblemCode(code), message, extra);
 }
 
 async function readRecordedArtifactJson(runDir, artifactRef) {
@@ -625,6 +640,155 @@ async function runInternalReviewStage({ registryRoot, runId, current, previousSt
   });
 }
 
+async function runPrReadyStage({ registryRoot, runId, current, previousState, stepsTaken, blockers, warnings, workspacePreparation, implementationDispatch, verification, internalReview, clock, actor } = {}) {
+  let projection = null;
+  let plannedProjection;
+
+  try {
+    plannedProjection = buildLocalPrProjection(current, { clock, actor });
+    const intentRecorded = await recordProjectionIntent(registryRoot, runId, {
+      projection_name: plannedProjection.projectionName,
+      projection_target: plannedProjection.projectionTarget,
+      adapter: plannedProjection.adapter,
+      mode: plannedProjection.mode,
+      execution_epoch: plannedProjection.executionEpoch,
+      recorded_from_state: "pr_ready",
+      idempotency_key: plannedProjection.intentIdempotencyKey,
+      artifactPath: plannedProjection.intentArtifactPath,
+      content: plannedProjection.intentArtifactContent,
+      actor: plannedProjection.actor,
+      recorded_at: plannedProjection.recordedAt,
+    });
+    current = intentRecorded.run;
+    stepsTaken.push(buildStep({
+      action: "projection_intent_recorded",
+      status: intentRecorded.status === "noop" ? "noop" : "completed",
+      fromState: "pr_ready",
+      toState: "pr_ready",
+      detail: "PR projection intent was recorded locally without a remote GitHub write.",
+      sequence: intentRecorded.event?.sequence ?? null,
+      artifactPath: intentRecorded.artifact_ref.path,
+      artifactSha256: intentRecorded.artifact_ref.sha256,
+    }));
+
+    const resultRecorded = await recordProjectionResult(registryRoot, runId, {
+      projection_name: plannedProjection.projectionName,
+      projection_target: plannedProjection.projectionTarget,
+      adapter: plannedProjection.adapter,
+      mode: plannedProjection.mode,
+      execution_epoch: plannedProjection.executionEpoch,
+      recorded_from_state: "pr_ready",
+      idempotency_key: plannedProjection.resultIdempotencyKey,
+      intent_idempotency_key: plannedProjection.intentIdempotencyKey,
+      status: plannedProjection.result.status,
+      github_pr: plannedProjection.githubPr,
+      artifactPath: plannedProjection.resultArtifactPath,
+      content: plannedProjection.resultArtifactContent,
+      actor: plannedProjection.actor,
+      recorded_at: plannedProjection.recordedAt,
+    });
+    current = resultRecorded.run;
+    projection = {
+      ...plannedProjection.publicReport,
+      intent_artifact_ref: intentRecorded.artifact_ref,
+      result_artifact_ref: resultRecorded.artifact_ref,
+      intent_record_status: intentRecorded.status,
+      result_record_status: resultRecorded.status,
+    };
+    stepsTaken.push(buildStep({
+      action: "projection_result_recorded",
+      status: resultRecorded.status === "noop" ? "noop" : "completed",
+      fromState: "pr_ready",
+      toState: "pr_ready",
+      detail: "PR projection result was recorded locally and mirrored into github.pr without a remote GitHub write.",
+      sequence: resultRecorded.event?.sequence ?? null,
+      artifactPath: resultRecorded.artifact_ref.path,
+      artifactSha256: resultRecorded.artifact_ref.sha256,
+    }));
+  } catch (error) {
+    const message = error?.message || String(error);
+    const problem = error?.code === "projection_missing_base_branch"
+      ? buildProjectionProblem("missing_base_branch", message)
+      : /different hash/i.test(message)
+      ? buildProjectionProblem("artifact_corrupt", `Recorded PR projection cannot be resumed because its local artifact is corrupt: ${message}`)
+      : buildProjectionProblem("record_failed", `PR projection handoff could not be recorded locally: ${message}`);
+    projection = {
+      ...(plannedProjection?.publicReport || { status: "blocked", adapter: "local-github-pr-projection", mode: "local_fake" }),
+      intent_record_status: "blocked",
+      result_record_status: "blocked",
+      problem,
+    };
+    blockers.push(problem);
+    stepsTaken.push(buildStep({
+      action: "projection_result_recorded",
+      status: "blocked",
+      fromState: "pr_ready",
+      toState: "pr_ready",
+      detail: problem.message,
+    }));
+    return buildRunnerReport({
+      registryRoot,
+      runId,
+      previousState,
+      currentState: current.state,
+      outcome: "blocked",
+      stepsTaken,
+      blockers,
+      warnings,
+      workspacePreparation,
+      implementationDispatch,
+      verification,
+      internalReview,
+      projection,
+    });
+  }
+
+  const transitioned = await transitionRun(registryRoot, runId, {
+    toState: "ready_for_manual_review",
+    actor,
+    evidence: {
+      reason: projectionTransitionReason(),
+      pr_projection: {
+        adapter: plannedProjection.adapter,
+        mode: plannedProjection.mode,
+        execution_epoch: plannedProjection.executionEpoch,
+        intent_idempotency_key: plannedProjection.intentIdempotencyKey,
+        result_idempotency_key: plannedProjection.resultIdempotencyKey,
+        github_pr: plannedProjection.githubPr,
+        result_artifact_ref: projection.result_artifact_ref,
+      },
+    },
+    clock,
+  });
+  current = transitioned.run;
+  stepsTaken.push(buildStep({
+    action: "transition",
+    status: "completed",
+    fromState: "pr_ready",
+    toState: current.state,
+    detail: "Recorded PR projection handoff advanced the run to ready_for_manual_review.",
+    sequence: transitioned.event.sequence,
+    artifactPath: projection.result_artifact_ref.path,
+    artifactSha256: projection.result_artifact_ref.sha256,
+  }));
+
+  return buildRunnerReport({
+    registryRoot,
+    runId,
+    previousState,
+    currentState: current.state,
+    outcome: "completed",
+    stepsTaken,
+    blockers,
+    warnings,
+    workspacePreparation,
+    implementationDispatch,
+    verification,
+    internalReview,
+    projection,
+  });
+}
+
 export async function runLocalMission({ registryRoot, runId, workspaceId = "", workspacePath = "", ttlMs = "", clock = () => new Date(), actor = RUNNER_ACTOR } = {}) {
   if (!registryRoot) throw new Error("registryRoot is required for local mission runner");
   if (!runId) throw new Error("runId is required for local mission runner");
@@ -927,7 +1091,25 @@ export async function runLocalMission({ registryRoot, runId, workspaceId = "", w
     });
   }
 
-  if (["fix_loop", "pr_ready"].includes(current.state)) {
+  if (current.state === "pr_ready") {
+    return runPrReadyStage({
+      registryRoot,
+      runId,
+      current,
+      previousState,
+      stepsTaken,
+      blockers,
+      warnings,
+      workspacePreparation,
+      implementationDispatch,
+      verification,
+      internalReview,
+      clock,
+      actor,
+    });
+  }
+
+  if (["fix_loop"].includes(current.state)) {
     blockers.push(buildIssue("stage_not_implemented", unsupportedStageMessage(current.state)));
     return buildRunnerReport({
       registryRoot,

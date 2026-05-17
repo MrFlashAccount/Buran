@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { SCHEMA_VERSION } from "../src/constants.js";
+import { buildLocalPrProjection } from "../src/pr-projection-adapter.js";
 import { acquireWorkspaceLease } from "../src/locks.js";
 import { recoverRegistry } from "../src/recovery.js";
 import {
@@ -14,6 +15,8 @@ import {
   readRunSnapshot,
   recordArtifact,
   recordGateResult,
+  recordProjectionIntent,
+  recordProjectionResult,
   transitionRun,
 } from "../src/registry-store.js";
 
@@ -28,7 +31,7 @@ function packetReport(runId = "run_gate_good") {
     source_path: "/tmp/gate-packets.json",
     packet_hash: "hash-gate-good",
     raw: { task_id: "gate-good", approved: true },
-    github: { repo: "MrFlashAccount/example-repo", issue_number: 91, intended_branch: "sergey/gate-good" },
+    github: { repo: "MrFlashAccount/example-repo", issue_number: 91, intended_branch: "sergey/gate-good", base_branch: "develop" },
     approval: { approved: true },
     sufficiency_status: "PASS",
     missing_fields: [],
@@ -80,6 +83,48 @@ async function recordVerificationPass(registryRoot, runId) {
   };
   const result = await recordGateResult(registryRoot, runId, resultPayload);
   return { artifact, result, resultPayload };
+}
+
+async function preparePrReadyRun(registryRoot, { runId = "run_gate_pr_ready" } = {}) {
+  const run = await prepareVerificationRun(registryRoot, { runId });
+  await recordVerificationPass(registryRoot, run.run_id);
+  await transitionRun(registryRoot, run.run_id, {
+    toState: "internal_review",
+    actor: "gate-test",
+    evidence: { reason: "verification passed" },
+    clock: () => new Date("2026-05-16T13:57:00.000Z"),
+  });
+
+  const reviewArtifact = await recordArtifact(registryRoot, run.run_id, {
+    artifactPath: "artifacts/internal-review/report.json",
+    content: JSON.stringify({ status: "PASS" }, null, 2),
+    gate_name: "internal_review",
+    execution_epoch: 1,
+    gate_attempt: 1,
+    recorded_from_state: "internal_review",
+    actor: "review-test",
+    recorded_at: "2026-05-16T13:58:00.000Z",
+    provenance: { kind: "internal-review-json" },
+  });
+  await recordGateResult(registryRoot, run.run_id, {
+    gate_name: "internal_review",
+    execution_epoch: 1,
+    gate_attempt: 1,
+    recorded_from_state: "internal_review",
+    status: "PASS",
+    artifact_refs: [reviewArtifact.artifact_ref],
+    recorded_at: "2026-05-16T13:59:00.000Z",
+    actor: "review-test",
+    idempotency_key: `${run.run_id}:internal-review:1:pass`,
+  });
+
+  const ready = await transitionRun(registryRoot, run.run_id, {
+    toState: "pr_ready",
+    actor: "gate-test",
+    evidence: { reason: "internal review passed" },
+    clock: () => new Date("2026-05-16T14:00:00.000Z"),
+  });
+  return ready.run.run_id;
 }
 
 test("artifact recording writes immutable ledger state with epoch and attempt provenance", async () => {
@@ -247,6 +292,78 @@ test("internal review gate results open pr_ready on PASS and blocked_needs_human
   });
   assert.equal(blockedNeedsHuman.run.state, "blocked_needs_human");
   assert.equal(blockedNeedsHuman.run.gates.internal_review.status, "BLOCKED");
+});
+
+test("projection result recording rejects semantically invalid successful PR handoff payloads", async () => {
+  const tempDir = await makeTempDir();
+  const registryRoot = path.join(tempDir, "registry");
+  const runId = await preparePrReadyRun(registryRoot, { runId: "run_gate_projection_validation" });
+  const paths = getRunPaths(registryRoot, runId);
+  const snapshot = await readRunSnapshot(paths.runPath);
+  const projection = buildLocalPrProjection(snapshot, {
+    clock: () => new Date("2026-05-16T14:01:00.000Z"),
+  });
+
+  await recordProjectionIntent(registryRoot, runId, {
+    projection_name: projection.projectionName,
+    projection_target: projection.projectionTarget,
+    adapter: projection.adapter,
+    mode: projection.mode,
+    execution_epoch: projection.executionEpoch,
+    recorded_from_state: "pr_ready",
+    idempotency_key: projection.intentIdempotencyKey,
+    artifactPath: projection.intentArtifactPath,
+    content: projection.intentArtifactContent,
+    actor: projection.actor,
+    recorded_at: projection.recordedAt,
+  });
+
+  await assert.rejects(
+    () => recordProjectionResult(registryRoot, runId, {
+      projection_name: projection.projectionName,
+      projection_target: projection.projectionTarget,
+      adapter: projection.adapter,
+      mode: projection.mode,
+      execution_epoch: projection.executionEpoch,
+      recorded_from_state: "pr_ready",
+      idempotency_key: projection.resultIdempotencyKey,
+      intent_idempotency_key: projection.intentIdempotencyKey,
+      status: "projected_local",
+      github_pr: {},
+      artifactPath: projection.resultArtifactPath,
+      content: projection.resultArtifactContent,
+      actor: projection.actor,
+      recorded_at: projection.recordedAt,
+    }),
+    /github_pr\.(number|url)|github_pr\.repo|github_pr\.head_branch|github_pr\.base_branch/,
+  );
+
+  await assert.rejects(
+    () => recordProjectionResult(registryRoot, runId, {
+      projection_name: projection.projectionName,
+      projection_target: projection.projectionTarget,
+      adapter: projection.adapter,
+      mode: projection.mode,
+      execution_epoch: projection.executionEpoch,
+      recorded_from_state: "pr_ready",
+      idempotency_key: projection.resultIdempotencyKey,
+      intent_idempotency_key: projection.intentIdempotencyKey,
+      status: "projected_local",
+      github_pr: {
+        ...projection.githubPr,
+        url: "",
+      },
+      artifactPath: projection.resultArtifactPath,
+      content: projection.resultArtifactContent,
+      actor: projection.actor,
+      recorded_at: projection.recordedAt,
+    }),
+    /github_pr\.url/,
+  );
+
+  const events = await readEventsFile(paths.eventsPath);
+  assert.equal(events.filter((event) => event.type === "projection.intent_recorded").length, 1);
+  assert.equal(events.filter((event) => event.type === "projection.result_recorded").length, 0);
 });
 
 test("new verification epoch resets gate heads and stale PASS no longer opens transitions", async () => {

@@ -10,10 +10,16 @@ import {
   buildRecordedArtifactSummary,
   validateArtifactRecordedPayload,
   validateGateResultPayload,
+  validateProjectionResultPayload,
 } from "./execution-run-schema.js";
 import { appendJsonLine, writeJsonAtomic, writeTextAtomic } from "./fs-atomic.js";
+import { isSuccessfulProjectionResultStatus, mergeProjectionSnapshot, sanitizeProjectionDurableValue } from "./projection-contract.js";
 import { applyTransitionToSnapshot, buildNonTransitionEvent, buildTransitionEvent, isKnownState } from "./state-machine.js";
-import { canonicalJson, nonEmptyString, sha256Hex } from "./utils.js";
+import { canonicalJson, isRecord, nonEmptyString, sha256Hex } from "./utils.js";
+
+function hasOwn(value, key) {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
 
 function artifactRef(runDir, absolutePath, content) {
   return {
@@ -212,6 +218,138 @@ function assertArtifactRefsAvailable(snapshot, payload) {
     if (summary.execution_epoch !== payload.execution_epoch) throw new Error(`gate result references artifact ${ref.path} from epoch ${summary.execution_epoch}`);
     if (summary.gate_attempt !== payload.gate_attempt) throw new Error(`gate result references artifact ${ref.path} from attempt ${summary.gate_attempt}`);
   }
+}
+
+function isTimestampString(value) {
+  return typeof value === "string" && value.trim() && !Number.isNaN(Date.parse(value));
+}
+
+function validateProjectionPayload(payload, { type }) {
+  const errors = [];
+  if (!isRecord(payload)) errors.push("projection payload must be an object");
+  if (!nonEmptyString(type)) errors.push("projection event type is required");
+  if (!nonEmptyString(payload?.projection_name)) errors.push("projection_name must be a non-empty string");
+  if (!nonEmptyString(payload?.projection_target)) errors.push("projection_target must be a non-empty string");
+  if (!nonEmptyString(payload?.adapter)) errors.push("adapter must be a non-empty string");
+  if (!nonEmptyString(payload?.mode)) errors.push("mode must be a non-empty string");
+  if (!Number.isSafeInteger(payload?.execution_epoch) || payload.execution_epoch < 1) errors.push("execution_epoch must be a positive integer");
+  if (payload?.recorded_from_state !== "pr_ready") errors.push("recorded_from_state must be pr_ready");
+  if (!isTimestampString(payload?.recorded_at)) errors.push("recorded_at must be a timestamp string");
+  if (!nonEmptyString(payload?.actor)) errors.push("actor must be a non-empty string");
+  if (!nonEmptyString(payload?.idempotency_key)) errors.push("idempotency_key must be a non-empty string");
+  if (!isRecord(payload?.artifact_ref) || !nonEmptyString(payload?.artifact_ref?.path) || !nonEmptyString(payload?.artifact_ref?.sha256)) {
+    errors.push("artifact_ref must include non-empty path and sha256");
+  }
+  if (type === "projection.result_recorded") {
+    const projectionDecision = validateProjectionResultPayload(payload);
+    errors.push(...projectionDecision.errors.map((error) => error.replace(/^event\.evidence\./, "")));
+  }
+  return { ok: errors.length === 0, errors, error: errors.join("; ") };
+}
+
+function ensureProjectionWritePhase(snapshot, payload, type) {
+  if (!snapshot?.run_id) throw new Error(`${type} requires a run snapshot`);
+  if (isTerminal(snapshot)) throw new Error(`${type} is forbidden in terminal state ${snapshot.state}`);
+  if (snapshot.state !== "pr_ready") throw new Error(`${type} requires state pr_ready; current state: ${snapshot.state}`);
+  if (!Number.isSafeInteger(snapshot.execution?.current_epoch) || snapshot.execution.current_epoch < 1) {
+    throw new Error(`${type} requires an active execution epoch`);
+  }
+  if (payload.execution_epoch !== snapshot.execution.current_epoch) {
+    throw new Error(`${type} execution_epoch ${payload.execution_epoch} does not match current epoch ${snapshot.execution.current_epoch}`);
+  }
+}
+
+async function recordProjectionEvent(registryRoot, runId, {
+  type,
+  artifactPath,
+  content,
+  actor = "registry",
+  recorded_at = new Date().toISOString(),
+  ...payload
+} = {}) {
+  const eventType = type;
+  const payloadDecision = validateProjectionPayload({
+    ...payload,
+    actor,
+    recorded_at,
+    artifact_ref: { path: "placeholder", sha256: "placeholder" },
+  }, { type: eventType });
+  if (!payloadDecision.ok) {
+    const filtered = payloadDecision.errors.filter((error) => !error.startsWith("artifact_ref "));
+    if (filtered.length > 0) throw new Error(filtered.join("; "));
+  }
+
+  const paths = getRunPaths(registryRoot, runId);
+  const snapshot = await readRunSnapshot(paths.runPath);
+  ensureProjectionWritePhase(snapshot, payload, eventType);
+
+  const resolved = resolveArtifactPath(paths.runDir, artifactPath);
+  const sanitizedContentText = sanitizeProjectionDurableValue(Buffer.isBuffer(content) ? content.toString("utf8") : String(content ?? ""));
+  const contentBuffer = Buffer.from(sanitizedContentText, "utf8");
+  const artifact_ref = { path: resolved.relativePath, sha256: sha256Hex(contentBuffer) };
+  const sanitizedPayload = {
+    ...payload,
+    ...(hasOwn(payload, "github_pr") ? { github_pr: sanitizeProjectionDurableValue(payload.github_pr) } : {}),
+    ...(hasOwn(payload, "status") ? { status: sanitizeProjectionDurableValue(payload.status) } : {}),
+  };
+  const sanitizedActor = sanitizeProjectionDurableValue(actor);
+  const eventPayload = {
+    ...sanitizedPayload,
+    artifact_ref,
+    actor: sanitizedActor,
+    recorded_at,
+  };
+  const eventPayloadDecision = validateProjectionPayload(eventPayload, { type: eventType });
+  if (!eventPayloadDecision.ok) throw new Error(eventPayloadDecision.error);
+  if (eventType === "projection.result_recorded" && isSuccessfulProjectionResultStatus(eventPayload.status)) {
+    const semanticDecision = validateProjectionResultPayload(eventPayload, { snapshot });
+    if (!semanticDecision.ok) throw new Error(semanticDecision.error);
+  }
+
+  const priorEvents = await readEventsByIdempotency(paths.eventsPath, eventType, payload.idempotency_key);
+  if (priorEvents.length > 0) {
+    const matchingEvent = priorEvents.find((event) => samePayload(event.evidence || {}, eventPayload));
+    if (!matchingEvent) throw new Error(`${eventType} idempotency key ${payload.idempotency_key} conflicts with an existing payload`);
+
+    await verifyOrRecoverArtifactFile(resolved, contentBuffer, artifact_ref.sha256);
+
+    const repairedSnapshot = mergeProjectionSnapshot(snapshot, { ...eventPayload, type: eventType }, matchingEvent.sequence);
+    if (!samePayload(repairedSnapshot, snapshot)) {
+      await writeJsonAtomic(paths.runPath, repairedSnapshot);
+    }
+    return {
+      status: "noop",
+      run: repairedSnapshot,
+      artifact_ref,
+      event: matchingEvent,
+    };
+  }
+
+  const existingFile = await readArtifactIfExists(resolved.absolutePath);
+  if (existingFile.exists && existingFile.sha256 !== artifact_ref.sha256) {
+    throw new Error(`artifact path ${resolved.relativePath} already exists with different hash`);
+  }
+
+  await writeTextAtomic(resolved.absolutePath, contentBuffer.toString("utf8"));
+  const sequence = await nextSequence(paths, snapshot);
+  const event = buildNonTransitionEvent({
+    runId: snapshot.run_id,
+    sequence,
+    timestamp: recorded_at,
+    type: eventType,
+    actor: sanitizedActor,
+    evidence: eventPayload,
+    idempotencyKey: payload.idempotency_key,
+  });
+  const nextSnapshot = mergeProjectionSnapshot(snapshot, { ...eventPayload, type: eventType }, sequence);
+  await appendJsonLine(paths.eventsPath, event);
+  await writeJsonAtomic(paths.runPath, nextSnapshot);
+  return {
+    status: "recorded",
+    run: nextSnapshot,
+    artifact_ref,
+    event,
+  };
 }
 
 export async function readRunSnapshot(filePath) {
@@ -606,6 +744,25 @@ export async function recordGateResult(registryRoot, runId, payload = {}) {
   await appendJsonLine(paths.eventsPath, event);
   await writeJsonAtomic(paths.runPath, nextSnapshot);
   return { status: "recorded", run: nextSnapshot, event };
+}
+
+export async function recordProjectionIntent(registryRoot, runId, payload = {}) {
+  return recordProjectionEvent(registryRoot, runId, {
+    ...payload,
+    type: "projection.intent_recorded",
+  });
+}
+
+export async function recordProjectionResult(registryRoot, runId, payload = {}) {
+  const paths = getRunPaths(registryRoot, runId);
+  const intentEvents = await readEventsByIdempotency(paths.eventsPath, "projection.intent_recorded", payload.intent_idempotency_key);
+  if (intentEvents.length === 0) {
+    throw new Error(`projection.result_recorded requires a prior projection.intent_recorded event for ${payload.intent_idempotency_key}`);
+  }
+  return recordProjectionEvent(registryRoot, runId, {
+    ...payload,
+    type: "projection.result_recorded",
+  });
 }
 
 function isRecordLike(value) {

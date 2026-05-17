@@ -9,8 +9,12 @@ import {
   findArtifactRefs,
   validateArtifactRecordedEvent,
   validateGateResultRecordedEvent,
+  validateProjectionIntentRecordedEvent,
+  validateProjectionResultPayload,
+  validateProjectionResultRecordedEvent,
   validateRunSnapshot,
 } from "./execution-run-schema.js";
+import { mergeProjectionSnapshot } from "./projection-contract.js";
 import { recoverLeaseRecords } from "./locks.js";
 import { getRegistryPaths, rebuildIndexes, writeRegistryReport } from "./registry-store.js";
 import { applyTransitionToSnapshot, validateTransition, validateTransitionEvent } from "./state-machine.js";
@@ -83,6 +87,13 @@ function replaySeed(snapshot) {
     run_id: snapshot.run_id,
     state: null,
     last_sequence: 0,
+    github: {
+      repo: snapshot.github?.repo || "",
+      issue_number: snapshot.github?.issue_number ?? null,
+      intended_branch: snapshot.github?.intended_branch || "",
+      base_branch: snapshot.github?.base_branch || "",
+      pr: null,
+    },
     execution: {
       current_epoch: 0,
     },
@@ -95,6 +106,7 @@ function replaySeed(snapshot) {
         by_path: {},
       },
     },
+    projections: {},
   };
 }
 
@@ -105,12 +117,20 @@ function compareSemanticSlice(snapshot, replay) {
     execution: snapshot.execution,
     gates: snapshot.gates,
     artifacts: snapshot.artifacts?.recorded || { by_path: {} },
+    github: {
+      pr: snapshot.github?.pr ?? null,
+    },
+    projections: snapshot.projections || {},
   }) === canonicalJson({
     state: replay.state,
     last_sequence: replay.last_sequence,
     execution: replay.execution,
     gates: replay.gates,
     artifacts: replay.artifacts.recorded,
+    github: {
+      pr: replay.github?.pr ?? null,
+    },
+    projections: replay.projections,
   });
 }
 
@@ -167,6 +187,47 @@ function validateGateReplaySemantics(snapshot, payload, idempotencyPayloads) {
   return "";
 }
 
+function projectionHead(snapshot) {
+  return snapshot.projections?.github_pr || null;
+}
+
+function validateProjectionIntentReplaySemantics(snapshot, payload, idempotencyPayloads) {
+  if (snapshot.state !== "pr_ready") return `projection.intent_recorded requires current state pr_ready; got ${snapshot.state}`;
+  if (payload.recorded_from_state !== snapshot.state) return `projection.intent_recorded recorded_from_state ${payload.recorded_from_state} does not match current state ${snapshot.state}`;
+  if (payload.execution_epoch !== snapshot.execution.current_epoch) return `projection.intent_recorded execution_epoch ${payload.execution_epoch} does not match current epoch ${snapshot.execution.current_epoch}`;
+
+  const payloadKey = payload.idempotency_key;
+  const canonicalPayload = canonicalJson(payload);
+  const priorPayload = idempotencyPayloads.get(payloadKey);
+  if (priorPayload && priorPayload !== canonicalPayload) return `projection.intent_recorded idempotency key ${payloadKey} conflicts with a different payload`;
+
+  const projection = projectionHead(snapshot);
+  if (projection?.last_intent) return "projection.intent_recorded duplicated a current-epoch projection intent";
+  return "";
+}
+
+function validateProjectionResultReplaySemantics(snapshot, payload, idempotencyPayloads) {
+  if (snapshot.state !== "pr_ready") return `projection.result_recorded requires current state pr_ready; got ${snapshot.state}`;
+  if (payload.recorded_from_state !== snapshot.state) return `projection.result_recorded recorded_from_state ${payload.recorded_from_state} does not match current state ${snapshot.state}`;
+  if (payload.execution_epoch !== snapshot.execution.current_epoch) return `projection.result_recorded execution_epoch ${payload.execution_epoch} does not match current epoch ${snapshot.execution.current_epoch}`;
+
+  const payloadKey = payload.idempotency_key;
+  const canonicalPayload = canonicalJson(payload);
+  const priorPayload = idempotencyPayloads.get(payloadKey);
+  if (priorPayload && priorPayload !== canonicalPayload) return `projection.result_recorded idempotency key ${payloadKey} conflicts with a different payload`;
+
+  const projection = projectionHead(snapshot);
+  if (!projection?.last_intent) return "projection.result_recorded requires a prior projection.intent_recorded event";
+  if (projection.last_intent.idempotency_key !== payload.intent_idempotency_key) {
+    return `projection.result_recorded intent idempotency key ${payload.intent_idempotency_key} does not match the recorded projection intent ${projection.last_intent.idempotency_key}`;
+  }
+  if (projection?.last_result) return "projection.result_recorded duplicated a current-epoch projection result";
+
+  const payloadDecision = validateProjectionResultPayload(payload, { fieldPath: "event.evidence", snapshot });
+  if (!payloadDecision.ok) return payloadDecision.error;
+  return "";
+}
+
 function replayDomainEvents(events, runId, snapshot) {
   if (events.length === 0) return { ok: false, reason: "events.jsonl has no events" };
   const replay = replaySeed(snapshot);
@@ -212,6 +273,26 @@ function replayDomainEvents(events, runId, snapshot) {
       idempotencyPayloads.set(event.evidence.idempotency_key, canonicalJson(event.evidence));
       replay.gates[event.evidence.gate_name] = buildGateResultSummary(event.evidence);
       replay.last_sequence = event.sequence;
+      continue;
+    }
+
+    if (event.type === "projection.intent_recorded") {
+      const typedDecision = validateProjectionIntentRecordedEvent(event, { expectedRunId: runId, expectedSequence });
+      if (!typedDecision.ok) return { ok: false, reason: typedDecision.error };
+      const semanticError = validateProjectionIntentReplaySemantics(replay, event.evidence, idempotencyPayloads);
+      if (semanticError) return { ok: false, reason: semanticError };
+      idempotencyPayloads.set(event.evidence.idempotency_key, canonicalJson(event.evidence));
+      Object.assign(replay, mergeProjectionSnapshot(replay, { ...event.evidence, type: event.type }, event.sequence));
+      continue;
+    }
+
+    if (event.type === "projection.result_recorded") {
+      const typedDecision = validateProjectionResultRecordedEvent(event, { expectedRunId: runId, expectedSequence, snapshot: replay });
+      if (!typedDecision.ok) return { ok: false, reason: typedDecision.error };
+      const semanticError = validateProjectionResultReplaySemantics(replay, event.evidence, idempotencyPayloads);
+      if (semanticError) return { ok: false, reason: semanticError };
+      idempotencyPayloads.set(event.evidence.idempotency_key, canonicalJson(event.evidence));
+      Object.assign(replay, mergeProjectionSnapshot(replay, { ...event.evidence, type: event.type }, event.sequence));
       continue;
     }
 

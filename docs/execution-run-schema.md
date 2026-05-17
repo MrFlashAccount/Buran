@@ -25,8 +25,9 @@ registry/
         verification.json
         internal-review/
           <hash>.json
-        pr.json
-        projection-log.jsonl
+        pr/
+          projection-intent-<hash>.json
+          projection-result-<hash>.json
   indexes/
     active-runs.json
     workspace-leases.json
@@ -65,7 +66,7 @@ Required fields:
 | `schema_version` | Schema version string. Required in every persisted file/event. |
 | `run_id` | Stable unique run id. |
 | `task_id` | Local task identifier from the approved packet/batch. |
-| `github` | Repo, issue number, intended branch, and PR metadata when created. |
+| `github` | Repo, issue number, intended branch, and PR metadata when created or locally projected for handoff. |
 | `packet` | Packet hash, source path/reference, approval metadata, and sufficiency status. |
 | `state` | Current state from `docs/state-machine.md`. |
 | `last_sequence` | Last fully applied event sequence reflected by the snapshot. |
@@ -76,7 +77,7 @@ Required fields:
 | `gates.internal_review` | Current internal-review gate head: status, epoch, attempt, refs, actor, and idempotency summary. |
 | `artifacts.recorded.by_path` | Immutable recorded-artifact heads keyed by relative artifact path, with epoch/attempt provenance. |
 | `artifacts` | Named artifact references and recorded-artifact content hashes. |
-| `projections` | Last known GitHub/TaskFlow/comment/project projection results. |
+| `projections` | Last known GitHub/TaskFlow/comment/project projection results, including local fake handoff metadata when no network write is allowed. |
 | `created_at` / `updated_at` | Timestamps. |
 | `terminal_reason` | Required for terminal blocked/failed states. |
 
@@ -136,8 +137,8 @@ Minimum expected artifacts:
 - `implementation-log.md` — compact implementation summary and touched files.
 - `verification.json` — verification commands/checks, outcomes, and evidence.
 - `internal-review/<hash>.json` — immutable local internal-review findings, sanitized packet review context, and final review status.
-- `pr.json` — PR number/url/head/base/status after creation.
-- `projection-log.jsonl` — remote projection attempts and results.
+- `pr/projection-intent-<hash>.json` — immutable local PR handoff intent derived from the approved local contract.
+- `pr/projection-result-<hash>.json` — immutable local PR handoff result mirrored into `github.pr` / `projections.github_pr` only after a semantically valid successful projection record.
 
 Verification and review command records describe allowed adapters/gates from the approved packet and Buran policy. They must not become a general-purpose arbitrary script execution surface.
 
@@ -175,7 +176,7 @@ Recovery order:
 7. Rebuild active-run and workspace-lease indexes.
 8. Reclaim expired lease records by marking the owning run lease as `stale_recovered`, appending `recovery.lease_stale_reclaimed`, deleting local lease records, and reporting the finding. Recovery only reclaims when TTL has elapsed; it does not guess active ownership.
 9. Remove terminal/orphan lease records from the local lease-record directory.
-10. Reconcile projections using idempotency keys in later projection slices.
+10. Semantically replay `projection.intent_recorded` / `projection.result_recorded` so `github.pr` and `projections.github_pr` are rebuilt from local event truth before `ready_for_manual_review` is trusted.
 11. Quarantine corrupt, malformed, incomplete, unknown-event, missing-artifact, hash-mismatch, conflicting-idempotency, stale/wrong-state gate, or other ambiguous run folders instead of guessing.
 
 Slice 2 quarantine layout:

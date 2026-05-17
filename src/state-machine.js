@@ -9,6 +9,12 @@ import {
   TERMINAL_STATES,
   TRANSITION_METADATA,
 } from "./constants.js";
+import {
+  appendGithubPrContractErrors,
+  appendGithubPrValidationErrors,
+  appendProjectedPrParityErrors,
+  isSuccessfulProjectionResultStatus,
+} from "./projection-contract.js";
 import { isRecord, nonEmptyString } from "./utils.js";
 
 function transitionKey(fromState) {
@@ -43,6 +49,29 @@ function freshGateStatus(snapshot, gateName, acceptedStatuses) {
   if (!Number.isSafeInteger(currentEpoch) || currentEpoch < 1 || !isRecord(gate)) return false;
   if (!acceptedStatuses.includes(gate.status)) return false;
   return gate.current_epoch === currentEpoch && Number.isSafeInteger(gate.current_attempt) && gate.current_attempt >= 1;
+}
+
+function hasRecordedPrProjection(snapshot) {
+  const currentEpoch = snapshot?.execution?.current_epoch;
+  const projection = snapshot?.projections?.github_pr;
+  const lastResult = projection?.last_result;
+  if (!Number.isSafeInteger(currentEpoch) || currentEpoch < 1) return false;
+  if (!isRecord(snapshot?.github?.pr)) return false;
+  if (!isRecord(projection) || !isRecord(lastResult)) return false;
+  if (projection.execution_epoch !== currentEpoch) return false;
+  if (lastResult.execution_epoch !== currentEpoch) return false;
+  if (lastResult.recorded_from_state !== "pr_ready") return false;
+  if (!nonEmptyString(lastResult.idempotency_key)) return false;
+  if (!isSuccessfulProjectionResultStatus(lastResult.status)) return false;
+  if (!isRecord(lastResult.artifact_ref)) return false;
+  if (!nonEmptyString(lastResult.artifact_ref.path) || !nonEmptyString(lastResult.artifact_ref.sha256)) return false;
+  const errors = [];
+  appendGithubPrValidationErrors(snapshot.github.pr, errors, "github.pr");
+  appendGithubPrValidationErrors(lastResult.github_pr, errors, "projections.github_pr.last_result.github_pr");
+  appendGithubPrContractErrors(snapshot, snapshot.github.pr, errors, "github.pr");
+  appendGithubPrContractErrors(snapshot, lastResult.github_pr, errors, "projections.github_pr.last_result.github_pr");
+  appendProjectedPrParityErrors(snapshot.github.pr, lastResult.github_pr, errors, "github.pr", "projections.github_pr.last_result.github_pr");
+  return errors.length === 0;
 }
 
 function validateGateTransitionGuard(snapshot, fromState, toState) {
@@ -82,6 +111,11 @@ function validateGateTransitionGuard(snapshot, fromState, toState) {
   if (fromState === "internal_review" && toState === "blocked_needs_human") {
     if (!freshGateStatus(snapshot, "internal_review", [GATE_STATUS.BLOCKED])) {
       return { ok: false, reason: "transition internal_review -> blocked_needs_human requires a current internal_review BLOCKED result" };
+    }
+  }
+  if (fromState === "pr_ready" && toState === "ready_for_manual_review") {
+    if (!hasRecordedPrProjection(snapshot)) {
+      return { ok: false, reason: "transition pr_ready -> ready_for_manual_review requires a recorded PR projection result for the current epoch" };
     }
   }
 

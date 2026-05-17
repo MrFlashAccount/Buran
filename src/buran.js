@@ -186,6 +186,14 @@ export function formatBuranReport(report) {
         lines.push(`Internal review: ${internalReview.status}; blocker=${internalReview.problem.code}`);
       }
     }
+    if (report.projection) {
+      const projection = report.projection;
+      if (projection.result_artifact_ref?.path) {
+        lines.push(`PR projection: ${projection.status}; artifact=${projection.result_artifact_ref.path}`);
+      } else if (projection.problem?.code) {
+        lines.push(`PR projection: ${projection.status}; blocker=${projection.problem.code}`);
+      }
+    }
     if (report.blockers?.length) {
       for (const blocker of report.blockers) lines.push(`Blocker: ${blocker.code}: ${blocker.message}`);
     }

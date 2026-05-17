@@ -2,6 +2,8 @@
 
 GitHub, TaskFlow, comments, labels, and project fields are projection/journal surfaces. They never replace the local ExecutionRun registry as source of truth.
 
+Current implementation note: local tests and the current `pr_ready` runner slice use a deterministic `local_fake` projection path that records intent/result artifacts plus `github.pr`/`projections.github_pr` metadata without a network write. A real GitHub adapter remains a later transport concern.
+
 ## Projection ownership
 
 The projector reads local run state and writes remote updates. It records every attempt/result back into local artifacts/events with an idempotency key.
@@ -31,7 +33,7 @@ Forbidden projection behavior:
 | `blocked_plan_insufficient` | Comment/status explaining missing packet data and required manual follow-up. |
 | `blocked_lock_conflict` | Comment/status naming conflict surface if useful. |
 | `verification` / `internal_review` | Usually local-only unless configured to publish progress. |
-| `pr_ready` | Create/update PR, attach verification and internal review evidence; this is the PR creation/update step, not proof that a PR already exists. |
+| `pr_ready` | Create/update PR, or in local fake mode record the deterministic handoff artifact that would drive PR creation/update; this is the PR creation/update step, not proof that a real remote write already happened. |
 | `ready_for_manual_review` | Mark PR/task as `Ready for Manual Review`. |
 | `blocked_needs_human` / `failed_execution` | Comment/status with concise evidence and next required human action. |
 
@@ -56,7 +58,7 @@ The projector may create or update a PR only when local state proves:
 - branch/head/base data are present;
 - artifact references exist for verification and review summaries.
 
-After PR handoff, the local terminal state is `ready_for_manual_review`.
+After PR handoff, the local terminal state is `ready_for_manual_review`. In local fake mode, that handoff is proven by the recorded projection artifact/result rather than a live GitHub response.
 
 ## Projection repair
 
