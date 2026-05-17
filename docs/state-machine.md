@@ -20,8 +20,10 @@ stateDiagram-v2
   running --> failed_execution: unrecoverable implementation failure
   verification --> internal_review: verification PASS
   verification --> fix_loop: verification FAIL
+  verification --> blocked_needs_human: verification BLOCKED
   internal_review --> pr_ready: internal review PASS
   internal_review --> fix_loop: internal review FAIL
+  internal_review --> blocked_needs_human: internal review BLOCKED
   fix_loop --> verification: fixes applied
   fix_loop --> blocked_needs_human: fix envelope exceeded
   pr_ready --> ready_for_manual_review: PR created/updated
@@ -56,9 +58,11 @@ Engine rules:
 | `waiting_for_lock` | `blocked_lock_conflict` | Another active run owns an overlapping lease. |
 | `running` | `verification` | Implementation completed inside the approved packet envelope. |
 | `verification` | `internal_review` | Fresh verification gate head for the current epoch is `PASS`. |
-| `verification` | `fix_loop` | Fresh verification gate head for the current epoch is `FAIL` or `BLOCKED`, and fixes remain inside approved scope. |
+| `verification` | `fix_loop` | Fresh verification gate head for the current epoch is `FAIL`, and fixes remain inside approved scope. |
+| `verification` | `blocked_needs_human` | Fresh verification gate head for the current epoch is `BLOCKED`, so human/manual intervention is still required. |
 | `internal_review` | `pr_ready` | Fresh verification `PASS` plus fresh internal-review `PASS` for the current epoch. |
-| `internal_review` | `fix_loop` | Fresh internal-review gate head for the current epoch is `FAIL` or `BLOCKED`, and fixes remain inside approved scope. |
+| `internal_review` | `fix_loop` | Fresh internal-review gate head for the current epoch is `FAIL`, and fixes remain inside approved scope. |
+| `internal_review` | `blocked_needs_human` | Fresh internal-review gate head for the current epoch is `BLOCKED`, so human/manual review evidence is still required. |
 | `fix_loop` | `blocked_needs_human` | Required fix exceeds the approved packet or needs new architecture/planning. |
 | `pr_ready` | `ready_for_manual_review` | PR exists and projection journal records handoff. |
 

@@ -347,6 +347,30 @@ test("state machine routes verification BLOCKED to blocked_needs_human instead o
   assert.match(blockedToFixLoop.reason, /requires a current verification FAIL result/);
 });
 
+test("state machine routes internal_review BLOCKED to blocked_needs_human instead of fix_loop", async () => {
+  const blockedSnapshot = {
+    state: "internal_review",
+    execution: { current_epoch: 1 },
+    gates: {
+      verification: {
+        status: "PASS",
+        current_epoch: 1,
+        current_attempt: 1,
+      },
+      internal_review: {
+        status: "BLOCKED",
+        current_epoch: 1,
+        current_attempt: 1,
+      },
+    },
+  };
+
+  assert.equal(validateTransition({ fromState: "internal_review", toState: "blocked_needs_human", snapshot: blockedSnapshot }).ok, true);
+  const blockedToFixLoop = validateTransition({ fromState: "internal_review", toState: "fix_loop", snapshot: blockedSnapshot });
+  assert.equal(blockedToFixLoop.ok, false);
+  assert.match(blockedToFixLoop.reason, /requires a current internal_review FAIL result/);
+});
+
 test("registry transitions persist run snapshot and event journal consistently", async () => {
   const tempDir = await makeTempDir();
   const registryRoot = path.join(tempDir, "registry");

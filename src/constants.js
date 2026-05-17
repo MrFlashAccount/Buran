@@ -64,6 +64,7 @@ export const TRANSITION_METADATA = Object.freeze([
   { from: "verification", to: "blocked_needs_human", reason: "verification blocked on unsupported or unsafe surface" },
   { from: "internal_review", to: "pr_ready", reason: "internal review passed" },
   { from: "internal_review", to: "fix_loop", reason: "internal review failed inside approved scope" },
+  { from: "internal_review", to: "blocked_needs_human", reason: "internal review blocked on unsupported or unsafe surface" },
   { from: "fix_loop", to: "verification", reason: "fixes applied" },
   { from: "fix_loop", to: "blocked_needs_human", reason: "fix envelope exceeded" },
   { from: "pr_ready", to: "ready_for_manual_review", reason: "PR handoff recorded" },

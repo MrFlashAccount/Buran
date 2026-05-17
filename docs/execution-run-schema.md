@@ -23,7 +23,8 @@ registry/
         packet.md
         implementation-log.md
         verification.json
-        internal-review.md
+        internal-review/
+          <hash>.json
         pr.json
         projection-log.jsonl
   indexes/
@@ -134,7 +135,7 @@ Minimum expected artifacts:
 - `packet.md` — normalized approved packet copy or pointer with hash.
 - `implementation-log.md` — compact implementation summary and touched files.
 - `verification.json` — verification commands/checks, outcomes, and evidence.
-- `internal-review.md` — review findings and final review status.
+- `internal-review/<hash>.json` — immutable local internal-review findings, sanitized packet review context, and final review status.
 - `pr.json` — PR number/url/head/base/status after creation.
 - `projection-log.jsonl` — remote projection attempts and results.
 

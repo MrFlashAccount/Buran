@@ -162,6 +162,93 @@ test("gate result recording is idempotent and transition guards require fresh cu
   assert.equal(transitioned.run.gates.verification.current_attempt, 1);
 });
 
+test("internal review gate results open pr_ready on PASS and blocked_needs_human on BLOCKED", async () => {
+  const tempDir = await makeTempDir();
+  const registryRoot = path.join(tempDir, "registry");
+  const run = await prepareVerificationRun(registryRoot, { runId: "run_gate_internal_review_paths" });
+
+  await recordVerificationPass(registryRoot, run.run_id);
+  await transitionRun(registryRoot, run.run_id, {
+    toState: "internal_review",
+    actor: "gate-test",
+    evidence: { reason: "verification passed" },
+    clock: () => new Date("2026-05-16T13:57:00.000Z"),
+  });
+
+  const reviewArtifact = await recordArtifact(registryRoot, run.run_id, {
+    artifactPath: "artifacts/internal-review/report.json",
+    content: JSON.stringify({ status: "PASS" }, null, 2),
+    gate_name: "internal_review",
+    execution_epoch: 1,
+    gate_attempt: 1,
+    recorded_from_state: "internal_review",
+    actor: "review-test",
+    recorded_at: "2026-05-16T13:58:00.000Z",
+    provenance: { kind: "internal-review-json" },
+  });
+  await recordGateResult(registryRoot, run.run_id, {
+    gate_name: "internal_review",
+    execution_epoch: 1,
+    gate_attempt: 1,
+    recorded_from_state: "internal_review",
+    status: "PASS",
+    artifact_refs: [reviewArtifact.artifact_ref],
+    recorded_at: "2026-05-16T13:59:00.000Z",
+    actor: "review-test",
+    idempotency_key: `${run.run_id}:internal-review:1:pass`,
+  });
+
+  const ready = await transitionRun(registryRoot, run.run_id, {
+    toState: "pr_ready",
+    actor: "gate-test",
+    evidence: { reason: "internal review passed" },
+    clock: () => new Date("2026-05-16T14:00:00.000Z"),
+  });
+  assert.equal(ready.run.state, "pr_ready");
+  assert.equal(ready.run.gates.internal_review.status, "PASS");
+
+  const blockedRegistryRoot = path.join(tempDir, "registry-blocked");
+  const blocked = await prepareVerificationRun(blockedRegistryRoot, { runId: "run_gate_internal_review_blocked" });
+  await recordVerificationPass(blockedRegistryRoot, blocked.run_id);
+  await transitionRun(blockedRegistryRoot, blocked.run_id, {
+    toState: "internal_review",
+    actor: "gate-test",
+    evidence: { reason: "verification passed" },
+    clock: () => new Date("2026-05-16T14:01:00.000Z"),
+  });
+  const blockedArtifact = await recordArtifact(blockedRegistryRoot, blocked.run_id, {
+    artifactPath: "artifacts/internal-review/report.json",
+    content: JSON.stringify({ status: "BLOCKED" }, null, 2),
+    gate_name: "internal_review",
+    execution_epoch: 1,
+    gate_attempt: 1,
+    recorded_from_state: "internal_review",
+    actor: "review-test",
+    recorded_at: "2026-05-16T14:02:00.000Z",
+    provenance: { kind: "internal-review-json" },
+  });
+  await recordGateResult(blockedRegistryRoot, blocked.run_id, {
+    gate_name: "internal_review",
+    execution_epoch: 1,
+    gate_attempt: 1,
+    recorded_from_state: "internal_review",
+    status: "BLOCKED",
+    artifact_refs: [blockedArtifact.artifact_ref],
+    recorded_at: "2026-05-16T14:03:00.000Z",
+    actor: "review-test",
+    idempotency_key: `${blocked.run_id}:internal-review:1:blocked`,
+  });
+
+  const blockedNeedsHuman = await transitionRun(blockedRegistryRoot, blocked.run_id, {
+    toState: "blocked_needs_human",
+    actor: "gate-test",
+    evidence: { reason: "internal review blocked on unsupported or unsafe surface" },
+    clock: () => new Date("2026-05-16T14:04:00.000Z"),
+  });
+  assert.equal(blockedNeedsHuman.run.state, "blocked_needs_human");
+  assert.equal(blockedNeedsHuman.run.gates.internal_review.status, "BLOCKED");
+});
+
 test("new verification epoch resets gate heads and stale PASS no longer opens transitions", async () => {
   const tempDir = await makeTempDir();
   const registryRoot = path.join(tempDir, "registry");

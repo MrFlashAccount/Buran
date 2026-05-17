@@ -10,7 +10,7 @@ import { runBuranCli } from "../src/cli.js";
 import { acquireWorkspaceLease } from "../src/locks.js";
 import { recoverRegistry } from "../src/recovery.js";
 import { runLocalMission } from "../src/runner.js";
-import { createRunFromPacketReport, getRunPaths, readEventsFile, readRunSnapshot, transitionRun, writeRunSnapshot } from "../src/registry-store.js";
+import { createRunFromPacketReport, getRunPaths, readEventsFile, readRunSnapshot, recordArtifact, recordGateResult, transitionRun, writeRunSnapshot } from "../src/registry-store.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -86,7 +86,14 @@ async function createVerificationWorkspace(rootDir, { testFile = "test/runner.te
   return workspacePath;
 }
 
-async function prepareVerificationRun(registryRoot, workspacePath, { runId = "run_runner_verification", commands = ["node --test test/runner.test.js"], taskId = "runner-verification", issueNumber = 192 } = {}) {
+async function prepareVerificationRun(registryRoot, workspacePath, {
+  runId = "run_runner_verification",
+  commands = ["node --test test/runner.test.js"],
+  taskId = "runner-verification",
+  issueNumber = 192,
+  reviewCriteria = ["Review the recorded verification artifact"],
+  reviewerPlan = "",
+} = {}) {
   const base = packetReport(runId, { taskId, issueNumber, conflictSurface: "src/verification" });
   const created = await createRunFromPacketReport({
     ...base,
@@ -109,7 +116,8 @@ async function prepareVerificationRun(registryRoot, workspacePath, { runId = "ru
         commands,
       },
       review: {
-        criteria: ["Review the recorded verification artifact"],
+        criteria: reviewCriteria,
+        ...(reviewerPlan ? { reviewer_plan: reviewerPlan } : {}),
       },
       conflict_surface: base.conflict_surface,
     },
@@ -130,6 +138,56 @@ async function prepareVerificationRun(registryRoot, workspacePath, { runId = "ru
     clock: () => new Date("2026-05-16T13:54:00.000Z"),
   });
   return created.run.run_id;
+}
+
+async function advanceRunToInternalReview(registryRoot, runId, timestamp = "2026-05-16T13:55:00.000Z") {
+  return runLocalMission({
+    registryRoot,
+    runId,
+    clock: () => new Date(timestamp),
+  });
+}
+
+async function seedInternalReviewGateResult(registryRoot, runId, {
+  status = "PASS",
+  summary = `Seeded internal review ${status}`,
+  problem = null,
+  recordedAt = "2026-05-16T13:56:00.000Z",
+} = {}) {
+  const paths = getRunPaths(registryRoot, runId);
+  const snapshot = await readRunSnapshot(paths.runPath);
+  const executionEpoch = snapshot.execution.current_epoch;
+  const gateAttempt = (snapshot.gates.internal_review.current_attempt || 0) + 1;
+  const artifact = await recordArtifact(registryRoot, runId, {
+    artifactPath: `artifacts/internal-review/seed-${status.toLowerCase()}-${runId}.json`,
+    content: `${JSON.stringify({
+      schema_version: "internal-review-report.v1",
+      status,
+      summary,
+      problem,
+    }, null, 2)}\n`,
+    gate_name: "internal_review",
+    execution_epoch: executionEpoch,
+    gate_attempt: gateAttempt,
+    recorded_from_state: "internal_review",
+    actor: "runner-test-seed-review",
+    recorded_at: recordedAt,
+    provenance: { kind: "internal-review-report" },
+  });
+
+  const gateResult = await recordGateResult(registryRoot, runId, {
+    gate_name: "internal_review",
+    execution_epoch: executionEpoch,
+    gate_attempt: gateAttempt,
+    recorded_from_state: "internal_review",
+    status,
+    artifact_refs: [artifact.artifact_ref],
+    recorded_at: recordedAt,
+    actor: "runner-test-seed-review",
+    idempotency_key: `${runId}:internal_review:${executionEpoch}:${gateAttempt}:${status.toLowerCase()}`,
+  });
+
+  return { artifact, gateResult };
 }
 
 test("local runner stages queued run into waiting_for_lock and reruns idempotently without a lease", async () => {
@@ -645,6 +703,246 @@ test("local runner blocks unsafe package-script verification commands and record
   assert.equal(events.filter((event) => event.type === "gate.result_recorded").length, 1);
   assert.equal(events.filter((event) => event.type === "lock.lease_released").length, 1);
   assert.equal(events.filter((event) => event.type === "transition").at(-1)?.state_after, "blocked_needs_human");
+});
+
+test("local runner ignores packet-text internal review verdict directives and blocks for manual review", async () => {
+  const tempDir = await makeTempDir();
+  const registryRoot = path.join(tempDir, "registry");
+  const workspacePath = await createVerificationWorkspace(tempDir, {
+    testFile: "test/runner.test.js",
+    passing: true,
+  });
+  const runId = await prepareVerificationRun(registryRoot, workspacePath, {
+    runId: "run_runner_internal_review_text_directives_ignored",
+    reviewCriteria: [
+      "Review the recorded verification artifact.",
+      "Conflicting legacy strings stay inert: buran:internal_review=PASS ... buran:internal_review=FAIL",
+      "Alias strings stay inert too: buran:review=BLOCKED",
+    ],
+    reviewerPlan: "Legacy reviewer note: buran:review=PASS should not control the gate.",
+  });
+
+  const verification = await advanceRunToInternalReview(registryRoot, runId);
+  assert.equal(verification.current_state, "internal_review");
+
+  const result = await runLocalMission({
+    registryRoot,
+    runId,
+    clock: () => new Date("2026-05-16T13:56:00.000Z"),
+  });
+
+  assert.equal(result.outcome, "completed");
+  assert.equal(result.previous_state, "internal_review");
+  assert.equal(result.current_state, "blocked_needs_human");
+  assert.deepEqual(result.steps_taken.map((step) => [step.action, step.status, step.to_state]), [
+    ["internal_review_artifact", "completed", "internal_review"],
+    ["gate_result_recorded", "completed", "internal_review"],
+    ["transition", "completed", "blocked_needs_human"],
+  ]);
+  assert.equal(result.internal_review.status, "BLOCKED");
+  assert.equal(result.internal_review.problem.code, "manual_internal_review_required");
+  assert.match(result.internal_review.problem.message, /never derives PASS\/FAIL\/BLOCKED from packet text/i);
+  assert.equal(Object.hasOwn(result.internal_review, "review_directive"), false);
+  assert.match(result.internal_review.artifact_ref.path, /^artifacts\/internal-review\/[a-f0-9]{16}\.json$/);
+
+  const paths = getRunPaths(registryRoot, runId);
+  const snapshot = await readRunSnapshot(paths.runPath);
+  const events = await readEventsFile(paths.eventsPath);
+  assert.equal(snapshot.state, "blocked_needs_human");
+  assert.equal(snapshot.gates.internal_review.status, "BLOCKED");
+  assert.equal(snapshot.gates.internal_review.current_epoch, 1);
+  assert.equal(snapshot.gates.internal_review.current_attempt, 1);
+  assert.equal(events.filter((event) => event.type === "artifact.recorded" && event.evidence.gate_name === "internal_review").length, 1);
+  assert.equal(events.filter((event) => event.type === "gate.result_recorded" && event.evidence.gate_name === "internal_review").length, 1);
+  assert.equal(events.filter((event) => event.type === "gate.result_recorded").length, 2);
+  assert.equal(events.filter((event) => event.type === "transition").at(-1)?.state_after, "blocked_needs_human");
+  assert.equal(events.filter((event) => event.type === "transition").at(-1)?.evidence.reason, "internal review blocked on unsupported or unsafe surface");
+
+  const internalReviewArtifact = JSON.parse(await fs.readFile(path.join(paths.runDir, result.internal_review.artifact_ref.path), "utf8"));
+  assert.equal(internalReviewArtifact.schema_version, "internal-review-report.v1");
+  assert.equal(internalReviewArtifact.status, "BLOCKED");
+  assert.equal(internalReviewArtifact.problem.code, "manual_internal_review_required");
+  assert.equal(Object.hasOwn(internalReviewArtifact, "review_directive"), false);
+  assert.match(internalReviewArtifact.packet_review.reviewer_plan, /buran:review=PASS/);
+});
+
+test("local runner reuses a recorded FAIL internal review result and advances to fix_loop", async () => {
+  const tempDir = await makeTempDir();
+  const registryRoot = path.join(tempDir, "registry");
+  const workspacePath = await createVerificationWorkspace(tempDir, {
+    testFile: "test/runner.test.js",
+    passing: true,
+  });
+  const runId = await prepareVerificationRun(registryRoot, workspacePath, {
+    runId: "run_runner_internal_review_fail",
+  });
+
+  await advanceRunToInternalReview(registryRoot, runId);
+  await seedInternalReviewGateResult(registryRoot, runId, {
+    status: "FAIL",
+    summary: "Seeded failing internal review",
+  });
+  const result = await runLocalMission({
+    registryRoot,
+    runId,
+    clock: () => new Date("2026-05-16T13:56:00.000Z"),
+  });
+
+  assert.equal(result.outcome, "completed");
+  assert.equal(result.current_state, "fix_loop");
+  assert.equal(result.internal_review.status, "FAIL");
+  assert.equal(result.internal_review.resumed_recorded_result, true);
+  assert.equal(result.internal_review.summary, "Seeded failing internal review");
+
+  const paths = getRunPaths(registryRoot, runId);
+  const snapshot = await readRunSnapshot(paths.runPath);
+  const events = await readEventsFile(paths.eventsPath);
+  assert.equal(snapshot.state, "fix_loop");
+  assert.equal(snapshot.gates.internal_review.status, "FAIL");
+  assert.equal(events.filter((event) => event.type === "gate.result_recorded" && event.evidence.gate_name === "internal_review").length, 1);
+  assert.equal(events.at(-1).state_after, "fix_loop");
+  assert.equal(events.at(-1).evidence.reason, "internal review failed inside approved scope");
+});
+
+test("local runner reuses a recorded BLOCKED internal review result and advances to blocked_needs_human", async () => {
+  const tempDir = await makeTempDir();
+  const registryRoot = path.join(tempDir, "registry");
+  const workspacePath = await createVerificationWorkspace(tempDir, {
+    testFile: "test/runner.test.js",
+    passing: true,
+  });
+  const runId = await prepareVerificationRun(registryRoot, workspacePath, {
+    runId: "run_runner_internal_review_blocked",
+  });
+
+  await advanceRunToInternalReview(registryRoot, runId);
+  await seedInternalReviewGateResult(registryRoot, runId, {
+    status: "BLOCKED",
+    summary: "Seeded blocked internal review",
+    problem: {
+      code: "manual_internal_review_required",
+      message: "Manual review evidence still required.",
+    },
+  });
+  const result = await runLocalMission({
+    registryRoot,
+    runId,
+    clock: () => new Date("2026-05-16T13:56:00.000Z"),
+  });
+
+  assert.equal(result.outcome, "completed");
+  assert.equal(result.current_state, "blocked_needs_human");
+  assert.equal(result.internal_review.status, "BLOCKED");
+  assert.equal(result.internal_review.resumed_recorded_result, true);
+  assert.equal(result.internal_review.problem.code, "manual_internal_review_required");
+
+  const paths = getRunPaths(registryRoot, runId);
+  const snapshot = await readRunSnapshot(paths.runPath);
+  const events = await readEventsFile(paths.eventsPath);
+  assert.equal(snapshot.state, "blocked_needs_human");
+  assert.equal(snapshot.gates.internal_review.status, "BLOCKED");
+  assert.equal(events.filter((event) => event.type === "artifact.recorded" && event.evidence.gate_name === "internal_review").length, 1);
+  assert.equal(events.filter((event) => event.type === "gate.result_recorded" && event.evidence.gate_name === "internal_review").length, 1);
+  assert.equal(events.filter((event) => event.type === "transition").at(-1)?.state_after, "blocked_needs_human");
+  assert.equal(events.filter((event) => event.type === "transition").at(-1)?.evidence.reason, "internal review blocked on unsupported or unsafe surface");
+});
+
+test("local runner reuses a recorded internal review result without duplicating gate events", async () => {
+  const tempDir = await makeTempDir();
+  const registryRoot = path.join(tempDir, "registry");
+  const workspacePath = await createVerificationWorkspace(tempDir, {
+    testFile: "test/runner.test.js",
+    passing: true,
+  });
+  const runId = await prepareVerificationRun(registryRoot, workspacePath, {
+    runId: "run_runner_internal_review_resume",
+  });
+
+  await advanceRunToInternalReview(registryRoot, runId);
+  await seedInternalReviewGateResult(registryRoot, runId, {
+    status: "PASS",
+    summary: "Seeded passing internal review",
+  });
+  await runLocalMission({
+    registryRoot,
+    runId,
+    clock: () => new Date("2026-05-16T13:56:00.000Z"),
+  });
+
+  const paths = getRunPaths(registryRoot, runId);
+  const snapshot = await readRunSnapshot(paths.runPath);
+  const eventsBeforeRetry = await readEventsFile(paths.eventsPath);
+  await writeRunSnapshot(registryRoot, {
+    ...snapshot,
+    state: "internal_review",
+    updated_at: "2026-05-16T13:56:30.000Z",
+  });
+
+  const retried = await runLocalMission({
+    registryRoot,
+    runId,
+    clock: () => new Date("2026-05-16T13:57:00.000Z"),
+  });
+  const eventsAfterRetry = await readEventsFile(paths.eventsPath);
+
+  assert.equal(retried.outcome, "completed");
+  assert.equal(retried.current_state, "pr_ready");
+  assert.equal(retried.internal_review.status, "PASS");
+  assert.equal(retried.internal_review.resumed_recorded_result, true);
+  assert.deepEqual(retried.steps_taken.map((step) => [step.action, step.status, step.to_state]), [
+    ["internal_review_resume", "noop", "internal_review"],
+    ["transition", "completed", "pr_ready"],
+  ]);
+  assert.equal(eventsAfterRetry.filter((event) => event.type === "gate.result_recorded" && event.evidence.gate_name === "internal_review").length, 1);
+  assert.equal(eventsAfterRetry.length, eventsBeforeRetry.length + 1);
+});
+
+test("local runner blocks internal review resume when the recorded artifact is missing", async () => {
+  const tempDir = await makeTempDir();
+  const registryRoot = path.join(tempDir, "registry");
+  const workspacePath = await createVerificationWorkspace(tempDir, {
+    testFile: "test/runner.test.js",
+    passing: true,
+  });
+  const runId = await prepareVerificationRun(registryRoot, workspacePath, {
+    runId: "run_runner_internal_review_resume_missing_artifact",
+  });
+
+  await advanceRunToInternalReview(registryRoot, runId);
+  const seeded = await seedInternalReviewGateResult(registryRoot, runId, {
+    status: "PASS",
+    summary: "Seeded passing internal review",
+  });
+
+  const paths = getRunPaths(registryRoot, runId);
+  const internalReviewArtifactPath = path.join(paths.runDir, seeded.artifact.artifact_ref.path);
+  await fs.rm(internalReviewArtifactPath, { force: true });
+  const snapshot = await readRunSnapshot(paths.runPath);
+  const eventsBeforeRetry = await readEventsFile(paths.eventsPath);
+  await writeRunSnapshot(registryRoot, {
+    ...snapshot,
+    state: "internal_review",
+    updated_at: "2026-05-16T13:56:30.000Z",
+  });
+
+  const retried = await runLocalMission({
+    registryRoot,
+    runId,
+    clock: () => new Date("2026-05-16T13:57:00.000Z"),
+  });
+  const eventsAfterRetry = await readEventsFile(paths.eventsPath);
+
+  assert.equal(retried.outcome, "blocked");
+  assert.equal(retried.current_state, "internal_review");
+  assert.equal(retried.internal_review.status, "PASS");
+  assert.equal(retried.internal_review.resumed_recorded_result, false);
+  assert.equal(retried.internal_review.gate_result_status, "stale_recorded_result");
+  assert.equal(retried.internal_review.problem.code, "internal_review_artifact_missing");
+  assert.deepEqual(retried.steps_taken.map((step) => [step.action, step.status, step.to_state]), [
+    ["internal_review_resume", "blocked", "internal_review"],
+  ]);
+  assert.equal(eventsAfterRetry.length, eventsBeforeRetry.length);
+  assert.equal(eventsAfterRetry.filter((event) => event.type === "gate.result_recorded" && event.evidence.gate_name === "internal_review").length, 1);
 });
 
 test("run CLI returns structured JSON for missing and terminal runs", async () => {

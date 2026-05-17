@@ -75,8 +75,13 @@ function validateGateTransitionGuard(snapshot, fromState, toState) {
     }
   }
   if (fromState === "internal_review" && toState === "fix_loop") {
-    if (!freshGateStatus(snapshot, "internal_review", [GATE_STATUS.FAIL, GATE_STATUS.BLOCKED])) {
-      return { ok: false, reason: "transition internal_review -> fix_loop requires a current internal_review FAIL or BLOCKED result" };
+    if (!freshGateStatus(snapshot, "internal_review", [GATE_STATUS.FAIL])) {
+      return { ok: false, reason: "transition internal_review -> fix_loop requires a current internal_review FAIL result" };
+    }
+  }
+  if (fromState === "internal_review" && toState === "blocked_needs_human") {
+    if (!freshGateStatus(snapshot, "internal_review", [GATE_STATUS.BLOCKED])) {
+      return { ok: false, reason: "transition internal_review -> blocked_needs_human requires a current internal_review BLOCKED result" };
     }
   }
 

@@ -3,6 +3,7 @@ import path from "node:path";
 
 import { SCHEMA_VERSION, TERMINAL_STATES } from "./constants.js";
 import { buildImplementationDispatchIntent } from "./implementation-dispatch.js";
+import { executeInternalReviewGate } from "./internal-review-adapter.js";
 import { acquireWorkspaceLease } from "./locks.js";
 import { executeVerificationGate } from "./verification-adapter.js";
 import { getRunPaths, readRunSnapshot, recordArtifact, recordGateResult, transitionRun } from "./registry-store.js";
@@ -51,6 +52,7 @@ function buildRunnerReport({
   workspacePreparation = null,
   implementationDispatch = null,
   verification = null,
+  internalReview = null,
 } = {}) {
   return {
     schema_version: SCHEMA_VERSION,
@@ -67,6 +69,7 @@ function buildRunnerReport({
     workspace_preparation: workspacePreparation,
     implementation_dispatch: implementationDispatch,
     verification,
+    internal_review: internalReview,
     external_side_effects: false,
   };
 }
@@ -89,15 +92,38 @@ function verificationTransition(status) {
   return "blocked_needs_human";
 }
 
+function internalReviewTransition(status) {
+  if (status === "PASS") return "pr_ready";
+  if (status === "FAIL") return "fix_loop";
+  return "blocked_needs_human";
+}
+
 function verificationTransitionReason(status) {
   if (status === "PASS") return "verification passed";
   if (status === "FAIL") return "verification failed inside approved scope";
   return "verification blocked on unsupported or unsafe surface";
 }
 
-function hasFreshRecordedVerification(snapshot) {
+function internalReviewTransitionReason(status) {
+  if (status === "PASS") return "internal review passed";
+  if (status === "FAIL") return "internal review failed inside approved scope";
+  return "internal review blocked on unsupported or unsafe surface";
+}
+
+async function readRecordedArtifactJson(runDir, artifactRef) {
+  const artifactPath = nonEmptyString(artifactRef?.path);
+  if (!artifactPath) return null;
+  try {
+    const artifactText = await fs.readFile(path.join(runDir, artifactPath), "utf8");
+    return JSON.parse(artifactText);
+  } catch {
+    return null;
+  }
+}
+
+function hasFreshRecordedGate(snapshot, gateName) {
   const currentEpoch = snapshot?.execution?.current_epoch;
-  const gate = snapshot?.gates?.verification;
+  const gate = snapshot?.gates?.[gateName];
   return Number.isSafeInteger(currentEpoch)
     && currentEpoch >= 1
     && gate?.current_epoch === currentEpoch
@@ -106,16 +132,27 @@ function hasFreshRecordedVerification(snapshot) {
     && ["PASS", "FAIL", "BLOCKED"].includes(gate?.status);
 }
 
-async function inspectRecordedVerificationArtifacts(runDir, snapshot) {
-  const artifactRefs = Array.isArray(snapshot?.gates?.verification?.artifact_refs)
-    ? snapshot.gates.verification.artifact_refs
+function gateArtifactProblemCode(gateName, suffix) {
+  return `${gateName}_${suffix}`;
+}
+
+function gateDisplayName(gateName) {
+  return gateName === "internal_review" ? "internal review" : gateName;
+}
+
+async function inspectRecordedGateArtifacts(runDir, snapshot, gateName) {
+  const gate = snapshot?.gates?.[gateName];
+  const artifactRefs = Array.isArray(gate?.artifact_refs)
+    ? gate.artifact_refs
     : [];
+  const gateLabel = gateDisplayName(gateName);
+
   if (artifactRefs.length === 0) {
     return {
       ok: false,
       problem: buildIssue(
-        "verification_artifact_missing",
-        "Recorded verification result cannot be resumed because no immutable verification artifact reference is available.",
+        gateArtifactProblemCode(gateName, "artifact_missing"),
+        `Recorded ${gateLabel} result cannot be resumed because no immutable ${gateLabel} artifact reference is available.`,
       ),
     };
   }
@@ -128,8 +165,8 @@ async function inspectRecordedVerificationArtifacts(runDir, snapshot) {
       return {
         ok: false,
         problem: buildIssue(
-          "verification_artifact_missing",
-          "Recorded verification result cannot be resumed because its artifact reference is incomplete.",
+          gateArtifactProblemCode(gateName, "artifact_missing"),
+          `Recorded ${gateLabel} result cannot be resumed because its artifact reference is incomplete.`,
         ),
       };
     }
@@ -139,8 +176,8 @@ async function inspectRecordedVerificationArtifacts(runDir, snapshot) {
       return {
         ok: false,
         problem: buildIssue(
-          "verification_artifact_missing",
-          `Recorded verification result cannot be resumed because artifact ${artifactPath} is missing from the immutable artifact ledger.`,
+          gateArtifactProblemCode(gateName, "artifact_missing"),
+          `Recorded ${gateLabel} result cannot be resumed because artifact ${artifactPath} is missing from the immutable artifact ledger.`,
         ),
       };
     }
@@ -148,8 +185,8 @@ async function inspectRecordedVerificationArtifacts(runDir, snapshot) {
       return {
         ok: false,
         problem: buildIssue(
-          "verification_artifact_corrupt",
-          `Recorded verification result cannot be resumed because artifact ${artifactPath} has a hash mismatch in the immutable ledger.`,
+          gateArtifactProblemCode(gateName, "artifact_corrupt"),
+          `Recorded ${gateLabel} result cannot be resumed because artifact ${artifactPath} has a hash mismatch in the immutable ledger.`,
         ),
       };
     }
@@ -163,8 +200,8 @@ async function inspectRecordedVerificationArtifacts(runDir, snapshot) {
         return {
           ok: false,
           problem: buildIssue(
-            "verification_artifact_missing",
-            `Recorded verification result cannot be resumed because artifact ${artifactPath} is missing on disk.`,
+            gateArtifactProblemCode(gateName, "artifact_missing"),
+            `Recorded ${gateLabel} result cannot be resumed because artifact ${artifactPath} is missing on disk.`,
           ),
         };
       }
@@ -175,8 +212,8 @@ async function inspectRecordedVerificationArtifacts(runDir, snapshot) {
       return {
         ok: false,
         problem: buildIssue(
-          "verification_artifact_corrupt",
-          `Recorded verification result cannot be resumed because artifact ${artifactPath} no longer matches its recorded hash.`,
+          gateArtifactProblemCode(gateName, "artifact_corrupt"),
+          `Recorded ${gateLabel} result cannot be resumed because artifact ${artifactPath} no longer matches its recorded hash.`,
         ),
       };
     }
@@ -188,8 +225,8 @@ async function inspectRecordedVerificationArtifacts(runDir, snapshot) {
 async function runVerificationStage({ registryRoot, runId, current, previousState, stepsTaken, blockers, warnings, workspacePreparation, implementationDispatch, clock, actor, paths } = {}) {
   let verification = null;
 
-  if (hasFreshRecordedVerification(current)) {
-    const artifactIntegrity = await inspectRecordedVerificationArtifacts(paths.runDir, current);
+  if (hasFreshRecordedGate(current, "verification")) {
+    const artifactIntegrity = await inspectRecordedGateArtifacts(paths.runDir, current, "verification");
     if (!artifactIntegrity.ok) {
       verification = {
         status: current.gates.verification.status,
@@ -383,6 +420,211 @@ async function runVerificationStage({ registryRoot, runId, current, previousStat
   });
 }
 
+async function runInternalReviewStage({ registryRoot, runId, current, previousState, stepsTaken, blockers, warnings, workspacePreparation, implementationDispatch, verification, clock, actor, paths } = {}) {
+  let internalReview = null;
+
+  if (hasFreshRecordedGate(current, "internal_review")) {
+    const artifactIntegrity = await inspectRecordedGateArtifacts(paths.runDir, current, "internal_review");
+    if (!artifactIntegrity.ok) {
+      internalReview = {
+        status: current.gates.internal_review.status,
+        artifact_ref: current.gates.internal_review.artifact_refs?.[0] || null,
+        artifact_refs: current.gates.internal_review.artifact_refs,
+        artifact_record_status: "missing",
+        gate_result_status: "stale_recorded_result",
+        resumed_recorded_result: false,
+        problem: artifactIntegrity.problem,
+      };
+      blockers.push(artifactIntegrity.problem);
+      stepsTaken.push(buildStep({
+        action: "internal_review_resume",
+        status: "blocked",
+        fromState: "internal_review",
+        toState: "internal_review",
+        detail: artifactIntegrity.problem.message,
+      }));
+      return buildRunnerReport({
+        registryRoot,
+        runId,
+        previousState,
+        currentState: current.state,
+        outcome: "blocked",
+        stepsTaken,
+        blockers,
+        warnings,
+        workspacePreparation,
+        implementationDispatch,
+        verification,
+        internalReview,
+      });
+    }
+
+    const targetState = internalReviewTransition(current.gates.internal_review.status);
+    const artifactReport = await readRecordedArtifactJson(paths.runDir, artifactIntegrity.artifact_refs[0] || null);
+    internalReview = {
+      ...(artifactReport && typeof artifactReport === "object" && !Array.isArray(artifactReport) ? artifactReport : {}),
+      status: current.gates.internal_review.status,
+      artifact_ref: artifactIntegrity.artifact_refs[0] || null,
+      artifact_refs: artifactIntegrity.artifact_refs,
+      artifact_record_status: "noop",
+      resumed_recorded_result: true,
+      gate_result_status: "noop",
+    };
+    stepsTaken.push(buildStep({
+      action: "internal_review_resume",
+      status: "noop",
+      fromState: "internal_review",
+      toState: "internal_review",
+      detail: "Existing current-epoch internal review gate result was reused without re-executing internal review.",
+    }));
+
+    const transitioned = await transitionRun(registryRoot, runId, {
+      toState: targetState,
+      actor,
+      evidence: {
+        reason: internalReviewTransitionReason(current.gates.internal_review.status),
+        internal_review_gate: {
+          status: current.gates.internal_review.status,
+          execution_epoch: current.gates.internal_review.current_epoch,
+          gate_attempt: current.gates.internal_review.current_attempt,
+          artifact_refs: artifactIntegrity.artifact_refs,
+          resumed_recorded_result: true,
+          ...(artifactReport?.problem ? { problem: artifactReport.problem } : {}),
+        },
+      },
+      clock,
+    });
+    current = transitioned.run;
+    stepsTaken.push(buildStep({
+      action: "transition",
+      status: "completed",
+      fromState: "internal_review",
+      toState: current.state,
+      detail: `Internal review status ${internalReview.status} advanced the run through the documented state-machine edge.`,
+      sequence: transitioned.event.sequence,
+    }));
+
+    return buildRunnerReport({
+      registryRoot,
+      runId,
+      previousState,
+      currentState: current.state,
+      outcome: "completed",
+      stepsTaken,
+      blockers,
+      warnings,
+      workspacePreparation,
+      implementationDispatch,
+      verification,
+      internalReview,
+    });
+  }
+
+  const internalReviewRun = await executeInternalReviewGate({
+    runDir: paths.runDir,
+    snapshot: current,
+    clock,
+  });
+
+  const recordedArtifact = await recordArtifact(registryRoot, runId, {
+    artifactPath: internalReviewRun.artifact_path,
+    content: internalReviewRun.artifact_content,
+    gate_name: "internal_review",
+    execution_epoch: internalReviewRun.execution_epoch,
+    gate_attempt: internalReviewRun.gate_attempt,
+    recorded_from_state: "internal_review",
+    actor: internalReviewRun.actor,
+    recorded_at: internalReviewRun.recorded_at,
+    provenance: internalReviewRun.provenance,
+  });
+  current = recordedArtifact.run;
+  stepsTaken.push(buildStep({
+    action: "internal_review_artifact",
+    status: recordedArtifact.status === "noop" ? "noop" : "completed",
+    fromState: "internal_review",
+    toState: "internal_review",
+    detail: `Internal review ${internalReviewRun.status} evidence was recorded under the immutable gate ledger.`,
+    sequence: recordedArtifact.event?.sequence ?? null,
+    artifactPath: recordedArtifact.artifact_ref.path,
+    artifactSha256: recordedArtifact.artifact_ref.sha256,
+  }));
+
+  const gateResult = await recordGateResult(registryRoot, runId, {
+    gate_name: "internal_review",
+    execution_epoch: internalReviewRun.execution_epoch,
+    gate_attempt: internalReviewRun.gate_attempt,
+    recorded_from_state: "internal_review",
+    status: internalReviewRun.status,
+    artifact_refs: [recordedArtifact.artifact_ref],
+    recorded_at: internalReviewRun.recorded_at,
+    actor: internalReviewRun.actor,
+    idempotency_key: internalReviewRun.idempotency_key,
+  });
+  current = gateResult.run;
+  stepsTaken.push(buildStep({
+    action: "gate_result_recorded",
+    status: gateResult.status === "noop" ? "noop" : "completed",
+    fromState: "internal_review",
+    toState: "internal_review",
+    detail: `Internal review gate result ${internalReviewRun.status} was recorded for the current epoch and attempt.`,
+    sequence: gateResult.event?.sequence ?? null,
+    artifactPath: recordedArtifact.artifact_ref.path,
+    artifactSha256: recordedArtifact.artifact_ref.sha256,
+  }));
+
+  internalReview = {
+    ...internalReviewRun.public_report,
+    artifact_ref: recordedArtifact.artifact_ref,
+    artifact_record_status: recordedArtifact.status,
+    gate_result_status: gateResult.status,
+    resumed_recorded_result: false,
+  };
+
+  const targetState = internalReviewTransition(internalReviewRun.status);
+  const transitioned = await transitionRun(registryRoot, runId, {
+    toState: targetState,
+    actor,
+    evidence: {
+      reason: internalReviewTransitionReason(internalReviewRun.status),
+      internal_review_gate: {
+        adapter: internalReviewRun.adapter,
+        status: internalReviewRun.status,
+        execution_epoch: internalReviewRun.execution_epoch,
+        gate_attempt: internalReviewRun.gate_attempt,
+        artifact_ref: recordedArtifact.artifact_ref,
+        ...(internalReviewRun.public_report?.problem ? { problem: internalReviewRun.public_report.problem } : {}),
+      },
+    },
+    clock,
+  });
+  current = transitioned.run;
+  stepsTaken.push(buildStep({
+    action: "transition",
+    status: "completed",
+    fromState: "internal_review",
+    toState: current.state,
+    detail: `Internal review status ${internalReviewRun.status} advanced the run through the documented state-machine edge.`,
+    sequence: transitioned.event.sequence,
+    artifactPath: recordedArtifact.artifact_ref.path,
+    artifactSha256: recordedArtifact.artifact_ref.sha256,
+  }));
+
+  return buildRunnerReport({
+    registryRoot,
+    runId,
+    previousState,
+    currentState: current.state,
+    outcome: "completed",
+    stepsTaken,
+    blockers,
+    warnings,
+    workspacePreparation,
+    implementationDispatch,
+    verification,
+    internalReview,
+  });
+}
+
 export async function runLocalMission({ registryRoot, runId, workspaceId = "", workspacePath = "", ttlMs = "", clock = () => new Date(), actor = RUNNER_ACTOR } = {}) {
   if (!registryRoot) throw new Error("registryRoot is required for local mission runner");
   if (!runId) throw new Error("runId is required for local mission runner");
@@ -412,6 +654,7 @@ export async function runLocalMission({ registryRoot, runId, workspaceId = "", w
   let workspacePreparation = null;
   let implementationDispatch = null;
   let verification = null;
+  let internalReview = null;
 
   if (TERMINAL_STATES.has(current.state)) {
     return buildRunnerReport({
@@ -423,6 +666,7 @@ export async function runLocalMission({ registryRoot, runId, workspaceId = "", w
       workspacePreparation,
       implementationDispatch,
       verification,
+      internalReview,
       blockers: [buildIssue("terminal_state", `Run ${runId} is already terminal in state ${current.state}.`)],
     });
   }
@@ -437,6 +681,7 @@ export async function runLocalMission({ registryRoot, runId, workspaceId = "", w
       workspacePreparation,
       implementationDispatch,
       verification,
+      internalReview,
       blockers: [buildIssue("run_not_intaken", `Run ${runId} is still in packet_received and is not ready for local runner staging.`)],
     });
   }
@@ -474,6 +719,7 @@ export async function runLocalMission({ registryRoot, runId, workspaceId = "", w
         workspacePreparation,
         implementationDispatch,
         verification,
+        internalReview,
       });
     }
 
@@ -522,6 +768,7 @@ export async function runLocalMission({ registryRoot, runId, workspaceId = "", w
         workspacePreparation,
         implementationDispatch,
         verification,
+        internalReview,
       });
     }
   }
@@ -641,6 +888,7 @@ export async function runLocalMission({ registryRoot, runId, workspaceId = "", w
       workspacePreparation,
       implementationDispatch,
       verification,
+      internalReview,
     });
   }
 
@@ -661,7 +909,25 @@ export async function runLocalMission({ registryRoot, runId, workspaceId = "", w
     });
   }
 
-  if (["internal_review", "fix_loop", "pr_ready"].includes(current.state)) {
+  if (current.state === "internal_review") {
+    return runInternalReviewStage({
+      registryRoot,
+      runId,
+      current,
+      previousState,
+      stepsTaken,
+      blockers,
+      warnings,
+      workspacePreparation,
+      implementationDispatch,
+      verification,
+      clock,
+      actor,
+      paths,
+    });
+  }
+
+  if (["fix_loop", "pr_ready"].includes(current.state)) {
     blockers.push(buildIssue("stage_not_implemented", unsupportedStageMessage(current.state)));
     return buildRunnerReport({
       registryRoot,
@@ -675,6 +941,7 @@ export async function runLocalMission({ registryRoot, runId, workspaceId = "", w
       workspacePreparation,
       implementationDispatch,
       verification,
+      internalReview,
     });
   }
 
@@ -691,5 +958,6 @@ export async function runLocalMission({ registryRoot, runId, workspaceId = "", w
     workspacePreparation,
     implementationDispatch,
     verification,
+    internalReview,
   });
 }

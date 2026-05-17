@@ -176,6 +176,16 @@ export function formatBuranReport(report) {
         lines.push(`Verification: ${verification.status}; blocker=${verification.problem.code}`);
       }
     }
+    if (report.internal_review) {
+      const internalReview = report.internal_review;
+      if (internalReview.artifact_ref?.path) {
+        lines.push(`Internal review: ${internalReview.status}; artifact=${internalReview.artifact_ref.path}`);
+      } else if (internalReview.artifact_refs?.[0]?.path) {
+        lines.push(`Internal review: ${internalReview.status}; artifact=${internalReview.artifact_refs[0].path}`);
+      } else if (internalReview.problem?.code) {
+        lines.push(`Internal review: ${internalReview.status}; blocker=${internalReview.problem.code}`);
+      }
+    }
     if (report.blockers?.length) {
       for (const blocker of report.blockers) lines.push(`Blocker: ${blocker.code}: ${blocker.message}`);
     }
