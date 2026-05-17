@@ -5,7 +5,8 @@ import { SCHEMA_VERSION, TERMINAL_STATES } from "./constants.js";
 import { buildImplementationDispatchIntent } from "./implementation-dispatch.js";
 import { executeInternalReviewGate } from "./internal-review-adapter.js";
 import { acquireWorkspaceLease } from "./locks.js";
-import { buildLocalPrProjection } from "./pr-projection-adapter.js";
+import { sanitizePublicReportForOutput } from "./observability.js";
+import { buildRecordedPrProjection, createLocalPrProjectionAdapter } from "./pr-projection-adapter.js";
 import { executeVerificationGate } from "./verification-adapter.js";
 import { getRunPaths, readRunSnapshot, recordArtifact, recordGateResult, recordProjectionIntent, recordProjectionResult, transitionRun } from "./registry-store.js";
 import { nonEmptyString, sha256Hex } from "./utils.js";
@@ -55,6 +56,7 @@ function buildRunnerReport({
   verification = null,
   internalReview = null,
   projection = null,
+  externalSideEffects = false,
 } = {}) {
   return {
     schema_version: SCHEMA_VERSION,
@@ -73,7 +75,7 @@ function buildRunnerReport({
     verification,
     internal_review: internalReview,
     projection,
-    external_side_effects: false,
+    external_side_effects: Boolean(externalSideEffects),
   };
 }
 
@@ -121,8 +123,13 @@ function projectionProblemCode(suffix) {
   return `pr_projection_${suffix}`;
 }
 
+function sanitizeRunnerReportMessage(message) {
+  const sanitized = sanitizePublicReportForOutput(nonEmptyString(message), []);
+  return nonEmptyString(sanitized) || "Sensitive error details were redacted from the local runner report.";
+}
+
 function buildProjectionProblem(code, message, extra = {}) {
-  return buildIssue(projectionProblemCode(code), message, extra);
+  return buildIssue(projectionProblemCode(code), sanitizeRunnerReportMessage(message), extra);
 }
 
 async function readRecordedArtifactJson(runDir, artifactRef) {
@@ -640,12 +647,14 @@ async function runInternalReviewStage({ registryRoot, runId, current, previousSt
   });
 }
 
-async function runPrReadyStage({ registryRoot, runId, current, previousState, stepsTaken, blockers, warnings, workspacePreparation, implementationDispatch, verification, internalReview, clock, actor } = {}) {
+async function runPrReadyStage({ registryRoot, runId, current, previousState, stepsTaken, blockers, warnings, workspacePreparation, implementationDispatch, verification, internalReview, clock, actor, prProjectionAdapter = createLocalPrProjectionAdapter() } = {}) {
   let projection = null;
   let plannedProjection;
+  let projectionExternalSideEffects = Boolean(prProjectionAdapter?.externalSideEffects);
 
   try {
-    plannedProjection = buildLocalPrProjection(current, { clock, actor });
+    plannedProjection = prProjectionAdapter.plan(current, { clock, actor });
+    projectionExternalSideEffects = Boolean(plannedProjection.externalSideEffects);
     const intentRecorded = await recordProjectionIntent(registryRoot, runId, {
       projection_name: plannedProjection.projectionName,
       projection_target: plannedProjection.projectionTarget,
@@ -665,11 +674,26 @@ async function runPrReadyStage({ registryRoot, runId, current, previousState, st
       status: intentRecorded.status === "noop" ? "noop" : "completed",
       fromState: "pr_ready",
       toState: "pr_ready",
-      detail: "PR projection intent was recorded locally without a remote GitHub write.",
+      detail: projectionExternalSideEffects
+        ? "PR projection intent was recorded locally before the transport-backed handoff."
+        : "PR projection intent was recorded locally without a remote GitHub write.",
       sequence: intentRecorded.event?.sequence ?? null,
       artifactPath: intentRecorded.artifact_ref.path,
       artifactSha256: intentRecorded.artifact_ref.sha256,
     }));
+
+    const resumedProjection = buildRecordedPrProjection(current, {
+      clock,
+      expectedAdapter: plannedProjection.adapter,
+      expectedMode: plannedProjection.mode,
+      externalSideEffects: projectionExternalSideEffects,
+    });
+    if (resumedProjection && resumedProjection.resultIdempotencyKey === plannedProjection.resultIdempotencyKey) {
+      plannedProjection = resumedProjection;
+    } else {
+      plannedProjection = await prProjectionAdapter.execute(current, plannedProjection, { clock, actor });
+      projectionExternalSideEffects = Boolean(plannedProjection.externalSideEffects);
+    }
 
     const resultRecorded = await recordProjectionResult(registryRoot, runId, {
       projection_name: plannedProjection.projectionName,
@@ -700,20 +724,28 @@ async function runPrReadyStage({ registryRoot, runId, current, previousState, st
       status: resultRecorded.status === "noop" ? "noop" : "completed",
       fromState: "pr_ready",
       toState: "pr_ready",
-      detail: "PR projection result was recorded locally and mirrored into github.pr without a remote GitHub write.",
+      detail: projectionExternalSideEffects
+        ? "PR projection result was recorded locally after the transport-backed PR handoff."
+        : "PR projection result was recorded locally and mirrored into github.pr without a remote GitHub write.",
       sequence: resultRecorded.event?.sequence ?? null,
       artifactPath: resultRecorded.artifact_ref.path,
       artifactSha256: resultRecorded.artifact_ref.sha256,
     }));
   } catch (error) {
-    const message = error?.message || String(error);
+    const message = sanitizeRunnerReportMessage(error?.message || String(error));
     const problem = error?.code === "projection_missing_base_branch"
       ? buildProjectionProblem("missing_base_branch", message)
+      : error?.code === "projection_invalid_transport_status" || error?.code === "projection_invalid_transport_result" || error?.code === "projection_invalid_github_pr"
+      ? buildProjectionProblem("invalid_transport_result", message)
       : /different hash/i.test(message)
       ? buildProjectionProblem("artifact_corrupt", `Recorded PR projection cannot be resumed because its local artifact is corrupt: ${message}`)
       : buildProjectionProblem("record_failed", `PR projection handoff could not be recorded locally: ${message}`);
     projection = {
-      ...(plannedProjection?.publicReport || { status: "blocked", adapter: "local-github-pr-projection", mode: "local_fake" }),
+      ...(plannedProjection?.publicReport || {
+        status: "blocked",
+        adapter: prProjectionAdapter?.adapter || "local-github-pr-projection",
+        mode: prProjectionAdapter?.mode || "local_fake",
+      }),
       intent_record_status: "blocked",
       result_record_status: "blocked",
       problem,
@@ -740,6 +772,7 @@ async function runPrReadyStage({ registryRoot, runId, current, previousState, st
       verification,
       internalReview,
       projection,
+      externalSideEffects: projectionExternalSideEffects,
     });
   }
 
@@ -786,10 +819,11 @@ async function runPrReadyStage({ registryRoot, runId, current, previousState, st
     verification,
     internalReview,
     projection,
+    externalSideEffects: projectionExternalSideEffects,
   });
 }
 
-export async function runLocalMission({ registryRoot, runId, workspaceId = "", workspacePath = "", ttlMs = "", clock = () => new Date(), actor = RUNNER_ACTOR } = {}) {
+export async function runLocalMission({ registryRoot, runId, workspaceId = "", workspacePath = "", ttlMs = "", clock = () => new Date(), actor = RUNNER_ACTOR, prProjectionAdapter = createLocalPrProjectionAdapter() } = {}) {
   if (!registryRoot) throw new Error("registryRoot is required for local mission runner");
   if (!runId) throw new Error("runId is required for local mission runner");
 
@@ -1106,6 +1140,7 @@ export async function runLocalMission({ registryRoot, runId, workspaceId = "", w
       internalReview,
       clock,
       actor,
+      prProjectionAdapter,
     });
   }
 

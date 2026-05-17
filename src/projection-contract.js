@@ -60,6 +60,12 @@ function sanitizeProjectionString(value) {
   return redactSecretsInText(redactAbsolutePaths(value));
 }
 
+function projectionContractString(value, { durable = false } = {}) {
+  const text = nonEmptyString(value);
+  if (!text) return "";
+  return durable ? nonEmptyString(sanitizeProjectionDurableValue(text)) : text;
+}
+
 export function sanitizeProjectionDurableValue(value, { depth = 0 } = {}) {
   if (depth > 8) return "[REDACTED_DEPTH]";
   if (value === null || value === undefined) return value;
@@ -110,11 +116,11 @@ export function appendGithubPrValidationErrors(githubPr, errors, fieldPath = "gi
   if (hasOwn(githubPr, "actor") && !nonEmptyString(githubPr.actor)) errors.push(`${fieldPath}.actor must be a non-empty string when present`);
 }
 
-export function appendGithubPrContractErrors(snapshot, githubPr, errors, fieldPath = "github.pr") {
-  const expectedRepo = nonEmptyString(snapshot?.github?.repo);
+export function appendGithubPrContractErrors(snapshot, githubPr, errors, fieldPath = "github.pr", { durable = false } = {}) {
+  const expectedRepo = projectionContractString(snapshot?.github?.repo, { durable });
   const expectedIssueNumber = Number.isSafeInteger(snapshot?.github?.issue_number) ? snapshot.github.issue_number : null;
-  const expectedHeadBranch = nonEmptyString(snapshot?.github?.intended_branch);
-  const expectedBaseBranch = nonEmptyString(snapshot?.github?.base_branch);
+  const expectedHeadBranch = projectionContractString(snapshot?.github?.intended_branch, { durable });
+  const expectedBaseBranch = projectionContractString(snapshot?.github?.base_branch, { durable });
 
   if (!expectedRepo) errors.push(`${fieldPath}.repo cannot be verified because github.repo is missing from the local contract`);
   else if (githubPr?.repo !== expectedRepo) errors.push(`${fieldPath}.repo must match github.repo`);

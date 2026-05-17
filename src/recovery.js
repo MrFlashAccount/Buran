@@ -223,7 +223,7 @@ function validateProjectionResultReplaySemantics(snapshot, payload, idempotencyP
   }
   if (projection?.last_result) return "projection.result_recorded duplicated a current-epoch projection result";
 
-  const payloadDecision = validateProjectionResultPayload(payload, { fieldPath: "event.evidence", snapshot });
+  const payloadDecision = validateProjectionResultPayload(payload, { fieldPath: "event.evidence", snapshot, durableContract: true });
   if (!payloadDecision.ok) return payloadDecision.error;
   return "";
 }
@@ -287,7 +287,7 @@ function replayDomainEvents(events, runId, snapshot) {
     }
 
     if (event.type === "projection.result_recorded") {
-      const typedDecision = validateProjectionResultRecordedEvent(event, { expectedRunId: runId, expectedSequence, snapshot: replay });
+      const typedDecision = validateProjectionResultRecordedEvent(event, { expectedRunId: runId, expectedSequence, snapshot: replay, durableContract: true });
       if (!typedDecision.ok) return { ok: false, reason: typedDecision.error };
       const semanticError = validateProjectionResultReplaySemantics(replay, event.evidence, idempotencyPayloads);
       if (semanticError) return { ok: false, reason: semanticError };

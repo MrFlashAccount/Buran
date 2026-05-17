@@ -1,12 +1,16 @@
-import { sanitizeProjectionDurableValue } from "./projection-contract.js";
+import {
+  appendGithubPrContractErrors,
+  appendGithubPrValidationErrors,
+  sanitizeProjectionDurableValue,
+} from "./projection-contract.js";
 import { nonEmptyString, sha256Hex } from "./utils.js";
 
 const PROJECTION_NAME = "github_pr";
 const PROJECTION_TARGET = "github.pr";
-const PROJECTION_MODE = "local_fake";
-const PROJECTION_ADAPTER = "local-github-pr-projection";
+export const LOCAL_PR_PROJECTION_MODE = "local_fake";
+export const LOCAL_PR_PROJECTION_ADAPTER = "local-github-pr-projection";
 
-function projectionContractError(code, message) {
+export function projectionContractError(code, message) {
   const error = new Error(message);
   error.code = code;
   return error;
@@ -37,21 +41,30 @@ function buildLocalPrUrl(repo, prNumber) {
   return `local://github-pr/${safeRepo}/pull/${prNumber}`;
 }
 
-export function buildLocalPrProjection(snapshot, { clock = () => new Date(), actor = PROJECTION_ADAPTER } = {}) {
-  const existingProjection = snapshot?.projections?.github_pr || {};
-  const existingRecordedAt = existingProjection?.last_result?.recorded_at || existingProjection?.last_intent?.recorded_at || "";
-  const existingActor = existingProjection?.last_result?.actor || existingProjection?.last_intent?.actor || "";
-  const recordedAt = existingRecordedAt || clock().toISOString();
-  const effectiveActor = existingActor || actor;
-  const executionEpoch = snapshot?.execution?.current_epoch || 0;
-  const verification = snapshot?.gates?.verification || {};
-  const internalReview = snapshot?.gates?.internal_review || {};
-  const baseKey = projectionBaseKey(snapshot);
-  const keyDigest = sha256Hex(baseKey).slice(0, 16);
-  const prNumber = buildFakePrNumber(snapshot);
-  const repo = nonEmptyString(snapshot?.github?.repo);
-  const issueNumber = snapshot?.github?.issue_number ?? null;
-  const headBranch = nonEmptyString(snapshot?.github?.intended_branch);
+function gateSummary(gate = {}) {
+  return {
+    status: gate.status || "",
+    current_epoch: gate.current_epoch || 0,
+    current_attempt: gate.current_attempt || 0,
+    artifact_refs: gate.artifact_refs || [],
+  };
+}
+
+function existingProjection(snapshot) {
+  return snapshot?.projections?.github_pr || {};
+}
+
+function existingProjectionRecordedAt(snapshot) {
+  const projection = existingProjection(snapshot);
+  return projection?.last_result?.recorded_at || projection?.last_intent?.recorded_at || "";
+}
+
+function existingProjectionActor(snapshot) {
+  const projection = existingProjection(snapshot);
+  return projection?.last_result?.actor || projection?.last_intent?.actor || "";
+}
+
+function requireBaseBranch(snapshot) {
   const baseBranch = nonEmptyString(snapshot?.github?.base_branch);
   if (!baseBranch) {
     throw projectionContractError(
@@ -59,33 +72,46 @@ export function buildLocalPrProjection(snapshot, { clock = () => new Date(), act
       `Run ${snapshot?.run_id || "unknown"} cannot record a PR projection because github.base_branch is missing from the approved local contract.`,
     );
   }
-  const sanitizedTaskId = sanitizeProjectionDurableValue(snapshot?.task_id || snapshot?.run_id || "task");
-  const githubPr = sanitizeProjectionDurableValue({
-    number: prNumber,
-    url: buildLocalPrUrl(repo, prNumber),
-    repo,
-    issue_number: issueNumber,
-    head_branch: headBranch,
-    base_branch: baseBranch,
-    state: "open",
-    draft: false,
-    title: `Buran handoff for ${sanitizedTaskId}`,
-    projection_mode: PROJECTION_MODE,
-    projected_at: recordedAt,
-    actor: effectiveActor,
-  });
+  return baseBranch;
+}
 
-  const intentIdempotencyKey = `${baseKey}:intent`;
-  const resultIdempotencyKey = `${baseKey}:result`;
-  const intentArtifactPath = `artifacts/pr/projection-intent-${keyDigest}.json`;
-  const resultArtifactPath = `artifacts/pr/projection-result-${keyDigest}.json`;
+function projectionTitle(snapshot) {
+  const sanitizedTaskId = sanitizeProjectionDurableValue(snapshot?.task_id || snapshot?.run_id || "task");
+  return `Buran handoff for ${sanitizedTaskId}`;
+}
+
+export function buildPrProjectionPlan(snapshot, {
+  clock = () => new Date(),
+  actor = LOCAL_PR_PROJECTION_ADAPTER,
+  adapter = LOCAL_PR_PROJECTION_ADAPTER,
+  mode = LOCAL_PR_PROJECTION_MODE,
+  externalSideEffects = false,
+} = {}) {
+  const recordedAt = existingProjectionRecordedAt(snapshot) || clock().toISOString();
+  const effectiveActor = existingProjectionActor(snapshot) || actor;
+  const executionEpoch = snapshot?.execution?.current_epoch || 0;
+  const verification = gateSummary(snapshot?.gates?.verification || {});
+  const internalReview = gateSummary(snapshot?.gates?.internal_review || {});
+  const baseKey = projectionBaseKey(snapshot);
+  const idempotencyDigest = sha256Hex(baseKey);
+  const artifactDigest = idempotencyDigest.slice(0, 16);
+  const repo = nonEmptyString(snapshot?.github?.repo);
+  const issueNumber = snapshot?.github?.issue_number ?? null;
+  const headBranch = nonEmptyString(snapshot?.github?.intended_branch);
+  const baseBranch = requireBaseBranch(snapshot);
+  const title = projectionTitle(snapshot);
+
+  const intentIdempotencyKey = `${PROJECTION_TARGET}:${idempotencyDigest}:intent`;
+  const resultIdempotencyKey = `${PROJECTION_TARGET}:${idempotencyDigest}:result`;
+  const intentArtifactPath = `artifacts/pr/projection-intent-${artifactDigest}.json`;
+  const resultArtifactPath = `artifacts/pr/projection-result-${artifactDigest}.json`;
 
   const intent = sanitizeProjectionDurableValue({
     schema_version: "github-pr-projection-intent.v1",
     projection_name: PROJECTION_NAME,
     projection_target: PROJECTION_TARGET,
-    adapter: PROJECTION_ADAPTER,
-    mode: PROJECTION_MODE,
+    adapter,
+    mode,
     run_id: snapshot?.run_id || "",
     task_id: snapshot?.task_id || "",
     state: snapshot?.state || "",
@@ -93,78 +119,194 @@ export function buildLocalPrProjection(snapshot, { clock = () => new Date(), act
     issue_number: issueNumber,
     execution_epoch: executionEpoch,
     idempotency_key: intentIdempotencyKey,
-    verification_gate: {
-      status: verification.status || "",
-      current_epoch: verification.current_epoch || 0,
-      current_attempt: verification.current_attempt || 0,
-      artifact_refs: verification.artifact_refs || [],
-    },
-    internal_review_gate: {
-      status: internalReview.status || "",
-      current_epoch: internalReview.current_epoch || 0,
-      current_attempt: internalReview.current_attempt || 0,
-      artifact_refs: internalReview.artifact_refs || [],
-    },
+    verification_gate: verification,
+    internal_review_gate: internalReview,
     intended_pr: {
       repo,
       issue_number: issueNumber,
       head_branch: headBranch,
       base_branch: baseBranch,
-      title: githubPr.title,
-      projection_mode: PROJECTION_MODE,
+      title,
+      projection_mode: mode,
     },
     source_of_truth: "local_registry",
     recorded_at: recordedAt,
     actor: effectiveActor,
   });
 
-  const result = sanitizeProjectionDurableValue({
-    schema_version: "github-pr-projection-result.v1",
-    projection_name: PROJECTION_NAME,
-    projection_target: PROJECTION_TARGET,
-    adapter: PROJECTION_ADAPTER,
-    mode: PROJECTION_MODE,
-    run_id: snapshot?.run_id || "",
-    task_id: snapshot?.task_id || "",
-    state: snapshot?.state || "",
-    repo,
-    issue_number: issueNumber,
-    execution_epoch: executionEpoch,
-    status: "projected_local",
-    idempotency_key: resultIdempotencyKey,
-    intent_idempotency_key: intentIdempotencyKey,
-    verification_gate: intent.verification_gate,
-    internal_review_gate: intent.internal_review_gate,
-    github_pr: githubPr,
-    source_of_truth: "local_registry",
-    projected_at: recordedAt,
-    actor: effectiveActor,
-  });
-
   return {
-    adapter: PROJECTION_ADAPTER,
-    mode: PROJECTION_MODE,
+    adapter,
+    mode,
     projectionName: PROJECTION_NAME,
     projectionTarget: PROJECTION_TARGET,
     executionEpoch,
     recordedAt,
     actor: effectiveActor,
+    repo,
+    issueNumber,
+    headBranch,
+    baseBranch,
+    title,
     intentIdempotencyKey,
     resultIdempotencyKey,
     intentArtifactPath,
     resultArtifactPath,
-    intentArtifactContent: `${JSON.stringify(intent, null, 2)}\n`,
-    resultArtifactContent: `${JSON.stringify(result, null, 2)}\n`,
+    verificationGate: verification,
+    internalReviewGate: internalReview,
     intent,
+    intentArtifactContent: `${JSON.stringify(intent, null, 2)}\n`,
+    externalSideEffects: Boolean(externalSideEffects),
+  };
+}
+
+function validateGithubPrAgainstContract(snapshot, githubPr, { durable = false } = {}) {
+  const errors = [];
+  appendGithubPrValidationErrors(githubPr, errors, "projection.github_pr");
+  appendGithubPrContractErrors(snapshot, githubPr, errors, "projection.github_pr", { durable });
+  if (errors.length > 0) {
+    throw projectionContractError("projection_invalid_github_pr", errors.join("; "));
+  }
+}
+
+function validateSanitizedGithubPr(githubPr) {
+  const errors = [];
+  appendGithubPrValidationErrors(githubPr, errors, "projection.github_pr");
+  if (errors.length > 0) {
+    throw projectionContractError("projection_invalid_github_pr", errors.join("; "));
+  }
+}
+
+export function buildPrProjectionResult(snapshot, plan, {
+  status,
+  githubPr,
+  actor = plan.actor,
+  recordedAt = plan.recordedAt,
+  externalSideEffects = plan.externalSideEffects,
+  durableContract = false,
+} = {}) {
+  validateGithubPrAgainstContract(snapshot, githubPr, { durable: durableContract });
+  const effectiveGithubPr = sanitizeProjectionDurableValue(githubPr);
+  validateSanitizedGithubPr(effectiveGithubPr);
+
+  const result = sanitizeProjectionDurableValue({
+    schema_version: "github-pr-projection-result.v1",
+    projection_name: plan.projectionName,
+    projection_target: plan.projectionTarget,
+    adapter: plan.adapter,
+    mode: plan.mode,
+    run_id: snapshot?.run_id || "",
+    task_id: snapshot?.task_id || "",
+    state: snapshot?.state || "",
+    repo: plan.repo,
+    issue_number: plan.issueNumber,
+    execution_epoch: plan.executionEpoch,
+    status,
+    idempotency_key: plan.resultIdempotencyKey,
+    intent_idempotency_key: plan.intentIdempotencyKey,
+    verification_gate: plan.verificationGate,
+    internal_review_gate: plan.internalReviewGate,
+    github_pr: effectiveGithubPr,
+    source_of_truth: "local_registry",
+    projected_at: recordedAt,
+    actor,
+  });
+
+  return {
+    ...plan,
+    actor,
+    recordedAt,
     result,
-    githubPr,
+    githubPr: effectiveGithubPr,
+    resultArtifactContent: `${JSON.stringify(result, null, 2)}\n`,
     publicReport: {
       status: result.status,
-      adapter: PROJECTION_ADAPTER,
-      mode: PROJECTION_MODE,
-      github_pr: githubPr,
-      intent_idempotency_key: intentIdempotencyKey,
-      result_idempotency_key: resultIdempotencyKey,
+      adapter: plan.adapter,
+      mode: plan.mode,
+      github_pr: effectiveGithubPr,
+      intent_idempotency_key: plan.intentIdempotencyKey,
+      result_idempotency_key: plan.resultIdempotencyKey,
+    },
+    externalSideEffects: Boolean(externalSideEffects),
+  };
+}
+
+export function buildRecordedPrProjection(snapshot, {
+  clock = () => new Date(),
+  expectedAdapter = "",
+  expectedMode = "",
+  externalSideEffects = false,
+} = {}) {
+  const projection = existingProjection(snapshot);
+  const lastResult = projection?.last_result;
+  if (!lastResult?.status || !lastResult?.github_pr) return null;
+  if (expectedAdapter && projection?.adapter !== expectedAdapter) return null;
+  if (expectedMode && projection?.mode !== expectedMode) return null;
+
+  const plan = buildPrProjectionPlan(snapshot, {
+    clock,
+    actor: lastResult.actor || projection?.last_intent?.actor || LOCAL_PR_PROJECTION_ADAPTER,
+    adapter: projection?.adapter || expectedAdapter || LOCAL_PR_PROJECTION_ADAPTER,
+    mode: projection?.mode || expectedMode || LOCAL_PR_PROJECTION_MODE,
+    externalSideEffects,
+  });
+
+  return buildPrProjectionResult(snapshot, plan, {
+    status: lastResult.status,
+    githubPr: lastResult.github_pr,
+    actor: lastResult.actor || plan.actor,
+    recordedAt: lastResult.recorded_at || plan.recordedAt,
+    externalSideEffects,
+    durableContract: true,
+  });
+}
+
+function buildLocalGithubPr(snapshot, plan) {
+  const prNumber = buildFakePrNumber(snapshot);
+  return {
+    number: prNumber,
+    url: buildLocalPrUrl(plan.repo, prNumber),
+    repo: plan.repo,
+    issue_number: plan.issueNumber,
+    head_branch: plan.headBranch,
+    base_branch: plan.baseBranch,
+    state: "open",
+    draft: false,
+    title: plan.title,
+    projection_mode: plan.mode,
+    projected_at: plan.recordedAt,
+    actor: plan.actor,
+  };
+}
+
+export function createLocalPrProjectionAdapter() {
+  return {
+    adapter: LOCAL_PR_PROJECTION_ADAPTER,
+    mode: LOCAL_PR_PROJECTION_MODE,
+    externalSideEffects: false,
+    plan(snapshot, options = {}) {
+      return buildPrProjectionPlan(snapshot, {
+        ...options,
+        adapter: LOCAL_PR_PROJECTION_ADAPTER,
+        mode: LOCAL_PR_PROJECTION_MODE,
+        externalSideEffects: false,
+      });
+    },
+    async execute(snapshot, plan) {
+      return buildPrProjectionResult(snapshot, plan, {
+        status: "projected_local",
+        githubPr: buildLocalGithubPr(snapshot, plan),
+        externalSideEffects: false,
+      });
     },
   };
+}
+
+export function buildLocalPrProjection(snapshot, options = {}) {
+  const adapter = createLocalPrProjectionAdapter();
+  const plan = adapter.plan(snapshot, options);
+  return buildPrProjectionResult(snapshot, plan, {
+    status: "projected_local",
+    githubPr: buildLocalGithubPr(snapshot, plan),
+    externalSideEffects: false,
+  });
 }

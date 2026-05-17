@@ -2,7 +2,7 @@
 
 GitHub, TaskFlow, comments, labels, and project fields are projection/journal surfaces. They never replace the local ExecutionRun registry as source of truth.
 
-Current implementation note: local tests and the current `pr_ready` runner slice use a deterministic `local_fake` projection path that records intent/result artifacts plus `github.pr`/`projections.github_pr` metadata without a network write. A real GitHub adapter remains a later transport concern.
+Current implementation note: the default CLI/runtime `pr_ready` path still uses a deterministic `local_fake` projection flow that records intent/result artifacts plus `github.pr`/`projections.github_pr` metadata without a network write. Slice 7 adds an injectable PR transport seam for tests and future launch wiring, but launch/config/auth plumbing remains separate: any transport-backed projection must still record local intent first, validate the returned PR payload against the local contract, and fail closed on invalid/corrupt replay evidence.
 
 ## Projection ownership
 

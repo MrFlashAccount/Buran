@@ -302,7 +302,7 @@ async function recordProjectionEvent(registryRoot, runId, {
   const eventPayloadDecision = validateProjectionPayload(eventPayload, { type: eventType });
   if (!eventPayloadDecision.ok) throw new Error(eventPayloadDecision.error);
   if (eventType === "projection.result_recorded" && isSuccessfulProjectionResultStatus(eventPayload.status)) {
-    const semanticDecision = validateProjectionResultPayload(eventPayload, { snapshot });
+    const semanticDecision = validateProjectionResultPayload(eventPayload, { snapshot, durableContract: true });
     if (!semanticDecision.ok) throw new Error(semanticDecision.error);
   }
 

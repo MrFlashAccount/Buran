@@ -68,8 +68,8 @@ function hasRecordedPrProjection(snapshot) {
   const errors = [];
   appendGithubPrValidationErrors(snapshot.github.pr, errors, "github.pr");
   appendGithubPrValidationErrors(lastResult.github_pr, errors, "projections.github_pr.last_result.github_pr");
-  appendGithubPrContractErrors(snapshot, snapshot.github.pr, errors, "github.pr");
-  appendGithubPrContractErrors(snapshot, lastResult.github_pr, errors, "projections.github_pr.last_result.github_pr");
+  appendGithubPrContractErrors(snapshot, snapshot.github.pr, errors, "github.pr", { durable: true });
+  appendGithubPrContractErrors(snapshot, lastResult.github_pr, errors, "projections.github_pr.last_result.github_pr", { durable: true });
   appendProjectedPrParityErrors(snapshot.github.pr, lastResult.github_pr, errors, "github.pr", "projections.github_pr.last_result.github_pr");
   return errors.length === 0;
 }

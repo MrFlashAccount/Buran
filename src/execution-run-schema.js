@@ -329,14 +329,14 @@ export function validateProjectionIntentPayload(payload, { fieldPath = "event.ev
   return { ok: errors.length === 0, errors, error: errors.join("; ") };
 }
 
-export function validateProjectionResultPayload(payload, { fieldPath = "event.evidence", snapshot = null } = {}) {
+export function validateProjectionResultPayload(payload, { fieldPath = "event.evidence", snapshot = null, durableContract = false } = {}) {
   const intentDecision = validateProjectionIntentPayload(payload, { fieldPath });
   const errors = [...intentDecision.errors];
   if (!nonEmptyString(payload?.status)) errors.push(`${fieldPath}.status must be a non-empty string`);
   if (!nonEmptyString(payload?.intent_idempotency_key)) errors.push(`${fieldPath}.intent_idempotency_key must be a non-empty string`);
   if (isSuccessfulProjectionResultStatus(payload?.status)) {
     appendGithubPrValidationErrors(payload.github_pr, errors, `${fieldPath}.github_pr`);
-    if (snapshot) appendGithubPrContractErrors(snapshot, payload.github_pr, errors, `${fieldPath}.github_pr`);
+    if (snapshot) appendGithubPrContractErrors(snapshot, payload.github_pr, errors, `${fieldPath}.github_pr`, { durable: durableContract });
   } else if (!(payload.github_pr === null || isRecord(payload.github_pr))) {
     errors.push(`${fieldPath}.github_pr must be an object or null`);
   }
@@ -363,7 +363,7 @@ export function validateProjectionIntentRecordedEvent(event, { expectedRunId = "
   return { ok: errors.length === 0, errors, error: errors.join("; ") };
 }
 
-export function validateProjectionResultRecordedEvent(event, { expectedRunId = "", expectedSequence, snapshot = null } = {}) {
+export function validateProjectionResultRecordedEvent(event, { expectedRunId = "", expectedSequence, snapshot = null, durableContract = false } = {}) {
   if (!isRecord(event)) return { ok: false, errors: ["event is not an object"], error: "event is not an object" };
   const errors = [];
   if (event.schema_version !== SCHEMA_VERSION) errors.push(`unsupported event schema_version: ${event.schema_version}`);
@@ -373,7 +373,7 @@ export function validateProjectionResultRecordedEvent(event, { expectedRunId = "
   if (event.type !== "projection.result_recorded") errors.push(`unexpected event type: ${event.type}`);
   if (!nonEmptyString(event.actor)) errors.push("event actor is missing");
   if (!nonEmptyString(event.idempotency_key)) errors.push("event idempotency_key is missing");
-  const payloadDecision = validateProjectionResultPayload(event.evidence, { fieldPath: "event.evidence", snapshot });
+  const payloadDecision = validateProjectionResultPayload(event.evidence, { fieldPath: "event.evidence", snapshot, durableContract });
   errors.push(...payloadDecision.errors);
   if (payloadDecision.ok) {
     if (event.actor !== event.evidence.actor) errors.push("event actor does not match event.evidence.actor");
@@ -601,11 +601,11 @@ function validateProjectionSummary(snapshot, projections, errors, currentEpoch) 
   }
 
   if (isRecord(githubProjection.last_result) && isSuccessfulProjectionResultStatus(githubProjection.last_result.status)) {
-    appendGithubPrContractErrors(snapshot, githubProjection.last_result.github_pr, errors, "projections.github_pr.last_result.github_pr");
+    appendGithubPrContractErrors(snapshot, githubProjection.last_result.github_pr, errors, "projections.github_pr.last_result.github_pr", { durable: true });
     if (!isRecord(githubPr)) {
       errors.push("run.json successful projections.github_pr.last_result requires github.pr");
     } else {
-      appendGithubPrContractErrors(snapshot, githubPr, errors, "github.pr");
+      appendGithubPrContractErrors(snapshot, githubPr, errors, "github.pr", { durable: true });
       appendProjectedPrParityErrors(githubPr, githubProjection.last_result.github_pr, errors, "github.pr", "projections.github_pr.last_result.github_pr");
     }
   } else if (isRecord(githubPr)) {

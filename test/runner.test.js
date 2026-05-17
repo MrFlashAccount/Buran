@@ -7,6 +7,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 import { runBuranCli } from "../src/cli.js";
+import { createGithubPrTransportAdapter } from "../src/github-pr-transport-adapter.js";
 import { acquireWorkspaceLease } from "../src/locks.js";
 import { recoverRegistry } from "../src/recovery.js";
 import { runLocalMission } from "../src/runner.js";
@@ -91,12 +92,21 @@ async function prepareVerificationRun(registryRoot, workspacePath, {
   runId = "run_runner_verification",
   commands = ["node --test test/runner.test.js"],
   taskId = "runner-verification",
+  repo = "MrFlashAccount/example-repo",
   issueNumber = 192,
+  intendedBranch = `sergey/${runId}`,
   baseBranch = "develop",
   reviewCriteria = ["Review the recorded verification artifact"],
   reviewerPlan = "",
 } = {}) {
-  const base = packetReport(runId, { taskId, issueNumber, baseBranch, conflictSurface: "src/verification" });
+  const base = packetReport(runId, {
+    taskId,
+    repo,
+    issueNumber,
+    intendedBranch,
+    baseBranch,
+    conflictSurface: "src/verification",
+  });
   const created = await createRunFromPacketReport({
     ...base,
     raw: {
@@ -194,7 +204,9 @@ async function seedInternalReviewGateResult(registryRoot, runId, {
 
 async function preparePrReadyRun(registryRoot, tempDir, {
   runId = "run_runner_pr_ready",
+  repo = "MrFlashAccount/example-repo",
   issueNumber = 292,
+  intendedBranch = `sergey/${runId}`,
   baseBranch = "develop",
 } = {}) {
   const workspacePath = await createVerificationWorkspace(tempDir, {
@@ -203,7 +215,9 @@ async function preparePrReadyRun(registryRoot, tempDir, {
   });
   const preparedRunId = await prepareVerificationRun(registryRoot, workspacePath, {
     runId,
+    repo,
     issueNumber,
+    intendedBranch,
     baseBranch,
   });
   await advanceRunToInternalReview(registryRoot, preparedRunId);
@@ -1015,6 +1029,290 @@ test("local runner records a local PR projection handoff and advances pr_ready t
   assert.equal(projectionArtifact.schema_version, "github-pr-projection-result.v1");
   assert.equal(projectionArtifact.status, "projected_local");
   assert.equal(projectionArtifact.github_pr.url, snapshot.github.pr.url);
+});
+
+test("transport-backed PR projection reuses a sanitized recorded result without duplicate transport calls", async () => {
+  const tempDir = await makeTempDir();
+  const registryRoot = path.join(tempDir, "registry");
+  const repo = "MrFlashAccount/ghp_abcdefghijklmnopqrstuvwxyz123456";
+  const intendedBranch = "feature/glpat-abcdefghijklmnopqrstuvwxyz123456/Users/sergey/private";
+  const baseBranch = "develop/github_pat_abcdefghijklmnopqrstuvwxyz123456";
+  const runId = await preparePrReadyRun(registryRoot, tempDir, {
+    runId: "run_runner_pr_projection_transport",
+    repo,
+    intendedBranch,
+    baseBranch,
+  });
+  let transportCalls = 0;
+  const prProjectionAdapter = createGithubPrTransportAdapter({
+    externalSideEffects: false,
+    projectPr() {
+      transportCalls += 1;
+      return {
+        status: "created",
+        number: 4242,
+        url: "https://github.com/MrFlashAccount/example-repo/pull/4242",
+        state: "open",
+        draft: false,
+        title: "Buran handoff for runner-verification",
+      };
+    },
+  });
+
+  const first = await runLocalMission({
+    registryRoot,
+    runId,
+    clock: () => new Date("2026-05-16T13:57:00.000Z"),
+    prProjectionAdapter,
+  });
+
+  assert.equal(first.outcome, "completed");
+  assert.equal(first.current_state, "ready_for_manual_review");
+  assert.equal(first.projection.status, "created");
+  assert.equal(first.projection.mode, "github_transport");
+  assert.equal(first.projection.github_pr.number, 4242);
+  assert.equal(first.projection.github_pr.repo, "MrFlashAccount/[REDACTED_SECRET]");
+  assert.equal(first.projection.github_pr.head_branch, "feature/[REDACTED_SECRET]<absolute_path>/private");
+  assert.equal(first.projection.github_pr.base_branch, "develop/[REDACTED_SECRET]");
+  assert.equal(transportCalls, 1);
+
+  const paths = getRunPaths(registryRoot, runId);
+  const snapshot = await readRunSnapshot(paths.runPath);
+  const eventsBeforeRetry = await readEventsFile(paths.eventsPath);
+  await writeRunSnapshot(registryRoot, {
+    ...snapshot,
+    state: "pr_ready",
+    terminal_reason: "",
+    updated_at: "2026-05-16T13:57:30.000Z",
+  });
+
+  const retried = await runLocalMission({
+    registryRoot,
+    runId,
+    clock: () => new Date("2026-05-16T13:58:00.000Z"),
+    prProjectionAdapter,
+  });
+  const eventsAfterRetry = await readEventsFile(paths.eventsPath);
+  const retriedSnapshot = await readRunSnapshot(paths.runPath);
+
+  assert.equal(retried.outcome, "completed");
+  assert.equal(retried.current_state, "ready_for_manual_review");
+  assert.deepEqual(retried.steps_taken.map((step) => [step.action, step.status, step.to_state]), [
+    ["projection_intent_recorded", "noop", "pr_ready"],
+    ["projection_result_recorded", "noop", "pr_ready"],
+    ["transition", "completed", "ready_for_manual_review"],
+  ]);
+  assert.equal(transportCalls, 1);
+  assert.equal(retried.projection.github_pr.repo, "MrFlashAccount/[REDACTED_SECRET]");
+  assert.equal(retried.projection.github_pr.head_branch, "feature/[REDACTED_SECRET]<absolute_path>/private");
+  assert.equal(retried.projection.github_pr.base_branch, "develop/[REDACTED_SECRET]");
+  assert.equal(retriedSnapshot.github.pr.url, "https://github.com/MrFlashAccount/example-repo/pull/4242");
+  assert.equal(retriedSnapshot.github.pr.repo, "MrFlashAccount/[REDACTED_SECRET]");
+  assert.equal(retriedSnapshot.github.pr.head_branch, "feature/[REDACTED_SECRET]<absolute_path>/private");
+  assert.equal(retriedSnapshot.github.pr.base_branch, "develop/[REDACTED_SECRET]");
+  assert.equal(eventsAfterRetry.filter((event) => event.type === "projection.intent_recorded").length, 1);
+  assert.equal(eventsAfterRetry.filter((event) => event.type === "projection.result_recorded").length, 1);
+  assert.equal(eventsAfterRetry.length, eventsBeforeRetry.length + 1);
+});
+
+test("transport-backed PR projection preserves contract-valid repo and branch values until durable sanitization", async () => {
+  const snapshot = {
+    run_id: "run_runner_pr_projection_transport_sanitized_contract",
+    task_id: "task github_pat_abcdefghijklmnopqrstuvwxyz123456 /Users/sergey/private/notes.md",
+    state: "pr_ready",
+    execution: { current_epoch: 1 },
+    gates: {
+      verification: { status: "PASS", current_epoch: 1, current_attempt: 1, artifact_refs: [] },
+      internal_review: { status: "PASS", current_epoch: 1, current_attempt: 1, artifact_refs: [] },
+    },
+    github: {
+      repo: "MrFlashAccount/ghp_abcdefghijklmnopqrstuvwxyz123456",
+      issue_number: 17,
+      intended_branch: "feature/glpat-abcdefghijklmnopqrstuvwxyz123456/Users/sergey/private",
+      base_branch: "develop/github_pat_abcdefghijklmnopqrstuvwxyz123456",
+    },
+    projections: {},
+  };
+  const prProjectionAdapter = createGithubPrTransportAdapter({
+    externalSideEffects: false,
+    projectPr() {
+      return {
+        status: "created",
+        number: 4242,
+        url: "https://github.com/MrFlashAccount/example-repo/pull/4242",
+        state: "open",
+        draft: false,
+        title: "Buran handoff for runner-verification",
+      };
+    },
+  });
+
+  const plan = prProjectionAdapter.plan(snapshot, {
+    clock: () => new Date("2026-05-16T13:57:00.000Z"),
+    actor: "runner-test",
+  });
+  const projection = await prProjectionAdapter.execute(snapshot, plan);
+
+  assert.equal(projection.result.status, "created");
+  assert.equal(projection.githubPr.repo, "MrFlashAccount/[REDACTED_SECRET]");
+  assert.equal(projection.githubPr.head_branch, "feature/[REDACTED_SECRET]<absolute_path>/private");
+  assert.equal(projection.githubPr.base_branch, "develop/[REDACTED_SECRET]");
+  assert.equal(projection.result.github_pr.repo, "MrFlashAccount/[REDACTED_SECRET]");
+  assert.equal(projection.result.github_pr.head_branch, "feature/[REDACTED_SECRET]<absolute_path>/private");
+  assert.equal(projection.result.github_pr.base_branch, "develop/[REDACTED_SECRET]");
+  assert.match(plan.intentIdempotencyKey, /^github\.pr:[a-f0-9]{64}:intent$/);
+  assert.match(plan.resultIdempotencyKey, /^github\.pr:[a-f0-9]{64}:result$/);
+  assert.doesNotMatch(plan.intentIdempotencyKey, /(github_pat_|ghp_|glpat-|\/Users\/)/);
+  assert.doesNotMatch(plan.resultIdempotencyKey, /(github_pat_|ghp_|glpat-|\/Users\/)/);
+});
+
+test("local runner records sanitized projection payloads and safe idempotency keys for secret-like github contract fields", async () => {
+  const tempDir = await makeTempDir();
+  const registryRoot = path.join(tempDir, "registry");
+  const repo = "MrFlashAccount/ghp_abcdefghijklmnopqrstuvwxyz123456";
+  const intendedBranch = "feature/glpat-abcdefghijklmnopqrstuvwxyz123456/Users/sergey/private";
+  const baseBranch = "develop/github_pat_abcdefghijklmnopqrstuvwxyz123456";
+  const runId = await preparePrReadyRun(registryRoot, tempDir, {
+    runId: "run_runner_pr_projection_sanitized_recording",
+    repo,
+    intendedBranch,
+    baseBranch,
+  });
+
+  const result = await runLocalMission({
+    registryRoot,
+    runId,
+    clock: () => new Date("2026-05-16T13:57:00.000Z"),
+  });
+
+  assert.equal(result.outcome, "completed");
+  assert.equal(result.current_state, "ready_for_manual_review");
+  assert.equal(result.projection.github_pr.repo, "MrFlashAccount/[REDACTED_SECRET]");
+  assert.equal(result.projection.github_pr.head_branch, "feature/[REDACTED_SECRET]<absolute_path>/private");
+  assert.equal(result.projection.github_pr.base_branch, "develop/[REDACTED_SECRET]");
+  assert.match(result.projection.intent_idempotency_key, /^github\.pr:[a-f0-9]{64}:intent$/);
+  assert.match(result.projection.result_idempotency_key, /^github\.pr:[a-f0-9]{64}:result$/);
+  assert.doesNotMatch(result.projection.intent_idempotency_key, /(github_pat_|ghp_|glpat-|\/Users\/)/);
+  assert.doesNotMatch(result.projection.result_idempotency_key, /(github_pat_|ghp_|glpat-|\/Users\/)/);
+
+  const paths = getRunPaths(registryRoot, runId);
+  const snapshot = await readRunSnapshot(paths.runPath);
+  const events = await readEventsFile(paths.eventsPath);
+  const projectionArtifact = JSON.parse(await fs.readFile(path.join(paths.runDir, result.projection.result_artifact_ref.path), "utf8"));
+  const intentEvent = events.find((event) => event.type === "projection.intent_recorded");
+  const resultEvent = events.find((event) => event.type === "projection.result_recorded");
+
+  assert.equal(snapshot.state, "ready_for_manual_review");
+  assert.equal(snapshot.github.pr.repo, "MrFlashAccount/[REDACTED_SECRET]");
+  assert.equal(snapshot.github.pr.head_branch, "feature/[REDACTED_SECRET]<absolute_path>/private");
+  assert.equal(snapshot.github.pr.base_branch, "develop/[REDACTED_SECRET]");
+  assert.equal(snapshot.projections.github_pr.last_intent.idempotency_key, result.projection.intent_idempotency_key);
+  assert.equal(snapshot.projections.github_pr.last_result.idempotency_key, result.projection.result_idempotency_key);
+  assert.equal(snapshot.projections.github_pr.last_result.intent_idempotency_key, result.projection.intent_idempotency_key);
+  assert.equal(projectionArtifact.idempotency_key, result.projection.result_idempotency_key);
+  assert.equal(projectionArtifact.intent_idempotency_key, result.projection.intent_idempotency_key);
+  assert.equal(resultEvent.evidence.idempotency_key, result.projection.result_idempotency_key);
+  assert.equal(resultEvent.evidence.intent_idempotency_key, result.projection.intent_idempotency_key);
+
+  for (const value of [
+    snapshot.projections.github_pr.last_intent.idempotency_key,
+    snapshot.projections.github_pr.last_result.idempotency_key,
+    snapshot.projections.github_pr.last_result.intent_idempotency_key,
+    projectionArtifact.idempotency_key,
+    projectionArtifact.intent_idempotency_key,
+    intentEvent.evidence.idempotency_key,
+    resultEvent.evidence.idempotency_key,
+    resultEvent.evidence.intent_idempotency_key,
+  ]) {
+    assert.doesNotMatch(value, /(github_pat_|ghp_|glpat-|\/Users\/)/);
+  }
+});
+
+test("transport-backed PR projection blocks on invalid transport results", async () => {
+  const tempDir = await makeTempDir();
+  const registryRoot = path.join(tempDir, "registry");
+  const runId = await preparePrReadyRun(registryRoot, tempDir, {
+    runId: "run_runner_pr_projection_transport_invalid",
+  });
+  const prProjectionAdapter = createGithubPrTransportAdapter({
+    externalSideEffects: false,
+    projectPr() {
+      return {
+        status: "created",
+        number: 0,
+        url: "",
+        draft: false,
+      };
+    },
+  });
+
+  const result = await runLocalMission({
+    registryRoot,
+    runId,
+    clock: () => new Date("2026-05-16T13:57:00.000Z"),
+    prProjectionAdapter,
+  });
+
+  const paths = getRunPaths(registryRoot, runId);
+  const snapshot = await readRunSnapshot(paths.runPath);
+  const events = await readEventsFile(paths.eventsPath);
+  assert.equal(result.outcome, "blocked");
+  assert.equal(result.current_state, "pr_ready");
+  assert.equal(result.projection.problem.code, "pr_projection_invalid_transport_result");
+  assert.deepEqual(result.steps_taken.map((step) => [step.action, step.status, step.to_state]), [
+    ["projection_intent_recorded", "completed", "pr_ready"],
+    ["projection_result_recorded", "blocked", "pr_ready"],
+  ]);
+  assert.equal(snapshot.state, "pr_ready");
+  assert.equal(events.filter((event) => event.type === "projection.intent_recorded").length, 1);
+  assert.equal(events.filter((event) => event.type === "projection.result_recorded").length, 0);
+});
+
+test("transport-backed PR projection redacts invalid transport status in low-level runner reports", async () => {
+  const tempDir = await makeTempDir();
+  const registryRoot = path.join(tempDir, "registry");
+  const runId = await preparePrReadyRun(registryRoot, tempDir, {
+    runId: "run_runner_pr_projection_transport_invalid_status",
+  });
+  const rawSecretStatus = "ghp_abcdefghijklmnopqrstuvwxyz123456 /Users/sergey/private/notes.txt";
+  const prProjectionAdapter = createGithubPrTransportAdapter({
+    externalSideEffects: false,
+    projectPr() {
+      return {
+        status: rawSecretStatus,
+        number: 4242,
+        url: "https://github.com/MrFlashAccount/example-repo/pull/4242",
+        state: "open",
+        draft: false,
+        title: "Buran handoff for runner-verification",
+      };
+    },
+  });
+
+  const result = await runLocalMission({
+    registryRoot,
+    runId,
+    clock: () => new Date("2026-05-16T13:57:00.000Z"),
+    prProjectionAdapter,
+  });
+
+  const leakedFields = [
+    result.projection.problem.message,
+    ...result.blockers.map((blocker) => blocker.message),
+    ...result.steps_taken.map((step) => step.detail).filter(Boolean),
+  ].join("\n");
+
+  assert.equal(result.outcome, "blocked");
+  assert.equal(result.current_state, "pr_ready");
+  assert.equal(result.projection.problem.code, "pr_projection_invalid_transport_result");
+  assert.match(result.projection.problem.message, /\[REDACTED_SECRET\]/);
+  assert.match(result.projection.problem.message, /<absolute_path>\/notes\.txt/);
+  assert.doesNotMatch(leakedFields, /ghp_abcdefghijklmnopqrstuvwxyz123456/);
+  assert.doesNotMatch(leakedFields, /\/Users\/sergey\/private\/notes\.txt/);
+  assert.deepEqual(result.steps_taken.map((step) => [step.action, step.status, step.to_state]), [
+    ["projection_intent_recorded", "completed", "pr_ready"],
+    ["projection_result_recorded", "blocked", "pr_ready"],
+  ]);
 });
 
 test("registry recovery replays projection semantics and preserves ready_for_manual_review runs", async () => {
