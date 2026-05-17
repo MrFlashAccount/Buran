@@ -48,10 +48,11 @@ export default defineLocalPluginEntry({
 });
 
 export { parseBuranArgs, runBuranCli, usageText } from "./src/cli.js";
-export { acquireLeaseReport, formatBuranReport, intakePacketListFile, normalizeBuranConfig, recoverRegistryReport, releaseLeaseReport, validatePacketListFile } from "./src/buran.js";
+export { acquireLeaseReport, formatBuranReport, intakePacketListFile, normalizeBuranConfig, recoverRegistryReport, releaseLeaseReport, runLocalMissionReport, validatePacketListFile } from "./src/buran.js";
 export { acquireWorkspaceLease, releaseWorkspaceLease } from "./src/locks.js";
 export { normalizePacket, normalizePacketList, summarizePacketReports } from "./src/packet-sufficiency.js";
 export { createInvocationObserver, normalizeObservabilityConfig, sanitizeError, sanitizeForObservability } from "./src/observability.js";
 export { recoverRegistry } from "./src/recovery.js";
+export { runLocalMission } from "./src/runner.js";
 export { appendRunEvent, createBatchFromPacketReports, createRunFromPacketReport, getRegistryPaths, rebuildIndexes, transitionRun, writeJsonAtomic } from "./src/registry.js";
 export { assertTransitionAllowed, getAllowedTransitions, isTerminalState, validateTransition } from "./src/state-machine.js";

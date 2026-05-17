@@ -18,13 +18,14 @@ Implemented now:
 - local recovery/replay command that validates schema, event sequence, transition edges, snapshot/event consistency, and artifact hashes;
 - gate-aware transition guards that require fresh current-epoch verification/internal-review results before `verification -> internal_review`, `verification -> fix_loop`, `internal_review -> pr_ready`, and `internal_review -> fix_loop`;
 - local workspace lease acquisition with lock surfaces for workspace, repo checkout, issue, branch, and declared conflict surfaces;
+- local mission runner skeleton that can stage `queued` runs into `waiting_for_lock`, optionally acquire a local lease, and then stop before implementation/verification/review dispatch;
 - TTL metadata and stale-lease recovery that reports/reclaims expired local lease records without guessing active ownership;
 - conflict blocking via `blocked_lock_conflict`, with rollback of partial local lock-file acquisition;
 - recovery quarantine for unknown event types instead of accepting arbitrary timestamped events;
 - quarantine of corrupt, malformed, incomplete, or ambiguous local run state under `registry/quarantine/` with `quarantine-report.json`;
 - rebuildable `indexes/active-runs.json`, `indexes/workspace-leases.json`, and `indexes/recovery-report.json`;
 - structured local operational logs and per-invocation diagnostic reports with trace ids, outcome/duration fields, and sanitization/redaction;
-- no autonomous discovery, remote writes, task execution, checkout/worktree setup, runner loop, PR creation, or projection adapter.
+- no autonomous discovery, remote writes, implementation worker dispatch, verification/review adapter execution, checkout/worktree setup, PR creation, or projection adapter.
 
 See [docs/observability.md](docs/observability.md) for the boundary between durable registry journals, operational logs, and diagnostic reports. Logs and diagnostics are local debugging aids only; registry state remains the source of truth and no external telemetry is emitted.
 
@@ -34,6 +35,7 @@ See [docs/observability.md](docs/observability.md) for the boundary between dura
 npm test
 node ./bin/buran.js validate --packets ./test/fixtures/packet-list.mixed.json
 node ./bin/buran.js intake --packets ./test/fixtures/packet-list.mixed.json --registry /tmp/buran-registry
+node ./bin/buran.js run --run <run_id> --registry /tmp/buran-registry
 node ./bin/buran.js lease acquire --run <run_id> --workspace-id ws-1 --registry /tmp/buran-registry
 node ./bin/buran.js recover --registry /tmp/buran-registry
 ```
@@ -43,12 +45,15 @@ OpenClaw command form:
 ```text
 /buran validate --packets <packet-list.json> [--json]
 /buran intake --packets <packet-list.json> [--registry <path>] [--json]
+/buran run --run <run_id> [--workspace-id <id>] [--workspace-path <path>] [--ttl-ms <ms>] [--registry <path>] [--json]
 /buran lease acquire --run <run_id> --workspace-id <id> [--workspace-path <path>] [--ttl-ms <ms>] [--registry <path>] [--json]
 /buran lease release --run <run_id> [--registry <path>] [--json]
 /buran recover [--registry <path>] [--json]
 ```
 
 `--packets` is mandatory for `validate` and `intake`. Buran intentionally has no discovery fallback. `lease acquire` reserves local state only; it does not create a checkout/worktree or run code. `recover` only inspects and repairs local registry indexes/quarantine/lease records; it has no external side effects.
+
+`run` is local-only skeleton orchestration. Without `--workspace-id`, it can safely advance a queued run into `waiting_for_lock` and stop with a structured blocker. With `--workspace-id`, it may acquire a local lease and stop in `running`; it never dispatches implementation workers or fabricates verification/review results.
 
 ## Config
 

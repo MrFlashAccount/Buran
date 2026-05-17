@@ -1,4 +1,4 @@
-import { acquireLeaseReport, formatBuranReport, intakePacketListFile, normalizeBuranConfig, recoverRegistryReport, releaseLeaseReport, validatePacketListFile } from "./buran.js";
+import { acquireLeaseReport, formatBuranReport, intakePacketListFile, normalizeBuranConfig, recoverRegistryReport, releaseLeaseReport, runLocalMissionReport, validatePacketListFile } from "./buran.js";
 import { correlationFromReport, createInvocationObserver, sanitizeError, sanitizePublicReportForOutput, summarizeArgs, summarizeReport } from "./observability.js";
 
 function splitArgs(rawArgs) {
@@ -86,11 +86,12 @@ export function usageText() {
     "Usage:",
     "  /buran validate --packets <packet-list.json> [--json]",
     "  /buran intake --packets <packet-list.json> [--registry <path>] [--json]",
+    "  /buran run --run <run_id> [--workspace-id <id>] [--workspace-path <path>] [--ttl-ms <ms>] [--registry <path>] [--json]",
     "  /buran recover [--registry <path>] [--json]",
     "  /buran lease acquire --run <run_id> --workspace-id <id> [--workspace-path <path>] [--ttl-ms <ms>] [--registry <path>] [--json]",
     "  /buran lease release --run <run_id> [--registry <path>] [--json]",
     "",
-    "Scope: explicit packet lists only; no autonomous discovery, remote writes, task execution, PR creation, or runner behavior.",
+    "Scope: explicit packet lists and local runner skeleton only; no autonomous discovery, remote writes, external systems, PR creation, or worker execution.",
   ].join("\n");
 }
 
@@ -109,6 +110,7 @@ function commandLabel(options) {
 function commandEvent(options) {
   if (options.command === "validate") return "validation.completed";
   if (options.command === "intake") return "intake.completed";
+  if (options.command === "run") return "runner.completed";
   if (options.command === "recover" || options.command === "recovery") return "recovery.completed";
   if ((options.command === "lease" || options.command === "lock") && options.subcommand === "acquire") return "lease.acquire.completed";
   if ((options.command === "lease" || options.command === "lock") && options.subcommand === "release") return "lease.release.completed";
@@ -211,6 +213,27 @@ export async function runBuranCli(rawArgs, { pluginConfig = {}, workspaceDir = p
       }
       const registryRoot = resolveRegistry(options, pluginConfig, workspaceDir, stateDir);
       const report = await intakePacketListFile(options.packets, { registryRoot });
+      return finishCliResult({ result: { ok: true, report }, options, observer });
+    }
+
+    if (options.command === "run") {
+      if (!options.runId) {
+        return finishCliResult({
+          result: { ok: false, text: `${usageText()}\n\nError: run requires --run <run_id>.` },
+          options,
+          observer,
+          outcome: "rejected",
+          reason: "missing_runner_arguments",
+        });
+      }
+      const registryRoot = resolveRegistry(options, pluginConfig, workspaceDir, stateDir);
+      const report = await runLocalMissionReport({
+        registryRoot,
+        runId: options.runId,
+        workspaceId: options.workspaceId,
+        workspacePath: options.workspacePath,
+        ttlMs: options.ttlMs,
+      });
       return finishCliResult({ result: { ok: true, report }, options, observer });
     }
 

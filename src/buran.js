@@ -6,6 +6,7 @@ import { acquireWorkspaceLease, releaseWorkspaceLease } from "./locks.js";
 import { normalizePacketList, summarizePacketReports } from "./packet-sufficiency.js";
 import { createBatchFromPacketReports, createRunFromPacketReport, getRegistryPaths } from "./registry.js";
 import { formatRecoveryReport, recoverRegistry } from "./recovery.js";
+import { runLocalMission } from "./runner.js";
 import { nonEmptyString, resolveMaybeRelative } from "./utils.js";
 
 export function normalizeBuranConfig(raw = {}, { workspaceDir = process.cwd(), stateDir = "" } = {}) {
@@ -133,8 +134,31 @@ export async function releaseLeaseReport({ registryRoot, runId, clock = () => ne
   };
 }
 
+export async function runLocalMissionReport({ registryRoot, runId, workspaceId = "", workspacePath = "", ttlMs = "", clock = () => new Date() } = {}) {
+  return runLocalMission({ registryRoot, runId, workspaceId, workspacePath, ttlMs, clock });
+}
+
 export function formatBuranReport(report) {
   if (report.mode === "recovery") return withObservabilityLines(formatRecoveryReport(report), report);
+  if (report.mode === "run_local") {
+    const lines = [];
+    lines.push("buran: run local");
+    lines.push(`Registry: ${report.registry_root}`);
+    lines.push(`Run: ${report.run_id}`);
+    lines.push(`Outcome: ${report.outcome}`);
+    lines.push(`State: ${report.previous_state || "<missing>"} -> ${report.current_state || "<missing>"}`);
+    for (const step of report.steps_taken || []) {
+      lines.push(`- ${step.action}: ${step.status} (${step.from_state || "<none>"} -> ${step.to_state || "<none>"})`);
+    }
+    if (report.blockers?.length) {
+      for (const blocker of report.blockers) lines.push(`Blocker: ${blocker.code}: ${blocker.message}`);
+    }
+    if (report.warnings?.length) {
+      for (const warning of report.warnings) lines.push(`Warning: ${warning.code}: ${warning.message}`);
+    }
+    lines.push("External side effects: no");
+    return withObservabilityLines(lines.join("\n"), report);
+  }
   if (report.mode === "lease_acquire") {
     const lines = [];
     lines.push("buran: lease acquire");
