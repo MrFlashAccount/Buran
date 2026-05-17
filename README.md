@@ -18,8 +18,8 @@ Implemented now:
 - local recovery/replay command that validates schema, event sequence, transition edges, snapshot/event consistency, and artifact hashes;
 - gate-aware transition guards that require fresh current-epoch verification/internal-review results before `verification -> internal_review`, `verification -> fix_loop`, `internal_review -> pr_ready`, and `internal_review -> fix_loop`;
 - local workspace lease acquisition with lock surfaces for workspace, repo checkout, issue, branch, and declared conflict surfaces;
-- local mission runner skeleton that can stage `queued` runs into `waiting_for_lock`, optionally acquire a local lease, and then stop before implementation/verification/review dispatch;
-- local workspace-preparation skeleton for `running` runs that inspects a local git workspace/worktree, records immutable preparation evidence under the artifact ledger, and still stops before implementation dispatch;
+- local mission runner skeleton that can stage `queued` runs into `waiting_for_lock`, optionally acquire a local lease, record immutable workspace-preparation evidence plus an implementation-dispatch handoff artifact, and then stop before implementation/verification/review dispatch;
+- local workspace-preparation skeleton for `running` runs that inspects a local git workspace/worktree, records immutable preparation evidence under the artifact ledger, derives a deterministic implementation-dispatch handoff artifact, and still stops before implementation worker execution;
 - TTL metadata and stale-lease recovery that reports/reclaims expired local lease records without guessing active ownership;
 - conflict blocking via `blocked_lock_conflict`, with rollback of partial local lock-file acquisition;
 - recovery quarantine for unknown event types instead of accepting arbitrary timestamped events;
@@ -54,7 +54,7 @@ OpenClaw command form:
 
 `--packets` is mandatory for `validate` and `intake`. Buran intentionally has no discovery fallback. `lease acquire` reserves local state only; it does not create a checkout/worktree or run code. `recover` only inspects and repairs local registry indexes/quarantine/lease records; it has no external side effects.
 
-`run` is local-only skeleton orchestration. Without `--workspace-id`, it can safely advance a queued run into `waiting_for_lock` and stop with a structured blocker. With `--workspace-id`, it may acquire a local lease, inspect a provided local git workspace/worktree path, and record a `workspace_preparation` artifact before stopping in `running`. It never dispatches implementation workers, creates a branch/worktree, or fabricates verification/review results.
+`run` is local-only skeleton orchestration. Without `--workspace-id`, it can safely advance a queued run into `waiting_for_lock` and stop with a structured blocker. With `--workspace-id`, it may acquire a local lease, inspect a provided local git workspace/worktree path, record a `workspace_preparation` artifact, then record a deterministic `implementation_dispatch` handoff artifact and stop in `running` with `dispatch_ready_not_started`. Reruns are idempotent for identical evidence; if workspace-preparation evidence changes, Buran records a fresh immutable handoff artifact instead of pretending the earlier handoff is still current. It never dispatches implementation workers, creates a branch/worktree, or fabricates verification/review results.
 
 ## Config
 

@@ -48,7 +48,7 @@ function isNonNegativeInteger(value) {
 }
 
 function artifactStageAllowsEpochZero(stageName) {
-  return stageName === "workspace_preparation";
+  return stageName === "workspace_preparation" || stageName === "implementation_dispatch";
 }
 
 function isSafeRelativeArtifactPath(value) {

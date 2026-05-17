@@ -158,6 +158,14 @@ export function formatBuranReport(report) {
         lines.push(`Workspace preparation: ${preparation.status}; blocker=${preparation.blocker.code}`);
       }
     }
+    if (report.implementation_dispatch) {
+      const dispatch = report.implementation_dispatch;
+      if (dispatch.artifact_ref?.path) {
+        lines.push(`Implementation dispatch: ${dispatch.status}; artifact=${dispatch.artifact_ref.path}`);
+      } else if (dispatch.blocker?.code) {
+        lines.push(`Implementation dispatch: ${dispatch.status}; blocker=${dispatch.blocker.code}`);
+      }
+    }
     if (report.blockers?.length) {
       for (const blocker of report.blockers) lines.push(`Blocker: ${blocker.code}: ${blocker.message}`);
     }

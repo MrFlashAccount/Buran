@@ -123,6 +123,18 @@ async function readArtifactIfExists(filePath) {
   }
 }
 
+async function verifyOrRecoverArtifactFile(resolvedPath, contentBuffer, expectedSha256) {
+  const existingFile = await readArtifactIfExists(resolvedPath.absolutePath);
+  if (!existingFile.exists) {
+    await writeTextAtomic(resolvedPath.absolutePath, contentBuffer.toString("utf8"));
+    return { recovered: true };
+  }
+  if (existingFile.sha256 !== expectedSha256) {
+    throw new Error(`artifact path ${resolvedPath.relativePath} already exists with different hash`);
+  }
+  return { recovered: false };
+}
+
 async function lastEventSequence(eventsPath) {
   try {
     const events = await readEventsFile(eventsPath);
@@ -159,6 +171,15 @@ async function readArtifactRecordedEventsByPath(eventsPath, artifactPath) {
 
 function samePayload(left, right) {
   return canonicalJson(left) === canonicalJson(right);
+}
+
+function sameArtifactRecordedPayload(left, right) {
+  if (!left || !right) return false;
+  const normalize = (payload) => {
+    const { recorded_at: _recordedAt, ...rest } = payload;
+    return rest;
+  };
+  return samePayload(normalize(left), normalize(right));
 }
 
 function mergeArtifactSummary(snapshot, summary, sequence) {
@@ -478,7 +499,7 @@ export async function recordArtifact(registryRoot, runId, {
 
   const priorEvents = await readArtifactRecordedEventsByPath(paths.eventsPath, payload.path);
   if (priorEvents.length > 0) {
-    const matchingEvent = priorEvents.find((event) => samePayload(event.evidence || {}, payload));
+    const matchingEvent = priorEvents.find((event) => sameArtifactRecordedPayload(event.evidence || {}, payload));
     if (!matchingEvent) {
       const conflictingPayload = priorEvents[0]?.evidence || {};
       if (conflictingPayload.sha256 && conflictingPayload.sha256 !== payload.sha256) {
@@ -487,10 +508,7 @@ export async function recordArtifact(registryRoot, runId, {
       throw new Error(`artifact path ${resolved.relativePath} already recorded with different payload`);
     }
 
-    const existingFile = await readArtifactIfExists(resolved.absolutePath);
-    if (existingFile.exists && existingFile.sha256 !== payload.sha256) {
-      throw new Error(`artifact path ${resolved.relativePath} already exists with different hash`);
-    }
+    await verifyOrRecoverArtifactFile(resolved, contentBuffer, payload.sha256);
 
     const repairedSnapshot = mergeArtifactSummary(snapshot, buildRecordedArtifactSummary(matchingEvent.evidence), matchingEvent.sequence);
     if (!samePayload(repairedSnapshot, snapshot)) {
@@ -515,7 +533,8 @@ export async function recordArtifact(registryRoot, runId, {
   const existingSummary = snapshot.artifacts?.recorded?.by_path?.[resolved.relativePath];
   if (existingSummary) {
     const summaryPayload = buildRecordedArtifactSummary(payload);
-    if (samePayload(existingSummary, summaryPayload)) {
+    if (sameArtifactRecordedPayload(existingSummary, summaryPayload)) {
+      await verifyOrRecoverArtifactFile(resolved, contentBuffer, payload.sha256);
       return { status: "noop", run: snapshot, artifact_ref: { path: resolved.relativePath, sha256: payload.sha256 }, event: null };
     }
     if (existingSummary.sha256 !== payload.sha256) throw new Error(`artifact path ${resolved.relativePath} already recorded with different hash`);

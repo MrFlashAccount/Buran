@@ -133,11 +133,17 @@ test("local runner can acquire a local lease when workspace info is provided and
     ["transition", "completed", "waiting_for_lock"],
     ["lease_acquire", "completed", "running"],
     ["workspace_preparation", "completed", "running"],
+    ["implementation_dispatch", "completed", "running"],
   ]);
   assert.equal(first.blockers[0].code, "implementation_dispatch_not_implemented");
+  assert.equal(first.blockers[0].dispatch_status, "dispatch_ready_not_started");
   assert.equal(first.workspace_preparation.status, "prepared");
   assert.equal(first.workspace_preparation.artifact_record_status, "recorded");
   assert.match(first.workspace_preparation.artifact_ref.path, /^artifacts\/workspace-preparation\/[a-f0-9]{16}\.json$/);
+  assert.equal(first.implementation_dispatch.status, "dispatch_ready_not_started");
+  assert.equal(first.implementation_dispatch.artifact_record_status, "recorded");
+  assert.match(first.implementation_dispatch.artifact_ref.path, /^artifacts\/implementation-dispatch\/[a-f0-9]{16}\.json$/);
+  assert.deepEqual(first.implementation_dispatch.workspace_preparation_artifact_ref, first.workspace_preparation.artifact_ref);
 
   const paths = getRunPaths(registryRoot, created.run.run_id);
   const snapshotAfterFirst = await readRunSnapshot(paths.runPath);
@@ -145,9 +151,23 @@ test("local runner can acquire a local lease when workspace info is provided and
   assert.equal(snapshotAfterFirst.state, "running");
   assert.equal(snapshotAfterFirst.workspace.id, "ws-runner");
   assert.equal(snapshotAfterFirst.workspace.lease_status, "acquired");
+  assert.equal(snapshotAfterFirst.gates.verification.status, "PENDING");
+  assert.equal(snapshotAfterFirst.gates.internal_review.status, "PENDING");
   assert.ok(eventsAfterFirst.some((event) => event.type === "lock.lease_acquired"));
   assert.ok(eventsAfterFirst.some((event) => event.type === "artifact.recorded" && event.evidence.gate_name === "workspace_preparation"));
+  assert.ok(eventsAfterFirst.some((event) => event.type === "artifact.recorded" && event.evidence.gate_name === "implementation_dispatch"));
+  assert.equal(eventsAfterFirst.some((event) => event.type === "gate.result_recorded"), false);
   assert.equal(await fs.readFile(path.join(paths.runDir, first.workspace_preparation.artifact_ref.path), "utf8").then((text) => text.includes("workspace-preparation.v1")), true);
+  const dispatchArtifact = JSON.parse(await fs.readFile(path.join(paths.runDir, first.implementation_dispatch.artifact_ref.path), "utf8"));
+  assert.equal(dispatchArtifact.schema_version, "implementation-dispatch-intent.v1");
+  assert.equal(dispatchArtifact.dispatch_status, "dispatch_not_started");
+  assert.deepEqual(dispatchArtifact.workspace_preparation_artifact, first.workspace_preparation.artifact_ref);
+  assert.deepEqual(dispatchArtifact.packet_artifact, snapshotAfterFirst.artifacts.packet);
+
+  const workspacePreparationArtifactPath = path.join(paths.runDir, first.workspace_preparation.artifact_ref.path);
+  const dispatchArtifactPath = path.join(paths.runDir, first.implementation_dispatch.artifact_ref.path);
+  await fs.rm(workspacePreparationArtifactPath, { force: true });
+  await fs.rm(dispatchArtifactPath, { force: true });
 
   const second = await runLocalMission({
     registryRoot,
@@ -160,11 +180,23 @@ test("local runner can acquire a local lease when workspace info is provided and
   assert.equal(second.outcome, "blocked");
   assert.equal(second.previous_state, "running");
   assert.equal(second.current_state, "running");
-  assert.deepEqual(second.steps_taken.map((step) => [step.action, step.status, step.to_state]), [["workspace_preparation", "noop", "running"]]);
+  assert.deepEqual(second.steps_taken.map((step) => [step.action, step.status, step.to_state]), [
+    ["workspace_preparation", "noop", "running"],
+    ["implementation_dispatch", "noop", "running"],
+  ]);
   assert.equal(second.blockers[0].code, "implementation_dispatch_not_implemented");
   assert.equal(second.workspace_preparation.artifact_record_status, "noop");
   assert.deepEqual(second.workspace_preparation.artifact_ref, first.workspace_preparation.artifact_ref);
+  assert.equal(second.implementation_dispatch.status, "dispatch_ready_not_started");
+  assert.equal(second.implementation_dispatch.artifact_record_status, "noop");
+  assert.deepEqual(second.implementation_dispatch.artifact_ref, first.implementation_dispatch.artifact_ref);
   assert.equal(eventsAfterSecond.length, eventsAfterFirst.length);
+  assert.equal(await fs.readFile(workspacePreparationArtifactPath, "utf8").then((text) => text.includes("workspace-preparation.v1")), true);
+  const recoveredDispatchArtifact = JSON.parse(await fs.readFile(dispatchArtifactPath, "utf8"));
+  assert.equal(recoveredDispatchArtifact.schema_version, "implementation-dispatch-intent.v1");
+  assert.equal(recoveredDispatchArtifact.dispatch_status, "dispatch_not_started");
+  assert.deepEqual(recoveredDispatchArtifact.workspace_preparation_artifact, first.workspace_preparation.artifact_ref);
+  assert.deepEqual(recoveredDispatchArtifact.packet_artifact, snapshotAfterFirst.artifacts.packet);
 
   const recovery = await recoverRegistry(registryRoot, { clock: () => new Date("2026-05-16T13:55:00.000Z") });
   assert.equal(recovery.summary.quarantined_runs, 0);
@@ -200,9 +232,11 @@ test("local runner blocks running workspace preparation when workspace path is m
   assert.equal(result.current_state, "running");
   assert.equal(result.workspace_preparation.status, "blocked");
   assert.equal(result.workspace_preparation.blocker.code, "workspace_path_required");
+  assert.equal(result.implementation_dispatch, null);
   assert.equal(result.blockers[0].code, "workspace_path_required");
   const events = await readEventsFile(paths.eventsPath);
   assert.equal(events.some((event) => event.type === "artifact.recorded" && event.evidence.gate_name === "workspace_preparation"), false);
+  assert.equal(events.some((event) => event.type === "artifact.recorded" && event.evidence.gate_name === "implementation_dispatch"), false);
 });
 
 test("local runner records a new immutable workspace preparation artifact when local git evidence changes", async () => {
@@ -223,6 +257,7 @@ test("local runner records a new immutable workspace preparation artifact when l
     clock: () => new Date("2026-05-16T13:53:00.000Z"),
   });
   const paths = getRunPaths(registryRoot, created.run.run_id);
+  const snapshotAfterFirst = await readRunSnapshot(paths.runPath);
   const eventsAfterFirst = await readEventsFile(paths.eventsPath);
 
   await fs.writeFile(path.join(workspacePath, "new-untracked.txt"), "changed evidence\n", "utf8");
@@ -233,12 +268,19 @@ test("local runner records a new immutable workspace preparation artifact when l
     clock: () => new Date("2026-05-16T13:54:00.000Z"),
   });
   const eventsAfterSecond = await readEventsFile(paths.eventsPath);
+  const snapshotAfterSecond = await readRunSnapshot(paths.runPath);
 
   assert.equal(second.outcome, "blocked");
   assert.equal(second.workspace_preparation.status, "warning");
   assert.equal(second.workspace_preparation.artifact_record_status, "recorded");
   assert.notEqual(second.workspace_preparation.artifact_ref.path, first.workspace_preparation.artifact_ref.path);
-  assert.equal(eventsAfterSecond.length, eventsAfterFirst.length + 1);
+  assert.equal(second.implementation_dispatch.status, "dispatch_ready_not_started");
+  assert.equal(second.implementation_dispatch.artifact_record_status, "recorded");
+  assert.notEqual(second.implementation_dispatch.artifact_ref.path, first.implementation_dispatch.artifact_ref.path);
+  assert.equal(eventsAfterSecond.length, eventsAfterFirst.length + 2);
+  assert.equal(snapshotAfterFirst.updated_at, "2026-05-16T13:53:00.000Z");
+  assert.equal(snapshotAfterSecond.updated_at, "2026-05-16T13:54:00.000Z");
+  assert.deepEqual(eventsAfterSecond.slice(-2).map((event) => event.timestamp), ["2026-05-16T13:54:00.000Z", "2026-05-16T13:54:00.000Z"]);
   assert.ok(second.warnings.some((warning) => warning.code === "workspace_dirty"));
 });
 

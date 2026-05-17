@@ -110,6 +110,13 @@ test("execution-run schema validates artifact and gate-result payload contracts"
     provenance: { kind: "verification-json" },
   };
   assert.equal(validateArtifactRecordedPayload(artifactPayload).ok, true);
+  assert.equal(validateArtifactRecordedPayload({
+    ...artifactPayload,
+    path: "artifacts/implementation-dispatch/intent.json",
+    gate_name: "implementation_dispatch",
+    execution_epoch: 0,
+    recorded_from_state: "running",
+  }).ok, true);
   assert.match(validateArtifactRecordedPayload({ ...artifactPayload, path: "../escape.txt" }).error, /safe relative path/);
 
   const gatePayload = {
