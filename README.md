@@ -4,78 +4,126 @@
 
 <h1 align="center">Buran</h1>
 
-Local JSON-first Buran for already approved implementation packets.
+<p align="center">
+  Local, JSON-first execution tracking for already approved GitHub implementation packets.
+</p>
 
-## Current scope
+Buran is a focused OpenClaw plugin for taking an explicit list of approved implementation packets, validating whether they are sufficient to execute, and recording the resulting local run state with durable artifacts, transitions, leases, and recovery data.
 
-Implemented now:
+It is intentionally narrow. Buran is not a planner, backlog manager, dashboard, or autonomous GitHub bot. On the current branch it stays local-first, records what happened, and only exposes a fake/local PR handoff path rather than performing default remote GitHub writes.
 
-- explicit packet-list interface only;
-- dry packet sufficiency validation;
-- local intake that creates `runs/<run_id>/run.json`, `events.jsonl`, `artifacts/packet.md`, and `batches/<batch_id>/batch.json` under the configured registry;
-- formal ExecutionRun state transition engine with allowed transitions, invalid-transition reasons, and terminal-state enforcement;
-- `execution-run.v2` run snapshots with `last_sequence`, `execution.current_epoch`, gate head summaries, and recorded-artifact provenance;
-- `queued` state for sufficient packets;
-- `blocked_plan_insufficient` state for weak packets;
-- consistent transition persistence through `run.json` plus monotonic `events.jsonl` transition events;
-- local `recordArtifact(...)` and `recordGateResult(...)` APIs for verification/internal-review evidence with immutable artifact paths and gate-result idempotency;
-- local recovery/replay command that validates schema, event sequence, transition edges, snapshot/event consistency, and artifact hashes;
-- gate-aware transition guards that require fresh current-epoch verification/internal-review results before `verification -> internal_review`, `verification -> fix_loop`, `internal_review -> pr_ready`, and `internal_review -> fix_loop`;
-- local workspace lease acquisition with lock surfaces for workspace, repo checkout, issue, branch, and declared conflict surfaces;
-- local mission runner skeleton that can stage `queued` runs into `waiting_for_lock`, optionally acquire a local lease, record immutable workspace-preparation evidence plus an implementation-dispatch handoff artifact, execute packet-selected direct allowlisted verification commands for `verification` runs, execute a local-only internal-review adapter for `internal_review` runs, and record a local fake/no-network PR projection handoff for `pr_ready` before still stopping short of fix-loop implementation or real remote writes;
-- local workspace-preparation skeleton for `running` runs that inspects a local git workspace/worktree, records immutable preparation evidence under the artifact ledger, derives a deterministic implementation-dispatch handoff artifact, and still stops before implementation worker execution;
-- TTL metadata and stale-lease recovery that reports/reclaims expired local lease records without guessing active ownership;
-- conflict blocking via `blocked_lock_conflict`, with rollback of partial local lock-file acquisition;
-- recovery quarantine for unknown event types instead of accepting arbitrary timestamped events;
-- quarantine of corrupt, malformed, incomplete, or ambiguous local run state under `registry/quarantine/` with `quarantine-report.json`;
-- rebuildable `indexes/active-runs.json`, `indexes/workspace-leases.json`, and `indexes/recovery-report.json`;
-- structured local operational logs and per-invocation diagnostic reports with trace ids, outcome/duration fields, and sanitization/redaction;
-- exported Slice 7 PR projection transport seam for `pr_ready` handoff tests and future launch wiring, while the default CLI/runtime path still stays local-fake and no-network;
-- no autonomous discovery, implementation worker dispatch, checkout/worktree setup, fix-loop implementation, or launch-pipeline wiring for real GitHub credentials/remote execution.
+## Status
 
-See [docs/observability.md](docs/observability.md) for the boundary between durable registry journals, operational logs, and diagnostic reports. Logs and diagnostics are local debugging aids only; registry state remains the source of truth and no external telemetry is emitted.
+> Current branch status: implemented as a local-only execution boundary with validation, intake, lease management, recovery, verification/internal-review gate recording, and local PR projection artifacts.
 
-## Documentation map
+What works today:
 
-- [ARCHITECTURE.md](ARCHITECTURE.md) — selected architecture, constraints, and decision record
-- [CONTEXT.md](CONTEXT.md) — ownership and placement rules for this plugin folder
-- [docs/context-map.md](docs/context-map.md) — upstream/downstream boundaries, handoff points, and side-effect map
-- [docs/module-map.md](docs/module-map.md) — source-tree responsibilities and runtime flow by module
-- [docs/state-machine.md](docs/state-machine.md) — lifecycle states, transitions, and gate rules
-- [docs/execution-run-schema.md](docs/execution-run-schema.md) — local registry layout and persistence contract
-- [docs/github-projection-contract.md](docs/github-projection-contract.md) — PR/comment/project projection semantics
-- [docs/acceptance-scenarios.md](docs/acceptance-scenarios.md) — concrete behavior scenarios already covered by automated tests
-- [docs/migration-plan.md](docs/migration-plan.md) — migration notes from legacy/reference queue surfaces
+- explicit packet-list validation and intake;
+- packet sufficiency checks that block weak packets instead of guessing missing scope;
+- durable local registry state under `run.json`, `events.jsonl`, batch records, indexes, and immutable artifacts;
+- a formal `execution-run.v2` state machine with recovery/replay and quarantine for corrupt or ambiguous state;
+- local workspace lease acquisition with conflict detection and TTL recovery;
+- local mission-runner stages for `queued`, `waiting_for_lock`, `running`, `verification`, `internal_review`, and `pr_ready`;
+- allowlisted direct-command verification for a small safe command shape already covered by tests;
+- local internal-review evidence recording that treats packet review text as context, not authority;
+- deterministic local PR projection intent/result artifacts and `ready_for_manual_review` handoff.
 
-## Command
+What is intentionally not implemented in the default runtime path:
+
+- autonomous task discovery;
+- implementation worker execution from the `running` stage;
+- fix-loop worker execution;
+- default networked GitHub PR creation/update;
+- merge automation, dashboard UI, or backlog ownership.
+
+## Why Buran exists
+
+Approved implementation packets still need disciplined execution. Buran gives that execution phase a narrow home:
+
+- **local state is the source of truth** — not comments, labels, or remote queue state;
+- **weak packets stop early** — no architectural improvisation when scope is missing;
+- **every step is journaled** — transitions, leases, gate results, and artifacts are durable and replayable;
+- **handoffs stay explicit** — verification, internal review, and PR projection are separate, inspectable stages.
+
+## Quick start
+
+### 1. Install and verify the repo
+
+Buran is a plain Node.js ESM project and uses Node's built-in test runner.
 
 ```bash
+git clone https://github.com/MrFlashAccount/Buran.git
+cd Buran
+npm install
 npm test
+npm run check
+```
+
+### 2. Validate an explicit packet list
+
+```bash
 node ./bin/buran.js validate --packets ./test/fixtures/packet-list.mixed.json
-node ./bin/buran.js intake --packets ./test/fixtures/packet-list.mixed.json --registry /tmp/buran-registry
-node ./bin/buran.js run --run <run_id> --registry /tmp/buran-registry
-node ./bin/buran.js lease acquire --run <run_id> --workspace-id ws-1 --registry /tmp/buran-registry
+```
+
+This performs dry sufficiency validation only. It does **not** create runs, discover tasks, or call external systems.
+
+### 3. Intake packets into a local registry
+
+```bash
+node ./bin/buran.js intake \
+  --packets ./test/fixtures/packet-list.mixed.json \
+  --registry /tmp/buran-registry
+```
+
+For sufficient packets, intake creates local run and batch records. Insufficient packets are recorded as `blocked_plan_insufficient`.
+
+### 4. Stage a run
+
+```bash
+node ./bin/buran.js run \
+  --run <run_id> \
+  --registry /tmp/buran-registry
+```
+
+For a queued run, this advances the run into `waiting_for_lock` unless a workspace lease is provided.
+
+### 5. Acquire a local workspace lease
+
+```bash
+node ./bin/buran.js lease acquire \
+  --run <run_id> \
+  --workspace-id ws-1 \
+  --registry /tmp/buran-registry
+```
+
+A lease reserves local execution surfaces only. It does not create a checkout, spawn a worker, or run arbitrary code.
+
+### 6. Recover and rebuild registry indexes
+
+```bash
 node ./bin/buran.js recover --registry /tmp/buran-registry
 ```
 
-`npm test` and project-level commands such as `npm run check` remain valid manual/maintainer repo checks, but they are not part of Buran's packet-selected local verification allowlist.
+Recovery replays the registry journal, rebuilds indexes, reclaims stale leases, and quarantines corrupt or ambiguous local state.
 
-OpenClaw command form:
+## How to use it
+
+### CLI commands
 
 ```text
-/buran validate --packets <packet-list.json> [--json]
-/buran intake --packets <packet-list.json> [--registry <path>] [--json]
-/buran run --run <run_id> [--workspace-id <id>] [--workspace-path <path>] [--ttl-ms <ms>] [--registry <path>] [--json]
-/buran lease acquire --run <run_id> --workspace-id <id> [--workspace-path <path>] [--ttl-ms <ms>] [--registry <path>] [--json]
-/buran lease release --run <run_id> [--registry <path>] [--json]
-/buran recover [--registry <path>] [--json]
+buran validate --packets <packet-list.json> [--json]
+buran intake --packets <packet-list.json> [--registry <path>] [--json]
+buran run --run <run_id> [--workspace-id <id>] [--workspace-path <path>] [--ttl-ms <ms>] [--registry <path>] [--json]
+buran lease acquire --run <run_id> --workspace-id <id> [--workspace-path <path>] [--ttl-ms <ms>] [--registry <path>] [--json]
+buran lease release --run <run_id> [--registry <path>] [--json]
+buran recover [--registry <path>] [--json]
 ```
 
-`--packets` is mandatory for `validate` and `intake`. Buran intentionally has no discovery fallback. `lease acquire` reserves local state only; it does not create a checkout/worktree or run code. `recover` only inspects and repairs local registry indexes/quarantine/lease records; it has no external side effects.
+OpenClaw exposes the same surface through `/buran ...` once the plugin is loaded.
 
-`run` is local-only orchestration. Without `--workspace-id`, it can safely advance a queued run into `waiting_for_lock` and stop with a structured blocker. With `--workspace-id`, it may acquire a local lease, inspect a provided local git workspace/worktree path, record a `workspace_preparation` artifact, then record a deterministic `implementation_dispatch` handoff artifact and stop in `running` with `dispatch_ready_not_started`. For runs already in `verification`, packet-selected local verification supports only the safe direct-command allowlisted shape implemented in code (`node --test test/runner.test.js`, `node --test test/gate-ledger.test.js`). Package-script delegation such as `npm test` or `npm run check` is rejected for packet verification, though maintainers may still run those project-level checks manually outside packet verification. For runs already in `internal_review`, the local adapter reads `review.criteria` / `review.reviewer_plan` only as review context and never derives `PASS` / `FAIL` / `BLOCKED` from packet text. Local packet text therefore cannot force internal-review verdicts, including legacy strings such as `buran:internal_review=...` or `buran:review=...`; the local adapter records a blocked internal-review artifact that requires manual review evidence instead. For runs already in `pr_ready`, the default runner path records deterministic local PR projection intent/result artifacts plus `github.pr` / `projections.github_pr` handoff metadata with `projection_mode=local_fake`; no GitHub network write happens in the CLI/default runtime path, and the runner blocks instead of guessing a base branch when `github.base_branch` is missing from the approved local contract. Slice 7 also exports an injectable PR transport adapter seam for tests/future launch wiring: it still records local projection intent/result artifacts first, reuses intact current-epoch projection evidence idempotently, and blocks on corrupt artifacts or invalid transport results instead of pretending the PR handoff is healthy. Buran never dispatches implementation workers, creates a branch/worktree, or launches real GitHub credentials by default.
+### Configuration
 
-## Config
+`openclaw.plugin.json` currently exposes one config field:
 
 ```json
 {
@@ -83,27 +131,122 @@ OpenClaw command form:
 }
 ```
 
-If omitted at runtime, the plugin resolves a local registry under the OpenClaw state directory when available, otherwise under the ignored `.openclaw-runtime/plugins/buran/registry` path for the current workspace.
+If `registryRoot` is omitted, Buran resolves a local default registry:
 
-Operational logs and diagnostic reports use the same local runtime root by default:
+- under the OpenClaw state directory when one is provided by the host runtime; or
+- under `.openclaw-runtime/plugins/buran/registry` in the current workspace.
 
-- `.openclaw-runtime/plugins/buran/logs/operational.jsonl`
-- `.openclaw-runtime/plugins/buran/diagnostics/<trace_id>.json`
+### Packet sufficiency rules
 
-CLI JSON output includes an `observability` object with `trace_id`, `log_path`, and `diagnostic_report_path`.
+A packet is considered sufficient only when it provides:
 
-## Packet sufficiency fields
-
-A packet is sufficient when it has:
-
-- approval marker (`approved: true`, `approval.approved: true`, or `approval.status: "approved"`);
-- GitHub repo;
+- approval status;
+- GitHub repository;
 - issue number;
 - intended branch;
-- approved scope via goal or acceptance criteria;
+- goal or acceptance criteria;
 - implementation instructions;
 - verification expectations or commands;
 - review criteria or reviewer plan;
 - conflict surface.
 
-Weak packets are recorded locally as `blocked_plan_insufficient`; Buran does not invent missing architecture or scope.
+If that envelope is incomplete, Buran records `blocked_plan_insufficient` instead of inferring missing architecture or scope.
+
+## Current execution model
+
+The current runtime flow is intentionally bounded:
+
+```text
+packet list -> validation -> intake -> queued
+queued -> waiting_for_lock -> running
+running -> workspace_preparation artifact -> implementation_dispatch artifact -> stop
+verification -> verification artifact + gate -> internal_review | fix_loop | blocked_needs_human
+internal_review -> internal-review artifact + gate -> pr_ready | fix_loop | blocked_needs_human
+pr_ready -> projection intent/result artifacts -> ready_for_manual_review
+recover -> replay + rebuild + quarantine when state is ambiguous
+```
+
+A few important constraints:
+
+- `run` is **local-only orchestration** on this branch;
+- the `running` stage records `workspace_preparation` and `implementation_dispatch` artifacts, then stops before worker execution;
+- packet-selected verification is intentionally allowlisted and rejects package-script delegation such as `npm test` or `npm run check`;
+- the default `pr_ready` path records a local fake PR projection handoff and does not perform a remote GitHub write.
+
+## Registry, state, and observability
+
+Buran keeps three separate local evidence surfaces:
+
+1. **Durable execution journal** — `registry/runs/<run_id>/run.json` plus `events.jsonl` are the source of truth.
+2. **Operational logs** — `.openclaw-runtime/plugins/buran/logs/operational.jsonl` stores best-effort invocation breadcrumbs.
+3. **Diagnostic reports** — `.openclaw-runtime/plugins/buran/diagnostics/<trace_id>.json` stores one sanitized summary per invocation.
+
+Public CLI output includes an `observability` object with:
+
+- `trace_id`
+- `log_path`
+- `diagnostic_report_path`
+
+There is no external telemetry in the current implementation.
+
+## Project map
+
+### Start here
+
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) — selected direction, constraints, and binding rules
+- [`CONTEXT.md`](CONTEXT.md) — what belongs in this repo and what does not
+- [`AGENTS.md`](AGENTS.md) — compact maintainer/agent guidance for working in the repo
+
+### Detailed docs
+
+- [`docs/context-map.md`](docs/context-map.md) — upstream/downstream boundaries and side effects
+- [`docs/module-map.md`](docs/module-map.md) — source-tree responsibilities and runtime flow
+- [`docs/state-machine.md`](docs/state-machine.md) — lifecycle states, transitions, and gate rules
+- [`docs/execution-run-schema.md`](docs/execution-run-schema.md) — local registry layout and persistence contract
+- [`docs/github-projection-contract.md`](docs/github-projection-contract.md) — projection and PR handoff semantics
+- [`docs/acceptance-scenarios.md`](docs/acceptance-scenarios.md) — concrete scenarios already covered by tests
+- [`docs/migration-plan.md`](docs/migration-plan.md) — migration notes from legacy/reference surfaces
+- [`docs/observability.md`](docs/observability.md) — logging, diagnostics, sanitization, and trace correlation
+
+### Code landmarks
+
+- [`index.js`](index.js) — OpenClaw plugin export surface
+- [`bin/buran.js`](bin/buran.js) — shell CLI entrypoint
+- [`src/cli.js`](src/cli.js) — command parsing and dispatch
+- [`src/buran.js`](src/buran.js) — validation, intake, config resolution, and formatting
+- [`src/runner.js`](src/runner.js) — local mission runner orchestration
+- [`src/registry-store.js`](src/registry-store.js) — canonical registry writes and ledger persistence
+- [`src/recovery.js`](src/recovery.js) — replay, quarantine, and index rebuild flow
+
+## Development
+
+Repo checks used by this branch:
+
+```bash
+npm test
+npm run check
+git diff --check
+```
+
+The `check` script currently verifies that the plugin entrypoint imports cleanly, ignored runtime paths stay ignored, and `index.js`, `src/`, `bin/`, and `test/` pass Node syntax checks.
+
+## Limitations and near-term roadmap
+
+Current limitations:
+
+- local-first only in the default CLI/runtime path;
+- no implementation worker dispatch from `running`;
+- no fix-loop worker implementation;
+- verification adapters are intentionally narrow and allowlisted;
+- remote PR transport exists as an injectable seam, not the default behavior.
+
+Near-term roadmap implied by the existing architecture and docs:
+
+- connect the recorded implementation-dispatch handoff to a real worker boundary;
+- flesh out fix-loop execution inside the approved packet envelope;
+- keep transport-backed PR projection contract-safe when remote writes are enabled deliberately;
+- continue hardening recovery, artifact integrity, and resume behavior.
+
+## License
+
+[MIT](LICENSE)
