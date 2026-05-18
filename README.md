@@ -1,97 +1,67 @@
-# Buran
+<p align="center">
+  <img src="docs/assets/buran-logo-spaceplane.png" alt="Buran spaceplane" width="420">
+</p>
 
-![Buran spaceplane](docs/assets/buran-logo-spaceplane.png)
+<h1 align="center">Buran</h1>
 
-> Turn approved work into review-ready pull requests, in parallel.
+<p align="center">
+  <strong>Turn approved work into review-ready pull requests, in parallel.</strong>
+</p>
 
-Buran lets OpenClaw fan out approved tasks across isolated sessions and projects, keep each run recoverable, and hand back clean PRs for review. Less status tracking. More finished work.
+<p align="center">
+  Buran helps OpenClaw move tasks and plans through isolated agent runs, recover safely, and hand back clean PRs for review.
+</p>
 
-## Why Buran exists
+## Contents
 
-A lot of development work does not fail because the task is impossible. It stalls because someone has to keep checking status, restart half-finished execution, untangle workspace conflicts, and manually shepherd each item one by one.
-
-Buran exists to remove that drag.
-
-Once work is already approved, OpenClaw can move many tasks forward at the same time across different repos and workspaces, while still keeping each run bounded, inspectable, and safe to hand back for human review.
+- [What Buran does](#what-buran-does)
+- [Quick start](#quick-start)
+- [How to use it](#how-to-use-it)
+- [Configuration](#configuration)
+- [Recovery and review handoff](#recovery-and-review-handoff)
 
 ## What Buran does
 
-Buran is the execution layer after planning and approval.
+Buran is the execution layer that takes already approved work and moves it forward without turning parallel delivery into a coordination mess. It gives OpenClaw a controlled way to run multiple implementation tracks at once, keep them separated, preserve evidence, and return clean handoffs for review.
 
-It takes approved work, records it as local run state, moves it through execution and gates, and prepares a review-ready handoff.
+- **Runs approved work in parallel.** Buran can move several approved tasks or plan packets forward at the same time, so OpenClaw is not forced into one-task-at-a-time execution just to stay safe.
+- **Keeps each run isolated.** Every run stays bounded to its own workspace, lease, and execution contract, which reduces branch collisions, accidental overlap, and agent drift.
+- **Tracks durable local state.** Buran records runs, events, and artifacts locally, so progress does not depend on fragile chat memory or manual status reconstruction.
+- **Recovers interrupted work.** If a session stops halfway, Buran can rebuild state from recorded evidence, reclaim stale ownership conservatively, and resume without guessing what happened.
+- **Hands back review-ready PRs.** The goal is not “some code changed”; the goal is a clean handoff with recorded state, finished execution, and a pull request ready for human review.
 
-In practice, that means Buran helps OpenClaw:
+## Quick start
 
-- start from explicit approved task or plan packets
-- run bounded execution sessions instead of freeform agent wandering
-- keep durable local state for runs, artifacts, and event history
-- recover cleanly when a session dies or local state drifts
-- return a PR-ready or review-ready handoff instead of loose implementation progress
+1. Add Buran to your OpenClaw workspace as a local plugin.
+2. Set `registryRoot` in `openclaw.plugin.json` if you want Buran’s registry pinned to a specific path.
+3. Prepare an approved task or plan packet with the execution details OpenClaw is allowed to use.
+4. Start the run from OpenClaw so Buran can intake the approved work, reserve the workspace, and begin tracked execution.
 
-The source of truth stays local in Buran’s registry, so progress does not depend on fragile chat memory, remote comments, or manual status reconstruction.
+## How to use it
 
-## Parallel by design
-
-Buran is not just for pushing one task from start to finish.
-
-Its real value is letting OpenClaw move many approved tasks at once.
-
-Different projects, different workspaces, different runs — active in parallel — without collapsing into chaos.
-
-That parallelism is controlled, not reckless:
-
-- each run starts only from approved work
-- each workspace lease stays explicit
-- each run keeps its own state and recovery trail
-- verification and internal review still gate the handoff
-- human review still happens before merge
-
-So you get speed from concurrency, without pretending concurrency removes the need for boundaries.
-
-## How the workflow stays controlled
-
-Every run stays inside a narrow contract.
-
-### Approved in, not guessed in
-
-Buran expects explicit approved work. If the packet is missing execution-critical details, the run blocks instead of improvising.
-
-### Isolated execution
-
-Before work runs, Buran reserves workspace ownership so parallel sessions do not step on the same checkout, branch, issue, or conflict surface.
-
-### Durable state
-
-Runs are recorded locally with structured state, events, and artifacts, which makes interruption, audit, and continuation practical instead of messy.
-
-### Recovery and resume
-
-If an agent session stops midway, Buran can rebuild registry state, reclaim stale ownership conservatively, and continue from durable evidence rather than guesswork.
-
-### Review-ready handoff
-
-A run is not “done” just because code changed. Buran pushes toward a clean handoff: verification passed, internal review passed, state recorded, and the work ready for a human to review as a PR or equivalent handoff artifact.
+1. **Approve the work first.** Buran is built for execution after planning, not for inventing missing scope or architecture on the fly.
+2. **Send the approved packet into OpenClaw.** Buran validates the packet, records the run locally, and blocks if execution-critical information is missing.
+3. **Let Buran keep the run controlled.** During execution it keeps ownership explicit, stores event history, and preserves enough state to recover if the session is interrupted.
+4. **Review the handoff.** When the run finishes, Buran gives OpenClaw a review-ready result so a human can inspect the PR instead of reconstructing what happened.
 
 ## Configuration
 
 | Setting | Where it lives | What it controls | Notes |
 | --- | --- | --- | --- |
 | `registryRoot` | OpenClaw plugin config (`openclaw.plugin.json`) | Root directory for Buran’s local registry | If omitted, Buran resolves the registry from the current workspace/runtime context. |
-| Packet list path | Invocation input | Which approved tasks/plans Buran is allowed to execute | Required for validation and intake. Buran does not discover work on its own. |
+| Packet list path | Invocation input | Which approved tasks or plans Buran is allowed to execute | Required for validation and intake. Buran does not discover work on its own. |
 | Run ID | Invocation input | Which recorded run to continue | Used when execution resumes after intake. |
 | Workspace ID | Invocation input | Stable lease identity for the workspace doing the work | Helps prevent unsafe overlap between concurrent runs. |
 | Workspace path | Invocation input | Which checkout or local working directory is leased for the run | Useful when a run must stay pinned to a specific local repo path. |
 | Lease TTL | Invocation input | How long a workspace lease stays active before recovery can reclaim stale ownership | Optional override for longer-running work. |
 
-## Review handoff
+## Recovery and review handoff
 
-Buran is built to reduce manual follow-up, not remove human judgment.
+Buran is designed to keep recovery practical and handoff quality high.
 
-By the time work reaches review handoff, Buran has already kept the run bounded, preserved the execution trail, and made parallel progress manageable.
+When a run is interrupted, the local registry gives Buran enough evidence to resume conservatively instead of improvising. When a run completes, that same recorded state helps OpenClaw hand back a cleaner PR with less manual follow-up and less ambiguity about what actually happened.
 
-That means reviewers get cleaner pull requests and clearer handoffs, while OpenClaw gets to keep many approved tasks moving at once.
-
-If you want the deeper execution contracts behind state transitions, registry structure, and PR projection behavior, start with:
+For deeper implementation details, start with:
 
 - [docs/state-machine.md](docs/state-machine.md)
 - [docs/execution-run-schema.md](docs/execution-run-schema.md)
