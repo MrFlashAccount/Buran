@@ -1,3 +1,16 @@
+/**
+ * Projection contract helpers for sanitizing and validating durable GitHub PR handoff data.
+ *
+ * Responsibility:
+ * - redact secrets and absolute paths before projection data becomes durable,
+ * - validate `github.pr` payload shape and parity against the local run contract,
+ * - merge projection ledger events back into the registry snapshot.
+ *
+ * Non-goals:
+ * - no transport I/O,
+ * - no inference of missing contract fields,
+ * - no preservation of sensitive raw values in durable artifacts.
+ */
 import path from "node:path";
 
 import { isRecord, nonEmptyString } from "./utils.js";
@@ -66,6 +79,14 @@ function projectionContractString(value, { durable = false } = {}) {
   return durable ? nonEmptyString(sanitizeProjectionDurableValue(text)) : text;
 }
 
+/**
+ * Recursively redacts secrets and absolute paths before projection data is stored durably.
+ *
+ * @param {unknown} value Arbitrary projection value or structure.
+ * @param {{depth?: number}} [options]
+ * @param {number} [options.depth=0] Current recursion depth guard.
+ * @returns {unknown} Durable-safe value with nested strings sanitized.
+ */
 export function sanitizeProjectionDurableValue(value, { depth = 0 } = {}) {
   if (depth > 8) return "[REDACTED_DEPTH]";
   if (value === null || value === undefined) return value;
@@ -95,6 +116,14 @@ export function isValidProjectionUrl(value) {
   }
 }
 
+/**
+ * Appends schema-level validation errors for a projected `github.pr` payload.
+ *
+ * @param {object} githubPr Candidate PR projection payload.
+ * @param {string[]} errors Mutable error accumulator.
+ * @param {string} [fieldPath="github.pr"] Field prefix used in emitted error messages.
+ * @returns {void}
+ */
 export function appendGithubPrValidationErrors(githubPr, errors, fieldPath = "github.pr") {
   if (!isRecord(githubPr)) {
     errors.push(`${fieldPath} must be an object`);
@@ -116,6 +145,17 @@ export function appendGithubPrValidationErrors(githubPr, errors, fieldPath = "gi
   if (hasOwn(githubPr, "actor") && !nonEmptyString(githubPr.actor)) errors.push(`${fieldPath}.actor must be a non-empty string when present`);
 }
 
+/**
+ * Appends parity errors when a projected `github.pr` payload diverges from the local run contract.
+ *
+ * @param {object} snapshot Local run snapshot that defines repo/issue/branch expectations.
+ * @param {object} githubPr Candidate PR projection payload.
+ * @param {string[]} errors Mutable error accumulator.
+ * @param {string} [fieldPath="github.pr"] Field prefix used in emitted error messages.
+ * @param {{durable?: boolean}} [options]
+ * @param {boolean} [options.durable=false] Whether expected snapshot strings should be sanitized before comparison.
+ * @returns {void}
+ */
 export function appendGithubPrContractErrors(snapshot, githubPr, errors, fieldPath = "github.pr", { durable = false } = {}) {
   const expectedRepo = projectionContractString(snapshot?.github?.repo, { durable });
   const expectedIssueNumber = Number.isSafeInteger(snapshot?.github?.issue_number) ? snapshot.github.issue_number : null;
@@ -142,6 +182,17 @@ export function appendProjectedPrParityErrors(left, right, errors, leftPath = "g
   }
 }
 
+/**
+ * Applies a projection ledger event to the in-memory registry snapshot.
+ *
+ * Successful projection results also mirror the projected PR into `snapshot.github.pr` so
+ * later stages can consume the same contract-bearing shape.
+ *
+ * @param {object} snapshot Current registry snapshot.
+ * @param {object} payload Projection ledger payload being applied.
+ * @param {number} sequence Event sequence number assigned by the ledger.
+ * @returns {object} Next snapshot state with updated projection bookkeeping.
+ */
 export function mergeProjectionSnapshot(snapshot, payload, sequence) {
   const currentProjection = isRecord(snapshot.projections?.github_pr) ? snapshot.projections.github_pr : {};
   const nextProjection = {

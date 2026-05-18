@@ -1,3 +1,21 @@
+/**
+ * Local mission runner orchestration for staged Buran backend runs.
+ *
+ * Responsibility:
+ * - advance a single run through the local state machine,
+ * - record immutable artifacts for workspace prep, gate execution, and PR projection,
+ * - enforce documented transition edges and resume semantics.
+ *
+ * Non-goals:
+ * - no worker execution from the `running` state,
+ * - no implicit lease acquisition without explicit workspace input,
+ * - no transport-side writes outside the configured projection adapter path.
+ *
+ * Invariants / side effects:
+ * - reads and mutates registry snapshots on disk,
+ * - records gate/projection artifacts before state transitions,
+ * - returns sanitized public reports when adapter errors surface.
+ */
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
@@ -244,6 +262,24 @@ async function inspectRecordedGateArtifacts(runDir, snapshot, gateName) {
   return { ok: true, artifact_refs: artifactRefs };
 }
 
+/**
+ * Executes or resumes the verification gate for runs already positioned in `verification`.
+ *
+ * @param {object} params
+ * @param {string} params.registryRoot
+ * @param {string} params.runId
+ * @param {object} params.current Current run snapshot.
+ * @param {string|null} params.previousState State observed before this runner invocation.
+ * @param {object[]} params.stepsTaken Mutable step accumulator for the public runner report.
+ * @param {object[]} params.blockers Mutable blocker accumulator for the public runner report.
+ * @param {object[]} params.warnings Mutable warning accumulator for the public runner report.
+ * @param {object|null} params.workspacePreparation Previously recorded workspace preparation report, when available.
+ * @param {object|null} params.implementationDispatch Previously recorded implementation dispatch report, when available.
+ * @param {() => Date} params.clock
+ * @param {string} params.actor
+ * @param {{runDir: string}} params.paths
+ * @returns {Promise<object>} Runner report after resuming or executing verification and applying the documented transition edge.
+ */
 async function runVerificationStage({ registryRoot, runId, current, previousState, stepsTaken, blockers, warnings, workspacePreparation, implementationDispatch, clock, actor, paths } = {}) {
   let verification = null;
 
@@ -442,6 +478,25 @@ async function runVerificationStage({ registryRoot, runId, current, previousStat
   });
 }
 
+/**
+ * Executes or resumes the internal review gate for runs already positioned in `internal_review`.
+ *
+ * @param {object} params
+ * @param {string} params.registryRoot
+ * @param {string} params.runId
+ * @param {object} params.current Current run snapshot.
+ * @param {string|null} params.previousState State observed before this runner invocation.
+ * @param {object[]} params.stepsTaken Mutable step accumulator for the public runner report.
+ * @param {object[]} params.blockers Mutable blocker accumulator for the public runner report.
+ * @param {object[]} params.warnings Mutable warning accumulator for the public runner report.
+ * @param {object|null} params.workspacePreparation Previously recorded workspace preparation report, when available.
+ * @param {object|null} params.implementationDispatch Previously recorded implementation dispatch report, when available.
+ * @param {object|null} params.verification Verification report already attached to this runner cycle, when available.
+ * @param {() => Date} params.clock
+ * @param {string} params.actor
+ * @param {{runDir: string}} params.paths
+ * @returns {Promise<object>} Runner report after resuming or executing internal review and applying the documented transition edge.
+ */
 async function runInternalReviewStage({ registryRoot, runId, current, previousState, stepsTaken, blockers, warnings, workspacePreparation, implementationDispatch, verification, clock, actor, paths } = {}) {
   let internalReview = null;
 
@@ -647,6 +702,26 @@ async function runInternalReviewStage({ registryRoot, runId, current, previousSt
   });
 }
 
+/**
+ * Records PR projection intent/result for runs already positioned in `pr_ready`.
+ *
+ * @param {object} params
+ * @param {string} params.registryRoot
+ * @param {string} params.runId
+ * @param {object} params.current Current run snapshot.
+ * @param {string|null} params.previousState State observed before this runner invocation.
+ * @param {object[]} params.stepsTaken Mutable step accumulator for the public runner report.
+ * @param {object[]} params.blockers Mutable blocker accumulator for the public runner report.
+ * @param {object[]} params.warnings Mutable warning accumulator for the public runner report.
+ * @param {object|null} params.workspacePreparation Previously recorded workspace preparation report, when available.
+ * @param {object|null} params.implementationDispatch Previously recorded implementation dispatch report, when available.
+ * @param {object|null} params.verification Verification report already attached to this runner cycle, when available.
+ * @param {object|null} params.internalReview Internal review report already attached to this runner cycle, when available.
+ * @param {() => Date} params.clock
+ * @param {string} params.actor
+ * @param {{plan(snapshot: object, options?: object): object, execute(snapshot: object, plan: object, options?: object): Promise<object>, externalSideEffects?: boolean}} [params.prProjectionAdapter=createLocalPrProjectionAdapter()]
+ * @returns {Promise<object>} Runner report after recording projection artifacts and transitioning to manual review.
+ */
 async function runPrReadyStage({ registryRoot, runId, current, previousState, stepsTaken, blockers, warnings, workspacePreparation, implementationDispatch, verification, internalReview, clock, actor, prProjectionAdapter = createLocalPrProjectionAdapter() } = {}) {
   let projection = null;
   let plannedProjection;
@@ -823,6 +898,27 @@ async function runPrReadyStage({ registryRoot, runId, current, previousState, st
   });
 }
 
+/**
+ * Runs the local orchestration slice for a single registry run.
+ *
+ * The runner owns state advancement, artifact recording, and adapter invocation for
+ * verification, internal review, and PR projection. It intentionally blocks in
+ * `running` after recording workspace preparation and implementation dispatch, because
+ * worker execution belongs to a separate boundary.
+ *
+ * @param {object} params
+ * @param {string} params.registryRoot Absolute registry root that stores run snapshots.
+ * @param {string} params.runId Run identifier to load and advance.
+ * @param {string} [params.workspaceId=""] Workspace lease identifier required when the run is waiting for lock acquisition.
+ * @param {string} [params.workspacePath=""] Optional leased workspace path recorded with the lock.
+ * @param {string|number} [params.ttlMs=""] Optional lease TTL forwarded to lease acquisition.
+ * @param {() => Date} [params.clock=() => new Date()] Clock source used for artifact timestamps and transitions.
+ * @param {string} [params.actor=RUNNER_ACTOR] Actor name recorded on state transitions and artifacts.
+ * @param {{plan(snapshot: object, options?: object): object, execute(snapshot: object, plan: object, options?: object): Promise<object>, externalSideEffects?: boolean}} [params.prProjectionAdapter=createLocalPrProjectionAdapter()]
+ * Projection adapter used when the run reaches `pr_ready`.
+ * @returns {Promise<object>} Sanitized public runner report describing completed work, blockers, and current state.
+ * @throws {Error} When required identifiers are missing or an unexpected storage/adapter error occurs.
+ */
 export async function runLocalMission({ registryRoot, runId, workspaceId = "", workspacePath = "", ttlMs = "", clock = () => new Date(), actor = RUNNER_ACTOR, prProjectionAdapter = createLocalPrProjectionAdapter() } = {}) {
   if (!registryRoot) throw new Error("registryRoot is required for local mission runner");
   if (!runId) throw new Error("runId is required for local mission runner");

@@ -1,3 +1,15 @@
+/**
+ * Local internal-review adapter for recording manual-review requirements from an approved packet.
+ *
+ * Responsibility:
+ * - parse review criteria from the immutable packet artifact,
+ * - emit a sanitized internal-review artifact for the gate ledger,
+ * - block until explicit manual review evidence exists.
+ *
+ * Non-goals:
+ * - no automated PASS/FAIL derivation from packet prose,
+ * - no review resolution without an acquired workspace lease.
+ */
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
@@ -33,6 +45,13 @@ function sanitizeValue(value, contexts) {
   return sanitizePublicReportForOutput(value, contexts);
 }
 
+/**
+ * Extracts the internal-review contract from the normalized approved packet.
+ *
+ * @param {object} packet Parsed approved packet JSON.
+ * @param {object} snapshot Current run snapshot used for normalization context.
+ * @returns {{criteria: string[], reviewer_plan: string}} Review criteria and reviewer plan expected by the manual gate.
+ */
 function normalizeReviewPacket(packet, snapshot) {
   const normalized = normalizePacket(packet, {
     sourcePath: snapshot?.packet?.source_path || "",
@@ -83,6 +102,16 @@ function resultSummary(status, problem = null) {
   return "Internal review blocked pending manual review evidence.";
 }
 
+/**
+ * Produces a blocked internal-review gate artifact until manual review evidence is supplied.
+ *
+ * @param {object} params
+ * @param {string} params.runDir Absolute run directory containing immutable packet artifacts.
+ * @param {object} params.snapshot Current run snapshot used to load packet review criteria and lease context.
+ * @param {() => Date} [params.clock=() => new Date()] Clock source used for started/finished timestamps.
+ * @returns {Promise<object>} Internal-review gate result ready for artifact recording in the registry ledger.
+ * @throws {Error} When the caller omits required run context.
+ */
 export async function executeInternalReviewGate({ runDir, snapshot, clock = () => new Date() } = {}) {
   if (!runDir) throw new Error("runDir is required for internal review execution");
   if (!snapshot?.run_id) throw new Error("run snapshot is required for internal review execution");

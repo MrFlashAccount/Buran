@@ -17,6 +17,23 @@ import { isSuccessfulProjectionResultStatus, mergeProjectionSnapshot, sanitizePr
 import { applyTransitionToSnapshot, buildNonTransitionEvent, buildTransitionEvent, isKnownState } from "./state-machine.js";
 import { canonicalJson, isRecord, nonEmptyString, sha256Hex } from "./utils.js";
 
+/**
+ * Durable registry read/write helpers for run snapshots, journals, indexes, and projection artifacts.
+ *
+ * Responsibilities:
+ * - serialize state-machine results into run.json and events.jsonl;
+ * - enforce write-time contracts for artifacts, gate results, and projections;
+ * - rebuild derived indexes from persisted snapshots.
+ *
+ * Non-goals:
+ * - deciding which transitions should happen next;
+ * - mutating business payloads beyond projection sanitization required for durable storage.
+ *
+ * Side effects:
+ * - writes files under registryRoot;
+ * - may remove lease record files after terminal transitions.
+ */
+
 function hasOwn(value, key) {
   return Object.prototype.hasOwnProperty.call(value, key);
 }
@@ -352,17 +369,35 @@ async function recordProjectionEvent(registryRoot, runId, {
   };
 }
 
+/**
+ * Reads and parses a run snapshot from disk.
+ *
+ * @param {string} filePath
+ * @returns {Promise<Record<string, unknown>>}
+ */
 export async function readRunSnapshot(filePath) {
   const raw = await fs.readFile(filePath, "utf8");
   return JSON.parse(raw);
 }
 
+/**
+ * Reads and parses an events.jsonl journal.
+ *
+ * @param {string} filePath
+ * @returns {Promise<Record<string, unknown>[]>}
+ */
 export async function readEventsFile(filePath) {
   const raw = await fs.readFile(filePath, "utf8");
   if (!raw.trim()) return [];
   return raw.trimEnd().split("\n").map((line) => JSON.parse(line));
 }
 
+/**
+ * Returns canonical registry-level file and directory paths.
+ *
+ * @param {string} registryRoot
+ * @returns {{ root: string, runs: string, batches: string, indexes: string, quarantine: string, activeRuns: string, workspaceLeases: string }}
+ */
 export function getRegistryPaths(registryRoot) {
   return {
     root: registryRoot,
@@ -375,6 +410,13 @@ export function getRegistryPaths(registryRoot) {
   };
 }
 
+/**
+ * Returns the canonical filesystem layout for a single run.
+ *
+ * @param {string} registryRoot
+ * @param {string} runId
+ * @returns {{ runDir: string, runPath: string, eventsPath: string, artifactsDir: string }}
+ */
 export function getRunPaths(registryRoot, runId) {
   const runDir = path.join(getRegistryPaths(registryRoot).runs, runId);
   return {
@@ -389,6 +431,13 @@ function leaseRecordsDir(registryRoot) {
   return path.join(registryRoot, "leases");
 }
 
+/**
+ * Removes persisted lease record files associated with a run snapshot.
+ *
+ * @param {string} registryRoot
+ * @param {Record<string, unknown>} snapshot
+ * @returns {Promise<string[]>}
+ */
 export async function removeLeaseRecordsForRun(registryRoot, snapshot) {
   const leasesDir = leaseRecordsDir(registryRoot);
   const entries = await fs.readdir(leasesDir, { withFileTypes: true }).catch((error) => {
@@ -417,11 +466,24 @@ export async function removeLeaseRecordsForRun(registryRoot, snapshot) {
   return removed.sort((a, b) => a.localeCompare(b));
 }
 
+/**
+ * Deletes a single lease record file if it exists.
+ *
+ * @param {string} recordPath
+ * @returns {Promise<string>}
+ */
 export async function removeLeaseRecordPath(recordPath) {
   await fs.rm(recordPath, { force: true });
   return recordPath;
 }
 
+/**
+ * Writes a lease record using exclusive creation semantics.
+ *
+ * @param {string} filePath
+ * @param {Record<string, unknown>} record
+ * @returns {Promise<{ path: string, record: Record<string, unknown> }>}
+ */
 export async function writeLeaseRecordExclusive(filePath, record) {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   const handle = await fs.open(filePath, "wx");
@@ -434,6 +496,14 @@ export async function writeLeaseRecordExclusive(filePath, record) {
   return { path: filePath, record };
 }
 
+/**
+ * Creates a batch snapshot from packet reports and accepted run snapshots.
+ *
+ * @param {Record<string, unknown>[]} reports
+ * @param {Record<string, unknown>[]} runs
+ * @param {{ registryRoot: string, createdAt: string }} input
+ * @returns {Promise<Record<string, unknown>>}
+ */
 export async function createBatchFromPacketReports(reports, runs, { registryRoot, createdAt }) {
   if (!registryRoot) throw new Error("registryRoot is required");
   if (!createdAt) throw new Error("createdAt is required");
@@ -455,6 +525,14 @@ export async function createBatchFromPacketReports(reports, runs, { registryRoot
   };
 }
 
+/**
+ * Appends a non-transition event to a run journal without rewriting the snapshot.
+ *
+ * @param {string} runDir
+ * @param {string} runId
+ * @param {{ type: string, actor?: string, evidence?: Record<string, unknown>, clock?: () => Date, timestamp?: string, idempotencyKey?: string }} [options]
+ * @returns {Promise<Record<string, unknown>>}
+ */
 export async function appendRunEvent(runDir, runId, { type, actor = "registry", evidence = {}, clock = () => new Date(), timestamp = "", idempotencyKey = "" } = {}) {
   if (!runDir) throw new Error("runDir is required");
   const eventsPath = path.join(runDir, "events.jsonl");
@@ -473,6 +551,13 @@ export async function appendRunEvent(runDir, runId, { type, actor = "registry", 
   return event;
 }
 
+/**
+ * Persists a full run snapshot to its canonical run.json path.
+ *
+ * @param {string} registryRoot
+ * @param {Record<string, unknown>} snapshot
+ * @returns {Promise<Record<string, unknown>>}
+ */
 export async function writeRunSnapshot(registryRoot, snapshot) {
   if (!registryRoot) throw new Error("registryRoot is required");
   if (!snapshot?.run_id) throw new Error("run snapshot with run_id is required");
@@ -481,11 +566,26 @@ export async function writeRunSnapshot(registryRoot, snapshot) {
   return snapshot;
 }
 
+/**
+ * Persists a JSON report file atomically.
+ *
+ * @param {string} filePath
+ * @param {unknown} value
+ * @returns {Promise<{ path: string }>}
+ */
 export async function writeRegistryReport(filePath, value) {
   await writeJsonAtomic(filePath, value);
   return { path: filePath };
 }
 
+/**
+ * Commits a transition event and its resulting run snapshot.
+ *
+ * @param {string} runDir
+ * @param {Record<string, unknown>} snapshot
+ * @param {{ toState: string, actor?: string, evidence?: Record<string, unknown>, clock?: () => Date }} options
+ * @returns {Promise<{ run: Record<string, unknown>, event: Record<string, unknown> }>}
+ */
 export async function commitRunTransition(runDir, snapshot, { toState, actor = "transition-engine", evidence = {}, clock = () => new Date() }) {
   if (!runDir) throw new Error("runDir is required");
   const runPath = path.join(runDir, "run.json");
@@ -507,6 +607,16 @@ export async function commitRunTransition(runDir, snapshot, { toState, actor = "
   return { run: nextSnapshot, event };
 }
 
+/**
+ * Loads a run, commits a transition, and refreshes derived indexes.
+ *
+ * Terminal transitions also remove lease record files and append a lease-release event.
+ *
+ * @param {string} registryRoot
+ * @param {string} runId
+ * @param {Record<string, unknown>} [options]
+ * @returns {Promise<Record<string, unknown>>}
+ */
 export async function transitionRun(registryRoot, runId, options = {}) {
   const paths = getRunPaths(registryRoot, runId);
   const snapshot = await readRunSnapshot(paths.runPath);
@@ -539,6 +649,13 @@ export async function transitionRun(registryRoot, runId, options = {}) {
   };
 }
 
+/**
+ * Creates the initial run directory, packet artifact, transition journal, and queued/blocked state.
+ *
+ * @param {Record<string, unknown>} report
+ * @param {{ registryRoot: string, clock?: () => Date, actor?: string }} input
+ * @returns {Promise<{ run: Record<string, unknown>, run_dir: string, events: Record<string, unknown>[] }>}
+ */
 export async function createRunFromPacketReport(report, { registryRoot, clock = () => new Date(), actor = "packet-intake" }) {
   if (!registryRoot) throw new Error("registryRoot is required");
   if (!report?.run_id) throw new Error("packet report with run_id is required");
@@ -602,6 +719,14 @@ export async function createRunFromPacketReport(report, { registryRoot, clock = 
   return { run: snapshot, run_dir: paths.runDir, events: [receivedEvent, committed.event] };
 }
 
+/**
+ * Records an immutable artifact under artifacts/ and updates the snapshot journalically.
+ *
+ * @param {string} registryRoot
+ * @param {string} runId
+ * @param {{ artifactPath: string, content: string | Buffer, gate_name: string, execution_epoch: number, gate_attempt: number, recorded_from_state: string, actor?: string, recorded_at?: string, provenance?: Record<string, unknown> }} payload
+ * @returns {Promise<Record<string, unknown>>}
+ */
 export async function recordArtifact(registryRoot, runId, {
   artifactPath,
   content,
@@ -706,6 +831,14 @@ export async function recordArtifact(registryRoot, runId, {
   };
 }
 
+/**
+ * Records a resolved gate result and updates the corresponding gate head.
+ *
+ * @param {string} registryRoot
+ * @param {string} runId
+ * @param {Record<string, unknown>} [payload={}]
+ * @returns {Promise<Record<string, unknown>>}
+ */
 export async function recordGateResult(registryRoot, runId, payload = {}) {
   const payloadDecision = validateGateResultPayload(payload);
   if (!payloadDecision.ok) throw new Error(payloadDecision.error);
@@ -746,6 +879,14 @@ export async function recordGateResult(registryRoot, runId, payload = {}) {
   return { status: "recorded", run: nextSnapshot, event };
 }
 
+/**
+ * Records a projection intent from pr_ready.
+ *
+ * @param {string} registryRoot
+ * @param {string} runId
+ * @param {Record<string, unknown>} [payload={}]
+ * @returns {Promise<Record<string, unknown>>}
+ */
 export async function recordProjectionIntent(registryRoot, runId, payload = {}) {
   return recordProjectionEvent(registryRoot, runId, {
     ...payload,
@@ -753,6 +894,15 @@ export async function recordProjectionIntent(registryRoot, runId, payload = {}) 
   });
 }
 
+/**
+ * Records a projection result after its matching projection intent exists.
+ *
+ * @param {string} registryRoot
+ * @param {string} runId
+ * @param {Record<string, unknown>} [payload={}]
+ * @returns {Promise<Record<string, unknown>>}
+ * @throws {Error}
+ */
 export async function recordProjectionResult(registryRoot, runId, payload = {}) {
   const paths = getRunPaths(registryRoot, runId);
   const intentEvents = await readEventsByIdempotency(paths.eventsPath, "projection.intent_recorded", payload.intent_idempotency_key);
@@ -797,6 +947,13 @@ function leaseEntryFromSnapshot(snapshot) {
   };
 }
 
+/**
+ * Rebuilds active-runs and workspace-leases indexes from non-terminal snapshots.
+ *
+ * @param {string} registryRoot
+ * @param {{ clock?: () => Date, snapshots?: Record<string, unknown>[] | null }} [options]
+ * @returns {Promise<{ active_runs: Record<string, unknown>[], workspace_leases: Record<string, unknown>[] }>}
+ */
 export async function rebuildIndexes(registryRoot, { clock = () => new Date(), snapshots = null } = {}) {
   const paths = getRegistryPaths(registryRoot);
   await fs.mkdir(paths.runs, { recursive: true });
@@ -847,6 +1004,12 @@ export async function rebuildIndexes(registryRoot, { clock = () => new Date(), s
   return { active_runs: runs, workspace_leases: leases };
 }
 
+/**
+ * Produces a stable content hash for a run snapshot.
+ *
+ * @param {unknown} snapshot
+ * @returns {string}
+ */
 export function hashRunSnapshot(snapshot) {
   return sha256Hex(canonicalJson(snapshot));
 }

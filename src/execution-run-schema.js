@@ -20,6 +20,27 @@ import {
 import { isKnownState } from "./state-machine.js";
 import { isRecord } from "./utils.js";
 
+/**
+ * Schema builders and validators for durable execution-run snapshots, events, and lease records.
+ *
+ * Responsibilities:
+ * - create normalized summary objects written into run.json, batch.json, and lease ledgers;
+ * - validate persisted payloads before registry-store writes them;
+ * - keep replay/recovery contracts centralized and schema-version aware.
+ *
+ * Non-goals:
+ * - file I/O, sequence allocation, or state transitions;
+ * - auto-fixing invalid payloads.
+ */
+
+/**
+ * @typedef {Record<string, unknown>} JsonRecord
+ */
+
+/**
+ * @typedef {{ path: string, sha256: string }} ArtifactRef
+ */
+
 const LEASE_STATUSES = new Set(["not_requested", "acquired", "blocked", "released", "stale_recovered"]);
 const NON_EMPTY_GATE_NAMES = new Set(GATE_NAMES);
 const NON_EMPTY_ARTIFACT_STAGE_NAMES = new Set(ARTIFACT_STAGE_NAMES);
@@ -113,6 +134,12 @@ function requireInteger(parent, field, errors, { minimum = null, pathPrefix = ""
   if (minimum !== null && parent[field] < minimum) errors.push(`run.json field ${fieldPath} must be >= ${minimum}`);
 }
 
+/**
+ * Creates the pending gate head stored in run snapshots.
+ *
+ * @param {number} [currentEpoch=0]
+ * @returns {{ status: string, current_epoch: number, current_attempt: number, recorded_from_state: string, artifact_refs: ArtifactRef[], recorded_at: null, actor: string, idempotency_key: string }}
+ */
 export function buildGateSummary(currentEpoch = 0) {
   return {
     status: GATE_STATUS.PENDING,
@@ -126,6 +153,12 @@ export function buildGateSummary(currentEpoch = 0) {
   };
 }
 
+/**
+ * Converts an artifact.recorded payload into the durable artifact summary shape.
+ *
+ * @param {JsonRecord} payload
+ * @returns {JsonRecord}
+ */
 export function buildRecordedArtifactSummary(payload) {
   return {
     path: payload.path,
@@ -141,6 +174,12 @@ export function buildRecordedArtifactSummary(payload) {
   };
 }
 
+/**
+ * Converts a gate.result_recorded payload into the durable gate head shape.
+ *
+ * @param {JsonRecord} payload
+ * @returns {JsonRecord}
+ */
 export function buildGateResultSummary(payload) {
   return {
     status: payload.status,
@@ -154,6 +193,14 @@ export function buildGateResultSummary(payload) {
   };
 }
 
+/**
+ * Validates a lightweight artifact reference.
+ *
+ * @param {unknown} ref
+ * @param {string[]} [errors=[]]
+ * @param {string} [fieldPath="artifact_ref"]
+ * @returns {string[]}
+ */
 export function validateArtifactRef(ref, errors = [], fieldPath = "artifact_ref") {
   if (!isRecord(ref)) {
     errors.push(`run.json field ${fieldPath} artifact ref must be an object`);
@@ -227,6 +274,13 @@ function validateGateSummary(gate, gateName, errors, fieldPath, currentEpoch) {
   }
 }
 
+/**
+ * Validates an artifact.recorded payload before it is journaled or merged into run.json.
+ *
+ * @param {unknown} payload
+ * @param {{ fieldPath?: string }} [options]
+ * @returns {{ ok: boolean, errors: string[], error: string }}
+ */
 export function validateArtifactRecordedPayload(payload, { fieldPath = "event.evidence" } = {}) {
   const errors = [];
   if (!isRecord(payload)) {
@@ -249,6 +303,13 @@ export function validateArtifactRecordedPayload(payload, { fieldPath = "event.ev
   return { ok: errors.length === 0, errors, error: errors.join("; ") };
 }
 
+/**
+ * Validates a persisted artifact.recorded event envelope.
+ *
+ * @param {unknown} event
+ * @param {{ expectedRunId?: string, expectedSequence?: number }} [options]
+ * @returns {{ ok: boolean, errors: string[], error: string }}
+ */
 export function validateArtifactRecordedEvent(event, { expectedRunId = "", expectedSequence } = {}) {
   if (!isRecord(event)) return { ok: false, errors: ["event is not an object"], error: "event is not an object" };
   const errors = [];
@@ -268,6 +329,13 @@ export function validateArtifactRecordedEvent(event, { expectedRunId = "", expec
   return { ok: errors.length === 0, errors, error: errors.join("; ") };
 }
 
+/**
+ * Validates a gate.result_recorded payload before persistence.
+ *
+ * @param {unknown} payload
+ * @param {{ fieldPath?: string }} [options]
+ * @returns {{ ok: boolean, errors: string[], error: string }}
+ */
 export function validateGateResultPayload(payload, { fieldPath = "event.evidence" } = {}) {
   const errors = [];
   if (!isRecord(payload)) {
@@ -291,6 +359,13 @@ export function validateGateResultPayload(payload, { fieldPath = "event.evidence
   return { ok: errors.length === 0, errors, error: errors.join("; ") };
 }
 
+/**
+ * Validates a persisted gate.result_recorded event envelope.
+ *
+ * @param {unknown} event
+ * @param {{ expectedRunId?: string, expectedSequence?: number }} [options]
+ * @returns {{ ok: boolean, errors: string[], error: string }}
+ */
 export function validateGateResultRecordedEvent(event, { expectedRunId = "", expectedSequence } = {}) {
   if (!isRecord(event)) return { ok: false, errors: ["event is not an object"], error: "event is not an object" };
   const errors = [];
@@ -311,6 +386,13 @@ export function validateGateResultRecordedEvent(event, { expectedRunId = "", exp
   return { ok: errors.length === 0, errors, error: errors.join("; ") };
 }
 
+/**
+ * Validates a projection intent payload written from pr_ready.
+ *
+ * @param {unknown} payload
+ * @param {{ fieldPath?: string }} [options]
+ * @returns {{ ok: boolean, errors: string[], error: string }}
+ */
 export function validateProjectionIntentPayload(payload, { fieldPath = "event.evidence" } = {}) {
   const errors = [];
   if (!isRecord(payload)) {
@@ -329,6 +411,13 @@ export function validateProjectionIntentPayload(payload, { fieldPath = "event.ev
   return { ok: errors.length === 0, errors, error: errors.join("; ") };
 }
 
+/**
+ * Validates a projection result payload, optionally against the current snapshot contract.
+ *
+ * @param {unknown} payload
+ * @param {{ fieldPath?: string, snapshot?: JsonRecord | null, durableContract?: boolean }} [options]
+ * @returns {{ ok: boolean, errors: string[], error: string }}
+ */
 export function validateProjectionResultPayload(payload, { fieldPath = "event.evidence", snapshot = null, durableContract = false } = {}) {
   const intentDecision = validateProjectionIntentPayload(payload, { fieldPath });
   const errors = [...intentDecision.errors];
@@ -343,6 +432,13 @@ export function validateProjectionResultPayload(payload, { fieldPath = "event.ev
   return { ok: errors.length === 0, errors, error: errors.join("; ") };
 }
 
+/**
+ * Validates a persisted projection.intent_recorded event envelope.
+ *
+ * @param {unknown} event
+ * @param {{ expectedRunId?: string, expectedSequence?: number }} [options]
+ * @returns {{ ok: boolean, errors: string[], error: string }}
+ */
 export function validateProjectionIntentRecordedEvent(event, { expectedRunId = "", expectedSequence } = {}) {
   if (!isRecord(event)) return { ok: false, errors: ["event is not an object"], error: "event is not an object" };
   const errors = [];
@@ -363,6 +459,13 @@ export function validateProjectionIntentRecordedEvent(event, { expectedRunId = "
   return { ok: errors.length === 0, errors, error: errors.join("; ") };
 }
 
+/**
+ * Validates a persisted projection.result_recorded event envelope.
+ *
+ * @param {unknown} event
+ * @param {{ expectedRunId?: string, expectedSequence?: number, snapshot?: JsonRecord | null, durableContract?: boolean }} [options]
+ * @returns {{ ok: boolean, errors: string[], error: string }}
+ */
 export function validateProjectionResultRecordedEvent(event, { expectedRunId = "", expectedSequence, snapshot = null, durableContract = false } = {}) {
   if (!isRecord(event)) return { ok: false, errors: ["event is not an object"], error: "event is not an object" };
   const errors = [];
@@ -383,6 +486,13 @@ export function validateProjectionResultRecordedEvent(event, { expectedRunId = "
   return { ok: errors.length === 0, errors, error: errors.join("; ") };
 }
 
+/**
+ * Builds the first durable snapshot created for an accepted packet.
+ *
+ * @param {JsonRecord} report
+ * @param {{ createdAt: string, packetArtifactRef: ArtifactRef }} input
+ * @returns {JsonRecord}
+ */
 export function buildInitialRunSnapshot(report, { createdAt, packetArtifactRef }) {
   return {
     schema_version: SCHEMA_VERSION,
@@ -436,6 +546,15 @@ export function buildInitialRunSnapshot(report, { createdAt, packetArtifactRef }
   };
 }
 
+/**
+ * Builds a deterministic batch identifier from packet metadata.
+ *
+ * @param {JsonRecord[]} reports
+ * @param {string} createdAt
+ * @param {(value: unknown) => string} hashFn
+ * @param {(value: unknown) => string} canonicalJsonFn
+ * @returns {string}
+ */
 export function buildBatchId(reports, createdAt, hashFn, canonicalJsonFn) {
   const inputHash = hashFn(canonicalJsonFn({
     created_at: createdAt,
@@ -449,6 +568,14 @@ export function buildBatchId(reports, createdAt, hashFn, canonicalJsonFn) {
   return `batch_${timestamp}_${inputHash}`;
 }
 
+/**
+ * Builds the batch snapshot persisted under registry/batches.
+ *
+ * @param {JsonRecord[]} reports
+ * @param {JsonRecord[]} runs
+ * @param {{ registryRoot: string, createdAt: string, batchId: string }} input
+ * @returns {JsonRecord}
+ */
 export function buildBatchSnapshot(reports, runs, { registryRoot, createdAt, batchId }) {
   const acceptedRunIds = runs.filter((run) => run.state === "queued").map((run) => run.run_id);
   const blockedRunIds = runs.filter((run) => run.state === "blocked_plan_insufficient").map((run) => run.run_id);
@@ -490,6 +617,14 @@ export function buildBatchSnapshot(reports, runs, { registryRoot, createdAt, bat
   };
 }
 
+/**
+ * Builds a persisted lease record from an acquisition request and resolved lock tuple.
+ *
+ * @param {JsonRecord} request
+ * @param {JsonRecord} lock
+ * @param {{ status?: string }} [options]
+ * @returns {JsonRecord}
+ */
 export function buildLeaseRecord(request, lock, { status = "acquired" } = {}) {
   return {
     schema_version: SCHEMA_VERSION,
@@ -512,6 +647,12 @@ export function buildLeaseRecord(request, lock, { status = "acquired" } = {}) {
   };
 }
 
+/**
+ * Validates a persisted lease record.
+ *
+ * @param {unknown} record
+ * @returns {{ ok: boolean, errors: string[], error: string }}
+ */
 export function validateLeaseRecord(record) {
   const errors = [];
   if (!isRecord(record)) return { ok: false, errors: ["lease record is not an object"], error: "lease record is not an object" };
@@ -619,6 +760,13 @@ function validateProjectionSummary(snapshot, projections, errors, currentEpoch) 
   }
 }
 
+/**
+ * Validates a full run snapshot as stored in registry/runs/<runId>/run.json.
+ *
+ * @param {unknown} snapshot
+ * @param {{ expectedRunId?: string, mode?: string }} [options]
+ * @returns {{ ok: boolean, errors: string[], error: string, mode: string }}
+ */
 export function validateRunSnapshot(snapshot, { expectedRunId = "", mode = "recovery" } = {}) {
   if (!isRecord(snapshot)) return { ok: false, errors: ["run.json is not an object"], error: "run.json is not an object", mode };
   if (snapshot.schema_version !== SCHEMA_VERSION) {
@@ -715,6 +863,13 @@ export function validateRunSnapshot(snapshot, { expectedRunId = "", mode = "reco
   return { ok: errors.length === 0, errors, error: errors.join("; "), mode };
 }
 
+/**
+ * Recursively collects every nested artifact reference-like object.
+ *
+ * @param {unknown} value
+ * @param {ArtifactRef[]} [refs=[]]
+ * @returns {ArtifactRef[]}
+ */
 export function findArtifactRefs(value, refs = []) {
   if (Array.isArray(value)) {
     for (const entry of value) findArtifactRefs(entry, refs);

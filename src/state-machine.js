@@ -17,6 +17,53 @@ import {
 } from "./projection-contract.js";
 import { isRecord, nonEmptyString } from "./utils.js";
 
+/**
+ * Transition and event helpers for the execution-run state machine.
+ *
+ * Responsibilities:
+ * - validate legal state transitions and event envelopes;
+ * - enforce gate/projection preconditions tied to the current snapshot;
+ * - apply pure snapshot updates for persisted run state.
+ *
+ * Non-goals:
+ * - persistence, file I/O, or registry index maintenance;
+ * - repairing invalid snapshots.
+ *
+ * Invariants:
+ * - transition validation is schema-version aware;
+ * - terminal transitions release held workspace/lock leases in the returned snapshot;
+ * - verification/fix-loop cycles advance execution epochs only through applyTransitionToSnapshot().
+ */
+
+/**
+ * @typedef {{ ok: true, reason: string } | { ok: false, reason: string }} TransitionDecision
+ */
+
+/**
+ * @typedef {{
+ *   runId: string,
+ *   sequence: number,
+ *   timestamp: string,
+ *   fromState: string | null,
+ *   toState: string,
+ *   actor: string,
+ *   evidence?: Record<string, unknown>,
+ *   idempotencyKey?: string,
+ * }} TransitionEventInput
+ */
+
+/**
+ * @typedef {{
+ *   runId: string,
+ *   sequence: number,
+ *   timestamp: string,
+ *   type: string,
+ *   actor: string,
+ *   evidence?: Record<string, unknown>,
+ *   idempotencyKey?: string,
+ * }} NonTransitionEventInput
+ */
+
 function transitionKey(fromState) {
   return fromState ?? "__start__";
 }
@@ -122,22 +169,53 @@ function validateGateTransitionGuard(snapshot, fromState, toState) {
   return { ok: true, reason: getTransitionMetadata(fromState, toState)?.reason || "allowed transition" };
 }
 
+/**
+ * Returns true when a string is a declared execution state.
+ *
+ * @param {unknown} state
+ * @returns {boolean}
+ */
 export function isKnownState(state) {
   return typeof state === "string" && EXECUTION_STATE_SET.has(state);
 }
 
+/**
+ * Returns true when a state is terminal and no further transitions are allowed.
+ *
+ * @param {unknown} state
+ * @returns {boolean}
+ */
 export function isTerminalState(state) {
   return typeof state === "string" && TERMINAL_STATES.has(state);
 }
 
+/**
+ * Lists the allowed next states from a given source state.
+ *
+ * @param {string | null} fromState
+ * @returns {string[]}
+ */
 export function getAllowedTransitions(fromState) {
   return ALLOWED_TRANSITIONS[transitionKey(fromState)] || [];
 }
 
+/**
+ * Looks up metadata for a specific state transition.
+ *
+ * @param {string | null} fromState
+ * @param {string} toState
+ * @returns {{ from: string | null, to: string, reason: string } | null}
+ */
 export function getTransitionMetadata(fromState, toState) {
   return TRANSITION_METADATA.find((transition) => transition.from === fromState && transition.to === toState) || null;
 }
 
+/**
+ * Validates whether a transition is syntactically allowed and semantically compatible with a snapshot.
+ *
+ * @param {{ fromState: string | null, toState: string, snapshot?: Record<string, unknown> | null }} input
+ * @returns {TransitionDecision}
+ */
 export function validateTransition({ fromState, toState, snapshot = null }) {
   if (fromState !== null && !isKnownState(fromState)) {
     return { ok: false, reason: `unknown from_state: ${fromState}` };
@@ -158,6 +236,13 @@ export function validateTransition({ fromState, toState, snapshot = null }) {
   return validateGateTransitionGuard(snapshot, fromState, toState);
 }
 
+/**
+ * Throws when a transition is not allowed.
+ *
+ * @param {{ fromState: string | null, toState: string, snapshot?: Record<string, unknown> | null }} input
+ * @returns {TransitionDecision}
+ * @throws {Error}
+ */
 export function assertTransitionAllowed({ fromState, toState, snapshot = null }) {
   const decision = validateTransition({ fromState, toState, snapshot });
   if (!decision.ok) throw new Error(decision.reason);
@@ -189,10 +274,29 @@ function maybeAdvanceExecutionEpoch(snapshot, fromState, toState) {
   };
 }
 
+/**
+ * Maps a gate name to the state in which its artifacts and result are recorded.
+ *
+ * @param {string} gateName
+ * @returns {string}
+ */
 export function gateStateForName(gateName) {
   return GATE_STATE_BY_NAME[gateName] || "";
 }
 
+/**
+ * Applies a validated transition to an in-memory snapshot.
+ *
+ * Side effects in the returned value only:
+ * - bumps execution epochs when entering verification from running/fix_loop;
+ * - resets gate heads for a new epoch;
+ * - releases workspace and lock leases on terminal states.
+ *
+ * @param {Record<string, unknown>} snapshot
+ * @param {{ toState: string, timestamp: string, evidence?: Record<string, unknown>, sequence?: number }} [options]
+ * @returns {Record<string, unknown>}
+ * @throws {Error}
+ */
 export function applyTransitionToSnapshot(snapshot, { toState, timestamp, evidence = {}, sequence } = {}) {
   if (!isRecord(snapshot)) throw new Error("run snapshot is required");
   assertTransitionAllowed({ fromState: snapshot.state, toState, snapshot });
@@ -219,6 +323,13 @@ export function applyTransitionToSnapshot(snapshot, { toState, timestamp, eviden
   };
 }
 
+/**
+ * Validates an event envelope and, for transition events, checks the encoded state move.
+ *
+ * @param {Record<string, unknown>} event
+ * @param {{ expectedRunId?: string, expectedSequence?: number, expectedFromState?: string | null }} [options]
+ * @returns {TransitionDecision}
+ */
 export function validateTransitionEvent(event, { expectedRunId = "", expectedSequence, expectedFromState } = {}) {
   if (!isRecord(event)) return { ok: false, reason: "event is not an object" };
   if (event.schema_version !== SCHEMA_VERSION) return { ok: false, reason: `unsupported event schema_version: ${event.schema_version}` };
@@ -243,6 +354,13 @@ export function validateTransitionEvent(event, { expectedRunId = "", expectedSeq
   return validateTransition({ fromState: event.state_before, toState: event.state_after });
 }
 
+/**
+ * Builds a normalized transition event object.
+ *
+ * @param {TransitionEventInput} input
+ * @returns {Record<string, unknown>}
+ * @throws {Error}
+ */
 export function buildTransitionEvent({ runId, sequence, timestamp, fromState, toState, actor, evidence = {}, idempotencyKey = "" }) {
   assertTransitionAllowed({ fromState, toState });
   if (!runId) throw new Error("runId is required for transition event");
@@ -261,6 +379,13 @@ export function buildTransitionEvent({ runId, sequence, timestamp, fromState, to
   };
 }
 
+/**
+ * Builds a normalized non-transition event object.
+ *
+ * @param {NonTransitionEventInput} input
+ * @returns {Record<string, unknown>}
+ * @throws {Error}
+ */
 export function buildNonTransitionEvent({ runId, sequence, timestamp, type, actor, evidence = {}, idempotencyKey = "" }) {
   if (!runId) throw new Error("runId is required for event");
   if (!Number.isSafeInteger(sequence) || sequence < 1) throw new Error("event sequence must be a positive integer");

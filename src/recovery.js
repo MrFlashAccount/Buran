@@ -20,6 +20,19 @@ import { getRegistryPaths, rebuildIndexes, writeRegistryReport } from "./registr
 import { applyTransitionToSnapshot, validateTransition, validateTransitionEvent } from "./state-machine.js";
 import { canonicalJson, sha256Hex } from "./utils.js";
 
+/**
+ * Recovery-time registry inspection and quarantine pipeline.
+ *
+ * Responsibilities:
+ * - validate persisted run snapshots and event journals by replaying them;
+ * - verify artifact integrity and lease reconstruction preconditions;
+ * - quarantine corrupt runs before rebuilding derived indexes.
+ *
+ * Non-goals:
+ * - repairing malformed runs in place;
+ * - initiating external side effects beyond local quarantine/index writes.
+ */
+
 function safeReasonPart(reason) {
   return String(reason || "invalid")
     .toLowerCase()
@@ -416,6 +429,14 @@ async function inspectRun(registryRoot, entry, { clock }) {
   };
 }
 
+/**
+ * Recovers registry state by validating runs, quarantining corrupt ones, and rebuilding indexes.
+ *
+ * @param {string} registryRoot
+ * @param {{ clock?: () => Date }} [options]
+ * @returns {Promise<Record<string, unknown>>}
+ * @throws {Error}
+ */
 export async function recoverRegistry(registryRoot, { clock = () => new Date() } = {}) {
   if (!registryRoot) throw new Error("registryRoot is required for recovery");
   const paths = getRegistryPaths(registryRoot);
@@ -474,6 +495,12 @@ export async function recoverRegistry(registryRoot, { clock = () => new Date() }
   return report;
 }
 
+/**
+ * Formats a compact human-readable recovery summary.
+ *
+ * @param {Record<string, unknown>} report
+ * @returns {string}
+ */
 export function formatRecoveryReport(report) {
   const lines = [];
   lines.push("buran: recovery");

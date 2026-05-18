@@ -1,3 +1,16 @@
+/**
+ * Local verification adapter for executing an allowlisted command set from an approved packet.
+ *
+ * Responsibility:
+ * - parse the verification section from the immutable packet artifact,
+ * - run only direct-command allowlist entries inside the leased workspace,
+ * - emit a sanitized verification artifact for the registry gate ledger.
+ *
+ * Non-goals:
+ * - no package-script delegation,
+ * - no dynamic command execution outside the allowlist,
+ * - no PASS result without at least one executable verification command.
+ */
 import { execFile } from "node:child_process";
 import { promises as fs } from "node:fs";
 import path from "node:path";
@@ -50,6 +63,13 @@ async function loadApprovedPacket(runDir, snapshot) {
   return JSON.parse(match[1]);
 }
 
+/**
+ * Extracts the executable verification contract from the normalized approved packet.
+ *
+ * @param {object} packet Parsed approved packet JSON.
+ * @param {object} snapshot Current run snapshot used for normalization context.
+ * @returns {{expectations: string, commands: string[]}} Verification expectations plus direct commands allowed for local execution.
+ */
 function normalizeVerificationPacket(packet, snapshot) {
   const normalized = normalizePacket(packet, {
     sourcePath: snapshot?.packet?.source_path || "",
@@ -140,6 +160,14 @@ function resultSummary(commandResults, status, problem = null) {
   return `Verification blocked on '${firstFailure.command}': ${firstFailure.reason || "unsupported verification adapter outcome"}.`;
 }
 
+/**
+ * Executes a single allowlisted verification command inside the leased workspace.
+ *
+ * @param {string} command Human-readable command key from the approved packet.
+ * @param {string} workspacePath Absolute workspace path for execution.
+ * @param {Array<{root: string, label: string}>} contexts Sanitization contexts used for public output.
+ * @returns {Promise<object>} Sanitized command result with PASS/FAIL/BLOCKED status and clipped output.
+ */
 async function executeAllowedCommand(command, workspacePath, contexts) {
   const spec = commandSpec(command);
   if (!spec) {
@@ -199,6 +227,16 @@ async function executeAllowedCommand(command, workspacePath, contexts) {
   }
 }
 
+/**
+ * Executes the verification gate and returns an immutable artifact payload plus gate metadata.
+ *
+ * @param {object} params
+ * @param {string} params.runDir Absolute run directory containing immutable packet artifacts.
+ * @param {object} params.snapshot Current run snapshot used to load packet expectations and workspace context.
+ * @param {() => Date} [params.clock=() => new Date()] Clock source used for started/finished timestamps.
+ * @returns {Promise<object>} Verification gate result ready for artifact recording in the registry ledger.
+ * @throws {Error} When the caller omits required run context.
+ */
 export async function executeVerificationGate({ runDir, snapshot, clock = () => new Date() } = {}) {
   if (!runDir) throw new Error("runDir is required for verification execution");
   if (!snapshot?.run_id) throw new Error("run snapshot is required for verification execution");

@@ -1,3 +1,16 @@
+/**
+ * Local PR projection planning/execution helpers for turning a reviewed run into `github.pr` data.
+ *
+ * Responsibility:
+ * - derive deterministic PR projection intent/result artifacts from the local run contract,
+ * - validate that projected PR data matches repo/issue/branch expectations,
+ * - provide a no-network local adapter for manual-review handoff flows.
+ *
+ * Non-goals:
+ * - no direct GitHub writes in the local adapter,
+ * - no projection when base-branch contract data is missing,
+ * - no acceptance of unsanitized durable PR payloads.
+ */
 import {
   appendGithubPrContractErrors,
   appendGithubPrValidationErrors,
@@ -10,6 +23,13 @@ const PROJECTION_TARGET = "github.pr";
 export const LOCAL_PR_PROJECTION_MODE = "local_fake";
 export const LOCAL_PR_PROJECTION_ADAPTER = "local-github-pr-projection";
 
+/**
+ * Builds a typed error used when projection data violates the documented local contract.
+ *
+ * @param {string} code Stable machine-readable error code.
+ * @param {string} message Public-safe explanation.
+ * @returns {Error & {code: string}}
+ */
 export function projectionContractError(code, message) {
   const error = new Error(message);
   error.code = code;
@@ -80,6 +100,22 @@ function projectionTitle(snapshot) {
   return `Buran handoff for ${sanitizedTaskId}`;
 }
 
+/**
+ * Builds a deterministic PR projection plan from the current run snapshot.
+ *
+ * The returned plan is used both for intent recording and for later result recording so
+ * idempotency keys, artifact paths, and contract expectations stay aligned.
+ *
+ * @param {object} snapshot Current run snapshot.
+ * @param {object} [options]
+ * @param {() => Date} [options.clock=() => new Date()] Clock source used for recorded timestamps.
+ * @param {string} [options.actor=LOCAL_PR_PROJECTION_ADAPTER] Actor recorded on projection artifacts.
+ * @param {string} [options.adapter=LOCAL_PR_PROJECTION_ADAPTER] Adapter identifier recorded in projection artifacts.
+ * @param {string} [options.mode=LOCAL_PR_PROJECTION_MODE] Projection mode label recorded in projection artifacts.
+ * @param {boolean} [options.externalSideEffects=false] Whether downstream execution performs remote writes.
+ * @returns {object} Projection plan with immutable intent/result metadata and contract expectations.
+ * @throws {Error & {code: string}} When the snapshot does not contain a required base branch.
+ */
 export function buildPrProjectionPlan(snapshot, {
   clock = () => new Date(),
   actor = LOCAL_PR_PROJECTION_ADAPTER,
@@ -176,6 +212,21 @@ function validateSanitizedGithubPr(githubPr) {
   }
 }
 
+/**
+ * Builds a validated PR projection result artifact from a plan plus concrete PR data.
+ *
+ * @param {object} snapshot Current run snapshot.
+ * @param {object} plan Projection plan previously produced for the same snapshot.
+ * @param {object} options
+ * @param {string} options.status Projection status to record.
+ * @param {object} options.githubPr Contract-bearing PR payload.
+ * @param {string} [options.actor=plan.actor] Actor recorded on the result artifact.
+ * @param {string} [options.recordedAt=plan.recordedAt] Timestamp recorded on the result artifact.
+ * @param {boolean} [options.externalSideEffects=plan.externalSideEffects] Whether transport-side effects occurred.
+ * @param {boolean} [options.durableContract=false] Whether to sanitize expected snapshot values before parity checks.
+ * @returns {object} Projection result package ready for durable recording.
+ * @throws {Error & {code: string}} When the projected PR payload violates schema or contract expectations.
+ */
 export function buildPrProjectionResult(snapshot, plan, {
   status,
   githubPr,
@@ -230,6 +281,17 @@ export function buildPrProjectionResult(snapshot, plan, {
   };
 }
 
+/**
+ * Rehydrates the latest successful recorded PR projection from the run snapshot.
+ *
+ * @param {object} snapshot Current run snapshot.
+ * @param {object} [options]
+ * @param {() => Date} [options.clock=() => new Date()] Clock source used when rebuilding the base plan.
+ * @param {string} [options.expectedAdapter=""] Optional adapter filter; mismatches return `null`.
+ * @param {string} [options.expectedMode=""] Optional mode filter; mismatches return `null`.
+ * @param {boolean} [options.externalSideEffects=false] Whether the recovered projection should report remote writes.
+ * @returns {object|null} Rebuilt projection result, or `null` when no compatible recorded result exists.
+ */
 export function buildRecordedPrProjection(snapshot, {
   clock = () => new Date(),
   expectedAdapter = "",
@@ -278,6 +340,12 @@ function buildLocalGithubPr(snapshot, plan) {
   };
 }
 
+/**
+ * Creates the deterministic no-network projection adapter used by local runner flows.
+ *
+ * @returns {{adapter: string, mode: string, externalSideEffects: boolean, plan(snapshot: object, options?: object): object, execute(snapshot: object, plan: object): Promise<object>}}
+ * Adapter that records a synthetic but contract-valid local PR projection.
+ */
 export function createLocalPrProjectionAdapter() {
   return {
     adapter: LOCAL_PR_PROJECTION_ADAPTER,
@@ -301,6 +369,13 @@ export function createLocalPrProjectionAdapter() {
   };
 }
 
+/**
+ * Convenience helper that plans and executes the local fake PR projection in one call.
+ *
+ * @param {object} snapshot Current run snapshot.
+ * @param {object} [options] Planning options forwarded to the local adapter.
+ * @returns {object} Contract-valid local projection result.
+ */
 export function buildLocalPrProjection(snapshot, options = {}) {
   const adapter = createLocalPrProjectionAdapter();
   const plan = adapter.plan(snapshot, options);

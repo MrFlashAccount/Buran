@@ -1,3 +1,15 @@
+/**
+ * Transport-backed PR projection adapter that wraps a real GitHub projection implementation.
+ *
+ * Responsibility:
+ * - reuse the local projection contract for intent/result metadata,
+ * - normalize transport output into the durable `github.pr` shape,
+ * - reject incomplete or status-invalid transport responses before recording.
+ *
+ * Non-goals:
+ * - no validation bypass around the core projection contract,
+ * - no assumption that transport output is already sanitized or complete.
+ */
 import {
   buildPrProjectionPlan,
   buildPrProjectionResult,
@@ -63,6 +75,18 @@ function normalizeTransportProjectionResult(raw, plan) {
   };
 }
 
+/**
+ * Creates a projection adapter that delegates PR creation/update to a caller-supplied transport.
+ *
+ * @param {object} options
+ * @param {(snapshotContext: object) => Promise<object>|object} options.projectPr Transport hook that creates or updates the PR.
+ * @param {string} [options.adapter=GITHUB_PR_TRANSPORT_ADAPTER] Adapter identifier recorded in durable artifacts.
+ * @param {string} [options.mode=GITHUB_PR_TRANSPORT_MODE] Projection mode label recorded in durable artifacts.
+ * @param {boolean} [options.externalSideEffects=true] Whether transport execution performs remote writes.
+ * @returns {{adapter: string, mode: string, externalSideEffects: boolean, plan(snapshot: object, options?: object): object, execute(snapshot: object, plan: object): Promise<object>}}
+ * Adapter that preserves the local projection contract while delegating transport I/O.
+ * @throws {Error} When `projectPr` is not a function.
+ */
 export function createGithubPrTransportAdapter({
   projectPr,
   adapter = GITHUB_PR_TRANSPORT_ADAPTER,

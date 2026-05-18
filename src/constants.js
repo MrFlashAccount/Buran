@@ -1,3 +1,15 @@
+/**
+ * Shared execution-run constants consumed by the registry, transition engine, and recovery flow.
+ *
+ * Responsibilities:
+ * - define the canonical state machine vocabulary;
+ * - expose immutable lookup tables for gates, artifact stages, and event types;
+ * - keep schema-versioned string literals centralized so persistence and replay stay aligned.
+ *
+ * Non-goals:
+ * - runtime validation or transition enforcement;
+ * - deriving user-facing messages beyond stable transition reasons.
+ */
 export const PLUGIN_ID = "buran";
 export const PLUGIN_COMMAND_NAME = "buran";
 export const SCHEMA_VERSION = "execution-run.v2";
