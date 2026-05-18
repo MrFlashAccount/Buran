@@ -10,16 +10,19 @@ It owns local execution state as JSON, runs implementation/verification/review l
 
 - `ARCHITECTURE.md` — selected architecture contract, decision, C4, boundaries, and binding rules.
 - `CONTEXT.md` — local ownership and placement rules for this plugin folder.
+- `docs/context-map.md` — upstream/downstream boundaries, handoff points, and side-effect map.
+- `docs/module-map.md` — source-tree responsibilities and runtime flow by module.
 - `docs/state-machine.md` — execution lifecycle and gate transitions.
 - `docs/execution-run-schema.md` — JSON-first run registry, event log, artifact layout, atomicity, and recovery contract.
 - `docs/github-projection-contract.md` — GitHub/TaskFlow/comments/project projection rules.
+- `docs/acceptance-scenarios.md` — concise scenario-level behavior already covered by tests.
 - `docs/migration-plan.md` — migration from legacy/reference queues into this plugin.
 
 ## Architecture decision
 
 ### Context
 
-The user needs repeatable execution of manually approved GitHub tasks without turning the system into planning, intake, dashboarding, or autonomous merge machinery. The existing `plugins/background-worker` and `scripts/github-*queue` surfaces may be useful references, but they are not the target architecture.
+The operator needs repeatable execution of manually approved GitHub tasks without turning the system into planning, intake, dashboarding, or autonomous merge machinery. The existing `plugins/background-worker` and `scripts/github-*queue` surfaces may be useful references, but they are not the target architecture.
 
 ### Decision
 
@@ -64,19 +67,19 @@ Verification and internal review commands are not a loophole for arbitrary scrip
 
 ```mermaid
 flowchart LR
-  the user[the user / operator]
+  Operator[Operator]
   Prep[Manual prep outside plugin\nResearch + architecture/implementation plan\napproved implementation packet]
   Plugin[buran]
   Local[(Local JSON run registry)]
   GitHub[GitHub issues / PRs / comments]
   TaskFlow[TaskFlow / project projection]
 
-  the user --> Prep --> Plugin
+  Operator --> Prep --> Plugin
   Plugin <--> Local
   Plugin --> GitHub
   Plugin --> TaskFlow
-  GitHub -. projection/journal .-> the user
-  TaskFlow -. projection/journal .-> the user
+  GitHub -. projection/journal .-> Operator
+  TaskFlow -. projection/journal .-> Operator
 ```
 
 ## C4 container

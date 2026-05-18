@@ -31,6 +31,18 @@ Implemented now:
 
 See [docs/observability.md](docs/observability.md) for the boundary between durable registry journals, operational logs, and diagnostic reports. Logs and diagnostics are local debugging aids only; registry state remains the source of truth and no external telemetry is emitted.
 
+## Documentation map
+
+- [ARCHITECTURE.md](ARCHITECTURE.md) — selected architecture, constraints, and decision record
+- [CONTEXT.md](CONTEXT.md) — ownership and placement rules for this plugin folder
+- [docs/context-map.md](docs/context-map.md) — upstream/downstream boundaries, handoff points, and side-effect map
+- [docs/module-map.md](docs/module-map.md) — source-tree responsibilities and runtime flow by module
+- [docs/state-machine.md](docs/state-machine.md) — lifecycle states, transitions, and gate rules
+- [docs/execution-run-schema.md](docs/execution-run-schema.md) — local registry layout and persistence contract
+- [docs/github-projection-contract.md](docs/github-projection-contract.md) — PR/comment/project projection semantics
+- [docs/acceptance-scenarios.md](docs/acceptance-scenarios.md) — concrete behavior scenarios already covered by automated tests
+- [docs/migration-plan.md](docs/migration-plan.md) — migration notes from legacy/reference queue surfaces
+
 ## Command
 
 ```bash

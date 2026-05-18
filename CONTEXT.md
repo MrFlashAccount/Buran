@@ -60,4 +60,6 @@ This context starts after external research/planning approval and ends before hu
 - Domain transition rules stay separate from effectful adapters.
 - JSON schema and state-machine changes must be documented in `docs/` before implementation changes rely on them.
 - Projection behavior belongs behind projection contracts, not scattered through workflow code.
+- Source-tree ownership changes should update `docs/module-map.md`.
+- Boundary or handoff changes should update `docs/context-map.md`.
 - Legacy/reference behavior must be copied only through explicit migration slices, not by quiet coupling.
