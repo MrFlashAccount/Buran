@@ -20,10 +20,17 @@ import {
   transitionRun,
 } from "../src/registry-store.js";
 
+/**
+ * Ledger-focused tests for artifact, gate, and projection recording. The helpers
+ * construct runs at specific workflow states so each assertion can stay narrow.
+ */
+
+/** Creates a throwaway registry root for ledger persistence tests. */
 async function makeTempDir() {
   return fs.mkdtemp(path.join(os.tmpdir(), "buran-gate-ledger-test-"));
 }
 
+/** Builds a sufficient packet report fixture for gate-ledger scenarios. */
 function packetReport(runId = "run_gate_good") {
   return {
     run_id: runId,
@@ -40,6 +47,7 @@ function packetReport(runId = "run_gate_good") {
   };
 }
 
+/** Advances a fresh run to the verification state with an acquired workspace lease. */
 async function prepareVerificationRun(registryRoot, { runId = "run_gate_good" } = {}) {
   const created = await createRunFromPacketReport(packetReport(runId), {
     registryRoot,
@@ -58,6 +66,7 @@ async function prepareVerificationRun(registryRoot, { runId = "run_gate_good" } 
   return verified.run;
 }
 
+/** Records a canonical verification PASS artifact/result pair for transition guard tests. */
 async function recordVerificationPass(registryRoot, runId) {
   const artifact = await recordArtifact(registryRoot, runId, {
     artifactPath: "artifacts/verification/report.json",
@@ -85,6 +94,7 @@ async function recordVerificationPass(registryRoot, runId) {
   return { artifact, result, resultPayload };
 }
 
+/** Seeds both verification and internal review PASS results, ending at pr_ready. */
 async function preparePrReadyRun(registryRoot, { runId = "run_gate_pr_ready" } = {}) {
   const run = await prepareVerificationRun(registryRoot, { runId });
   await recordVerificationPass(registryRoot, run.run_id);

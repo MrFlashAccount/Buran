@@ -8,14 +8,22 @@ import { SCHEMA_VERSION } from "../src/constants.js";
 import { recoverRegistry } from "../src/recovery.js";
 import { createRunFromPacketReport, getRunPaths, readEventsFile, readRunSnapshot, rebuildIndexes, transitionRun } from "../src/registry-store.js";
 
+/**
+ * Persistence and recovery tests for the registry store. Helpers keep packet and
+ * JSON fixture construction consistent while the assertions focus on state changes.
+ */
+
+/** Creates an isolated registry root for store-level tests. */
 async function makeTempDir() {
   return fs.mkdtemp(path.join(os.tmpdir(), "buran-store-test-"));
 }
 
+/** Reads JSON fixtures written by registry index helpers during the test. */
 async function readJson(filePath) {
   return JSON.parse(await fs.readFile(filePath, "utf8"));
 }
 
+/** Builds the standard sufficient packet report used by registry store tests. */
 function packetReport(runId = "run_store_good") {
   return {
     run_id: runId,

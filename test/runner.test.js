@@ -13,8 +13,14 @@ import { recoverRegistry } from "../src/recovery.js";
 import { runLocalMission } from "../src/runner.js";
 import { createRunFromPacketReport, getRunPaths, readEventsFile, readRunSnapshot, recordArtifact, recordGateResult, transitionRun, writeRunSnapshot } from "../src/registry-store.js";
 
+/**
+ * Runner mission tests covering queueing, verification execution, review handoff,
+ * and projection transport behavior with fully local workspaces and registries.
+ */
+
 const execFileAsync = promisify(execFile);
 
+/** Creates a temp root that can host registries plus disposable git workspaces. */
 async function makeTempDir() {
   return fs.mkdtemp(path.join(os.tmpdir(), "buran-runner-test-"));
 }
@@ -23,6 +29,13 @@ async function readJson(filePath) {
   return JSON.parse(await fs.readFile(filePath, "utf8"));
 }
 
+/**
+ * Creates a minimal local git workspace on the requested branch.
+ *
+ * @param {string} rootDir
+ * @param {string} branchName
+ * @param {{dirty?: boolean}} [options={}]
+ */
 async function createLocalGitWorkspace(rootDir, branchName, { dirty = false } = {}) {
   const workspacePath = path.join(rootDir, `workspace-${branchName.replace(/[^a-z0-9._-]+/gi, "-")}`);
   await fs.mkdir(workspacePath, { recursive: true });
@@ -35,6 +48,12 @@ async function createLocalGitWorkspace(rootDir, branchName, { dirty = false } = 
   return workspacePath;
 }
 
+/**
+ * Builds the base runner packet report, with override hooks for branch/repo-specific scenarios.
+ *
+ * @param {string} [runId="run_runner_good"]
+ * @param {{taskId?: string, repo?: string, issueNumber?: number, intendedBranch?: string, baseBranch?: string, conflictSurface?: string}} [overrides={}]
+ */
 function packetReport(runId = "run_runner_good", overrides = {}) {
   const taskId = overrides.taskId || "runner-good";
   const repo = overrides.repo || "example-owner/example-repo";
@@ -58,6 +77,7 @@ function packetReport(runId = "run_runner_good", overrides = {}) {
   };
 }
 
+/** Derives an insufficient packet report to exercise early runner rejection paths. */
 function weakPacketReport(runId = "run_runner_weak") {
   return {
     ...packetReport(runId),
@@ -67,6 +87,12 @@ function weakPacketReport(runId = "run_runner_weak") {
   };
 }
 
+/**
+ * Creates a disposable Node workspace whose package scripts simulate verification/check outcomes.
+ *
+ * @param {string} rootDir
+ * @param {{testFile?: string, passing?: boolean, testScript?: string, checkScript?: string, testSource?: string}} [options={}]
+ */
 async function createVerificationWorkspace(rootDir, { testFile = "test/runner.test.js", passing = true, testScript = "", checkScript = "", testSource = "" } = {}) {
   const workspacePath = path.join(rootDir, `verification-workspace-${Math.random().toString(16).slice(2, 10)}`);
   await fs.mkdir(path.join(workspacePath, path.dirname(testFile)), { recursive: true });
@@ -88,6 +114,12 @@ async function createVerificationWorkspace(rootDir, { testFile = "test/runner.te
   return workspacePath;
 }
 
+/**
+ * Seeds a run whose workspace lease and packet contents are ready for verification execution.
+ *
+ * @param {string} registryRoot
+ * @param {string} workspacePath
+ */
 async function prepareVerificationRun(registryRoot, workspacePath, {
   runId = "run_runner_verification",
   commands = ["node --test test/runner.test.js"],
@@ -152,6 +184,7 @@ async function prepareVerificationRun(registryRoot, workspacePath, {
   return created.run.run_id;
 }
 
+/** Executes the local runner once so a verification-ready run can advance itself. */
 async function advanceRunToInternalReview(registryRoot, runId, timestamp = "2026-05-16T13:55:00.000Z") {
   return runLocalMission({
     registryRoot,
@@ -160,6 +193,7 @@ async function advanceRunToInternalReview(registryRoot, runId, timestamp = "2026
   });
 }
 
+/** Records a synthetic internal-review result without re-running the full reviewer flow. */
 async function seedInternalReviewGateResult(registryRoot, runId, {
   status = "PASS",
   summary = `Seeded internal review ${status}`,
@@ -202,6 +236,7 @@ async function seedInternalReviewGateResult(registryRoot, runId, {
   return { artifact, gateResult };
 }
 
+/** Builds a locally passing run all the way through pr_ready for projection/handoff tests. */
 async function preparePrReadyRun(registryRoot, tempDir, {
   runId = "run_runner_pr_ready",
   repo = "example-owner/example-repo",

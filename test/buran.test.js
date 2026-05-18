@@ -16,9 +16,15 @@ import { recoverRegistry } from "../src/recovery.js";
 import { transitionRun, writeJsonAtomic } from "../src/registry.js";
 import { validateTransition } from "../src/state-machine.js";
 
+/**
+ * End-to-end coverage for packet intake, CLI orchestration, locks, redaction,
+ * and projection-adjacent helpers that glue Buran's local workflow together.
+ */
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const fixturePath = path.join(__dirname, "fixtures", "packet-list.mixed.json");
 
+/** Creates an isolated temp workspace for full-flow integration tests. */
 async function makeTempDir() {
   return fs.mkdtemp(path.join(os.tmpdir(), "buran-test-"));
 }
@@ -45,6 +51,11 @@ function escapeRegExp(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+/**
+ * Builds a minimally sufficient approved packet tuned for local-only execution tests.
+ *
+ * @param {{taskId: string, issue: number, branch: string, conflictSurface: string|string[], repo?: string}} params
+ */
 function goodPacket({ taskId, issue, branch, conflictSurface, repo = "example-owner/example-repo" }) {
   return {
     task_id: taskId,
@@ -71,6 +82,10 @@ function goodPacket({ taskId, issue, branch, conflictSurface, repo = "example-ow
   };
 }
 
+/**
+ * Returns a fully-populated run snapshot already parked at manual review with
+ * a locally projected PR payload, so projection invariants can be asserted in one place.
+ */
 function projectionReadySnapshot() {
   return {
     schema_version: SCHEMA_VERSION,
@@ -190,6 +205,7 @@ function projectionReadySnapshot() {
   };
 }
 
+/** Persists a packet-list fixture in the exact CLI input shape used by validate/run flows. */
 async function writePacketList(tempDir, packets) {
   const packetPath = path.join(tempDir, "packets.json");
   await fs.writeFile(packetPath, `${JSON.stringify({ packets }, null, 2)}\n`, "utf8");
@@ -200,6 +216,7 @@ const GITHUB_PAT_SECRET = "github_pat_1234567890abcdefghijklmnop";
 const GHP_SECRET = "ghp_1234567890abcdefghijklmnop";
 const GLPAT_SECRET = "glpat-1234567890abcdefghijklmnop";
 
+/** Ensures human-facing output never leaks synthetic token fixtures used in these tests. */
 function assertPublicOutputRedactsSyntheticSecrets(text) {
   assert.doesNotMatch(text, new RegExp(escapeRegExp(GITHUB_PAT_SECRET)));
   assert.doesNotMatch(text, new RegExp(escapeRegExp(GHP_SECRET)));
@@ -207,6 +224,7 @@ function assertPublicOutputRedactsSyntheticSecrets(text) {
   assert.match(text, /\[REDACTED_SECRET\]/);
 }
 
+/** Lists persisted lease records while treating a missing lease directory as an empty registry. */
 async function listLeaseRecordFiles(registryRoot) {
   const dir = path.join(registryRoot, "leases");
   const entries = await fs.readdir(dir).catch((error) => {

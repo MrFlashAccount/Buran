@@ -12,6 +12,12 @@ import {
   validateRunSnapshot,
 } from "../src/execution-run-schema.js";
 
+/**
+ * Schema-contract tests for run snapshots and ledger payloads. Helpers below keep
+ * the canonical sample payloads aligned across positive and negative cases.
+ */
+
+/** Produces the baseline packet-intake report consumed by snapshot builders in this file. */
 function sampleReport() {
   return {
     run_id: "run_schema_good",
@@ -26,6 +32,11 @@ function sampleReport() {
   };
 }
 
+/**
+ * Builds a valid initial run snapshot and allows focused overrides per test case.
+ *
+ * @param {Record<string, unknown>} [overrides={}]
+ */
 function initialSnapshot(overrides = {}) {
   return {
     ...buildInitialRunSnapshot(sampleReport(), {
