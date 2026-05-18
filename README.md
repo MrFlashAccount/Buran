@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/buran-logo-spaceplane.png" alt="Buran spaceplane" width="420">
+  <img src="docs/assets/buran-logo-spaceplane.png" alt="Buran spaceplane" width="840">
 </p>
 
 <h1 align="center">Buran</h1>
