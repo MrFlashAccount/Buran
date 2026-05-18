@@ -1,108 +1,131 @@
 # Buran
 
-Buran is a local JSON-first execution boundary for already approved GitHub implementation packets.
+![Buran spaceplane](docs/assets/buran-logo-spaceplane.png)
 
-## What Buran is for
+> Turn a task or plan into a pull request you can actually review.
 
-Use Buran when planning is already done and approved, and you want the execution slice to stay auditable, gated, and local-first until handoff for manual review.
+Buran helps OpenClaw move from an approved task or plan to a clean PR, with a controlled workspace flow, recovery state, and a predictable review handoff.
 
-Buran owns the run lifecycle after packet approval and before human PR review. Its source of truth is a local registry, not GitHub state.
+## What it does
 
-## What Buran does
+Buran is the execution layer after planning is already done.
 
-- validates explicit packet lists before execution
-- creates durable local `ExecutionRun` records with `run.json`, `events.jsonl`, and immutable artifacts
-- moves runs through a defined lifecycle with verification and internal-review gates
-- acquires conservative local workspace leases to avoid unsafe overlap
-- records a local PR handoff projection in the current default runtime slice
-- rebuilds indexes and quarantines ambiguous local state during recovery
+You give it an approved packet list, it keeps the run local and structured, and it walks the work through validation, intake, execution, verification, internal review, and PR handoff.
 
-## What Buran does not do
+That means:
 
-- discover tasks on its own
-- create packets, architecture, or scope
-- improvise when a packet is insufficient
-- treat GitHub or TaskFlow as the source of truth
-- perform real GitHub network writes by default in the CLI/runtime path
-- auto-merge, supervise PRs after handoff, or move work to done
+- no vague “agent, go figure it out” mode
+- no hidden remote state becoming the source of truth
+- no messy overlap between workspaces
+- no lost run when a session dies halfway through
 
-## First value in a few commands
+The source of truth stays local in Buran’s registry, so OpenClaw can resume cleanly, audit what happened, and hand the result to a human reviewer without guesswork.
 
-These examples use the repo-local CLI entrypoint. Inside OpenClaw, the `/buran ...` slash surface maps to the same verbs and options.
+## Contents
 
-Validate a real fixture packet list:
+- [Quick steps](#quick-steps)
+- [Configuration](#configuration)
+- [How the workflow runs](#how-the-workflow-runs)
+- [Recovery and resume](#recovery-and-resume)
+- [Review handoff](#review-handoff)
 
-```bash
-node ./bin/buran.js validate --packets ./test/fixtures/packet-list.mixed.json --json
-```
+## Quick steps
 
-Create local run state under a registry you control:
+1. Prepare an approved packet list.
+2. Ask OpenClaw to validate it.
+3. Intake the run into the local registry.
+4. Start execution with a workspace lease.
+5. Let Buran drive the run to verification, internal review, and PR-ready handoff.
+6. If something interrupts the flow, recover the registry and resume from local state.
 
-```bash
-node ./bin/buran.js intake --packets ./test/fixtures/packet-list.mixed.json --registry /tmp/buran-registry --json
-```
-
-If the packet list is sufficient, Buran writes local state under:
+Typical OpenClaw flow:
 
 ```text
-/tmp/buran-registry/batches/<batch_id>/batch.json
-/tmp/buran-registry/runs/<run_id>/run.json
-/tmp/buran-registry/runs/<run_id>/events.jsonl
+/buran validate --packets ./packet-list.json --json
+/buran intake --packets ./packet-list.json --json
+/buran run --run <run_id> --workspace-id <workspace_id> --workspace-path <workspace_path> --json
 ```
 
-From there, `run`, `lease acquire`, and `recover` operate on that local registry.
+If the local state needs repair before continuing:
 
-## Run lifecycle
+```text
+/buran recover --json
+```
 
-At a high level, Buran moves an approved packet through these stages:
+## Configuration
+
+| Setting | Where it lives | What it controls | Notes |
+| --- | --- | --- | --- |
+| `registryRoot` | OpenClaw plugin config (`openclaw.plugin.json`) | Root directory for Buran’s local registry | If omitted, Buran resolves the registry from the current workspace/runtime context. |
+| Packet list path | Invocation input via `--packets` | Which approved tasks/plans Buran is allowed to execute | Required for validation and intake. Buran does not discover work on its own. |
+| Run ID | Invocation input via `--run` | Which recorded run to continue | Used when execution or lease actions continue after intake. |
+| Workspace ID | Invocation input via `--workspace-id` | Stable lease identity for the workspace doing the work | Helps prevent unsafe overlap between concurrent runs. |
+| Workspace path | Invocation input via `--workspace-path` | Which checkout or local working directory is leased for the run | Useful when the run must be pinned to a specific local repo path. |
+| Lease TTL | Invocation input via `--ttl-ms` | How long a workspace lease stays active before recovery can reclaim stale ownership | Optional override for longer-running work. |
+
+## How the workflow runs
+
+Buran is narrow on purpose. It starts only after the task or plan is already approved.
+
+### 1. Validate the packet list
+
+Buran checks that the packet list is explicit enough to execute. If the plan is missing branch details, verification expectations, review criteria, or other required execution data, the run stops instead of improvising.
+
+### 2. Intake the run
+
+Once the packet list passes, Buran records a durable local run. The registry keeps the run snapshot, event log, batch data, and artifacts together so OpenClaw can always reconstruct what happened.
+
+### 3. Reserve the workspace
+
+Before execution starts, Buran acquires a local workspace lease. The lease is designed to keep two runs from stepping on the same checkout, branch, issue, or conflict surface.
+
+### 4. Execute and gate the work
+
+A run moves through these phases:
 
 `packet_received -> queued -> waiting_for_lock -> running -> verification -> internal_review -> pr_ready -> ready_for_manual_review`
 
-Blocked and failure states exist for weak packets, lock conflicts, human-required intervention, and unrecoverable execution failures. `pr_ready` means the gates passed and the run is ready for PR handoff logic; in the current local-only slice, the `pr_ready -> ready_for_manual_review` step records a deterministic local projection instead of doing a live GitHub write.
+The important part is not the labels. The important part is the contract:
 
-See [docs/state-machine.md](docs/state-machine.md) for the full transition contract.
+- implementation happens inside the approved packet envelope
+- verification must pass before review handoff
+- internal review must pass before PR handoff
+- blocked or failed states stay explicit instead of being papered over
 
-## Local state and trust boundary
+### 5. Record the PR-ready handoff
 
-Buran is intentionally narrow.
+When the gates pass, Buran records the PR projection result locally. In the current slice, that handoff is deterministic and local-first, which keeps the audit trail intact even when the final human review happens elsewhere.
 
-- Input must be an explicit approved packet list.
-- Local JSON registry state is authoritative.
-- Verification and internal review must pass before PR handoff.
-- Recovery repairs indexes and lease records from local run state, and quarantines ambiguous data instead of guessing.
-- Observability stays local. There is no external telemetry.
+## Recovery and resume
 
-Schema and storage details live in [docs/execution-run-schema.md](docs/execution-run-schema.md). PR handoff boundaries live in [docs/github-projection-contract.md](docs/github-projection-contract.md). Local observability surfaces live in [docs/observability.md](docs/observability.md).
+Buran is built for interrupted agent work.
 
-## CLI surface
+If a session stops, a lease expires, or local indexes drift, recovery rebuilds the registry from recorded run state and event history instead of guessing.
 
-```text
-/buran validate --packets <packet-list.json> [--json]
-/buran intake --packets <packet-list.json> [--registry <path>] [--json]
-/buran run --run <run_id> [--workspace-id <id>] [--workspace-path <path>] [--ttl-ms <ms>] [--registry <path>] [--json]
-/buran lease acquire --run <run_id> --workspace-id <id> [--workspace-path <path>] [--ttl-ms <ms>] [--registry <path>] [--json]
-/buran lease release --run <run_id> [--registry <path>] [--json]
-/buran recover [--registry <path>] [--json]
-```
+That gives you a few practical benefits:
 
-`validate` and `intake` require `--packets`. There is no discovery fallback.
+- stale leases can be reclaimed safely
+- broken indexes can be rebuilt from the journal
+- ambiguous state gets quarantined instead of silently trusted
+- OpenClaw can resume from durable local evidence
 
-## Docs map
+The goal is simple: if the agent disappears halfway through, you should still know where the run stopped and what can safely continue.
 
-- [CONTEXT.md](CONTEXT.md): ownership and scope boundaries
-- [ARCHITECTURE.md](ARCHITECTURE.md): selected architecture and non-goals
-- [docs/state-machine.md](docs/state-machine.md): lifecycle states and gate rules
-- [docs/execution-run-schema.md](docs/execution-run-schema.md): local registry contract
-- [docs/github-projection-contract.md](docs/github-projection-contract.md): PR and projection rules
-- [docs/observability.md](docs/observability.md): logs, diagnostics, and source-of-truth boundaries
-- [docs/migration-plan.md](docs/migration-plan.md): migration notes from legacy/reference flows
+## Review handoff
 
-## Development and checks
+Buran is not trying to replace human review. It is trying to make the handoff clean.
 
-```bash
-npm test
-npm run check
-node ./bin/buran.js validate --packets ./test/fixtures/packet-list.mixed.json --json
-```
+By the time a run reaches `ready_for_manual_review`, Buran has already:
 
-`npm test` and `npm run check` are maintainer checks for this repo. They are not the same thing as packet-selected verification inside a Buran run.
+- preserved the local run history
+- recorded verification and review outcomes
+- kept workspace ownership explicit
+- produced a deterministic PR-ready projection
+
+So the reviewer gets a real handoff point instead of a half-finished agent story.
+
+If you want the deeper contracts behind state transitions, registry storage, and PR projection behavior, start with:
+
+- [docs/state-machine.md](docs/state-machine.md)
+- [docs/execution-run-schema.md](docs/execution-run-schema.md)
+- [docs/github-projection-contract.md](docs/github-projection-contract.md)
