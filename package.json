@@ -1,0 +1,19 @@
+{
+  "name": "buran",
+  "version": "0.1.0",
+  "private": true,
+  "description": "OpenClaw plugin skeleton for local execution of approved GitHub task packets.",
+  "type": "module",
+  "openclaw": {
+    "extensions": [
+      "./index.js"
+    ]
+  },
+  "bin": {
+    "buran": "./bin/buran.js"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "check": "node -e \"import('./index.js')\" && git check-ignore -q registry/runs/example/run.json && git check-ignore -q .openclaw-runtime/plugins/buran/registry/runs/example/run.json && node --check index.js && find src bin test -name '*.js' -print0 | xargs -0 -n1 node --check"
+  }
+}
