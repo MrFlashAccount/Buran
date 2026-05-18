@@ -63,6 +63,30 @@ Build Buran as a local JSON-first task execution plugin with:
 
 Verification and internal review commands are not a loophole for arbitrary script execution. They must be allowed adapters/gates defined by the approved packet and Buran policy.
 
+## Future task-level orchestration
+
+Status: research / implementation later, not current behavior.
+
+Current flat fan-out (`Buran run -> many role workers`) does not scale well and burns context when one run spans multiple tasks/issues/slices.
+
+Target model: `Buran run -> task agents -> role workers`.
+
+Guidance for later design:
+
+- task-scoped workspaces by default;
+- role-scoped workspaces only when implementations truly compete;
+- one task-level subagent/orchestrator per task before any DevHarness role fan-out;
+- keep state ownership per task, with explicit recovery/cancellation and workspace lifecycle rules.
+
+Open questions to research before implementation:
+
+- OpenClaw nested subagent limits;
+- DevHarness integration boundary;
+- recovery/cancellation behavior;
+- per-task state ownership;
+- workspace lifecycle;
+- observability across task agents and role workers.
+
 ## C4 context
 
 ```mermaid
