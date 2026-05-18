@@ -5,51 +5,62 @@
 <h1 align="center">Buran</h1>
 
 <p align="center">
-  Local, JSON-first execution tracking for already approved GitHub implementation packets.
+  A local execution boundary for approved GitHub implementation packets in OpenClaw.
 </p>
 
-Buran is a focused OpenClaw plugin for taking an explicit list of approved implementation packets, validating whether they are sufficient to execute, and recording the resulting local run state with durable artifacts, transitions, leases, and recovery data.
+Buran gives the execution phase its own disciplined home.
 
-It is intentionally narrow. Buran is not a planner, backlog manager, dashboard, or autonomous GitHub bot. On the current branch it stays local-first, records what happened, and only exposes a fake/local PR handoff path rather than performing default remote GitHub writes.
+When a task is already researched, approved, and shaped into an implementation packet, Buran validates that packet, turns it into durable local run state, enforces workspace/branch/conflict locks, records verification and review evidence, and prepares PR handoff data without treating GitHub comments or queue state as the source of truth.
 
-## Status
+## Table of contents
 
-> Current branch status: implemented as a local-only execution boundary with validation, intake, lease management, recovery, verification/internal-review gate recording, and local PR projection artifacts.
-
-What works today:
-
-- explicit packet-list validation and intake;
-- packet sufficiency checks that block weak packets instead of guessing missing scope;
-- durable local registry state under `run.json`, `events.jsonl`, batch records, indexes, and immutable artifacts;
-- a formal `execution-run.v2` state machine with recovery/replay and quarantine for corrupt or ambiguous state;
-- local workspace lease acquisition with conflict detection and TTL recovery;
-- local mission-runner stages for `queued`, `waiting_for_lock`, `running`, `verification`, `internal_review`, and `pr_ready`;
-- allowlisted direct-command verification for a small safe command shape already covered by tests;
-- local internal-review evidence recording that treats packet review text as context, not authority;
-- deterministic local PR projection intent/result artifacts and `ready_for_manual_review` handoff.
-
-What is intentionally not implemented in the default runtime path:
-
-- autonomous task discovery;
-- implementation worker execution from the `running` stage;
-- fix-loop worker execution;
-- default networked GitHub PR creation/update;
-- merge automation, dashboard UI, or backlog ownership.
+- [Why Buran exists](#why-buran-exists)
+- [What Buran does](#what-buran-does)
+- [Quick start](#quick-start)
+- [Use it from OpenClaw](#use-it-from-openclaw)
+- [CLI commands](#cli-commands)
+- [Core concepts](#core-concepts)
+- [Architecture and docs](#architecture-and-docs)
+- [Development checks](#development-checks)
+- [Current status and limits](#current-status-and-limits)
+- [Roadmap direction](#roadmap-direction)
+- [License](#license)
 
 ## Why Buran exists
 
-Approved implementation packets still need disciplined execution. Buran gives that execution phase a narrow home:
+A lot of agent systems are good at planning and bad at execution discipline.
 
-- **local state is the source of truth** — not comments, labels, or remote queue state;
-- **weak packets stop early** — no architectural improvisation when scope is missing;
-- **every step is journaled** — transitions, leases, gate results, and artifacts are durable and replayable;
-- **handoffs stay explicit** — verification, internal review, and PR projection are separate, inspectable stages.
+Once a task is approved, you still need something that can say:
+
+- is this packet actually executable,
+- what run state exists right now,
+- which workspace or branch is already reserved,
+- what evidence was recorded,
+- whether verification and review really passed,
+- and whether a PR handoff is ready.
+
+Buran is that boundary.
+
+It is intentionally narrow. It does not try to be a planner, backlog manager, autonomous task discovery service, or general background worker. It focuses on the part between “this task is approved” and “this is ready for manual review.”
+
+## What Buran does
+
+Today, Buran provides:
+
+- **explicit packet intake** from JSON packet lists only
+- **packet sufficiency checks** that block weak tasks instead of improvising missing scope
+- **local registry state** with `run.json`, `events.jsonl`, artifacts, batch snapshots, lease files, and derived indexes
+- **workspace lease and conflict control** across workspace, checkout path, repo, issue, branch, and declared conflict surface
+- **runner staging** for queued runs and local handoff recording in the `running` stage
+- **verification and internal-review gate recording** with immutable artifacts and gate results
+- **PR projection handoff recording** as a local, deterministic projection in the current default path
+- **recovery and replay** that rebuild indexes, reclaim stale leases, and quarantine ambiguous state
+
+The important design choice: **local JSON state is the source of truth**. Remote systems are projections from that state, not the other way around.
 
 ## Quick start
 
-### 1. Install and verify the repo
-
-Buran is a plain Node.js ESM project and uses Node's built-in test runner.
+### 1. Clone the repo and run the repo checks
 
 ```bash
 git clone https://github.com/MrFlashAccount/Buran.git
@@ -59,71 +70,136 @@ npm test
 npm run check
 ```
 
-### 2. Validate an explicit packet list
+Buran is a Node.js ESM project with a shell CLI in `bin/buran.js` and an OpenClaw plugin entry in `index.js`.
 
-```bash
-node ./bin/buran.js validate --packets ./test/fixtures/packet-list.mixed.json
+### 2. Create a packet list
+
+Buran only accepts explicit packet lists. A packet must be approved and include enough execution detail to avoid guesswork.
+
+Minimal example:
+
+```json
+{
+  "packets": [
+    {
+      "task_id": "example-task-17",
+      "approved": true,
+      "github": {
+        "repo": "example-owner/example-repo",
+        "issue_number": 17,
+        "intended_branch": "user/example-task-17",
+        "base_branch": "main"
+      },
+      "scope": {
+        "goal": "Implement the approved change.",
+        "acceptance_criteria": [
+          "The behavior matches the approved packet"
+        ]
+      },
+      "implementation": {
+        "instructions": "Touch only the approved files and stay inside scope."
+      },
+      "verification": {
+        "commands": [
+          "node --test test/runner.test.js"
+        ]
+      },
+      "review": {
+        "criteria": [
+          "Confirm the change stays inside the approved packet envelope"
+        ]
+      },
+      "conflict_surface": [
+        "src/example-area/"
+      ]
+    }
+  ]
+}
 ```
 
-This performs dry sufficiency validation only. It does **not** create runs, discover tasks, or call external systems.
+Sufficiency for intake currently requires:
 
-### 3. Intake packets into a local registry
+- approval
+- `github.repo`
+- `github.issue_number`
+- `github.intended_branch`
+- goal or acceptance criteria
+- implementation instructions
+- verification expectations or commands
+- review criteria or reviewer plan
+- conflict surface
+
+If you want to use the PR projection handoff path later, include `github.base_branch` too.
+
+### 3. Validate the packet list
+
+```bash
+node ./bin/buran.js validate --packets ./packets.json
+```
+
+This is a dry check. It does not create runs, discover work, or call external systems.
+
+### 4. Intake packets into a local registry
 
 ```bash
 node ./bin/buran.js intake \
-  --packets ./test/fixtures/packet-list.mixed.json \
-  --registry /tmp/buran-registry
+  --packets ./packets.json \
+  --registry ./tmp/buran-registry
 ```
 
-For sufficient packets, intake creates local run and batch records. Insufficient packets are recorded as `blocked_plan_insufficient`.
+Intake creates durable local run records for sufficient packets and records insufficient packets as `blocked_plan_insufficient`.
 
-### 4. Stage a run
+### 5. Stage a run
 
 ```bash
 node ./bin/buran.js run \
   --run <run_id> \
-  --registry /tmp/buran-registry
+  --registry ./tmp/buran-registry
 ```
 
-For a queued run, this advances the run into `waiting_for_lock` unless a workspace lease is provided.
+For a queued run, this moves the run to `waiting_for_lock` and tells you a lease is required.
 
-### 5. Acquire a local workspace lease
+Acquire a lease:
 
 ```bash
 node ./bin/buran.js lease acquire \
   --run <run_id> \
   --workspace-id ws-1 \
-  --registry /tmp/buran-registry
+  --workspace-path ./some-worktree \
+  --registry ./tmp/buran-registry
 ```
 
-A lease reserves local execution surfaces only. It does not create a checkout, spawn a worker, or run arbitrary code.
-
-### 6. Recover and rebuild registry indexes
+Run again:
 
 ```bash
-node ./bin/buran.js recover --registry /tmp/buran-registry
+node ./bin/buran.js run \
+  --run <run_id> \
+  --registry ./tmp/buran-registry
 ```
 
-Recovery replays the registry journal, rebuilds indexes, reclaims stale leases, and quarantines corrupt or ambiguous local state.
+In the current default slice, Buran records `workspace_preparation` and `implementation_dispatch` artifacts, then stops before worker execution.
 
-## How to use it
+### 6. Recover and rebuild derived state
 
-### CLI commands
-
-```text
-buran validate --packets <packet-list.json> [--json]
-buran intake --packets <packet-list.json> [--registry <path>] [--json]
-buran run --run <run_id> [--workspace-id <id>] [--workspace-path <path>] [--ttl-ms <ms>] [--registry <path>] [--json]
-buran lease acquire --run <run_id> --workspace-id <id> [--workspace-path <path>] [--ttl-ms <ms>] [--registry <path>] [--json]
-buran lease release --run <run_id> [--registry <path>] [--json]
-buran recover [--registry <path>] [--json]
+```bash
+node ./bin/buran.js recover --registry ./tmp/buran-registry
 ```
 
-OpenClaw exposes the same surface through `/buran ...` once the plugin is loaded.
+Recovery replays runs, rebuilds indexes, reclaims stale leases, and quarantines ambiguous or corrupt local state.
 
-### Configuration
+## Use it from OpenClaw
 
-`openclaw.plugin.json` currently exposes one config field:
+This repo already exposes the two integration surfaces Buran supports:
+
+- **shell CLI** via `bin/buran.js`
+- **OpenClaw plugin** via `index.js`
+
+The package declares `./index.js` in `package.json` under `openclaw.extensions`, and the plugin registers the `buran` command name. That means the command surface is the same in both places:
+
+- shell: `node ./bin/buran.js ...`
+- OpenClaw: `/buran ...`
+
+Current plugin config:
 
 ```json
 {
@@ -131,96 +207,114 @@ OpenClaw exposes the same surface through `/buran ...` once the plugin is loaded
 }
 ```
 
-If `registryRoot` is omitted, Buran resolves a local default registry:
+If `registryRoot` is omitted, Buran resolves the registry to:
 
-- under the OpenClaw state directory when one is provided by the host runtime; or
-- under `.openclaw-runtime/plugins/buran/registry` in the current workspace.
+- `<stateDir>/plugins/buran/registry` when the OpenClaw host provides a state directory, or
+- `<workspace>/.openclaw-runtime/plugins/buran/registry` otherwise.
 
-### Packet sufficiency rules
-
-A packet is considered sufficient only when it provides:
-
-- approval status;
-- GitHub repository;
-- issue number;
-- intended branch;
-- goal or acceptance criteria;
-- implementation instructions;
-- verification expectations or commands;
-- review criteria or reviewer plan;
-- conflict surface.
-
-If that envelope is incomplete, Buran records `blocked_plan_insufficient` instead of inferring missing architecture or scope.
-
-## Current execution model
-
-The current runtime flow is intentionally bounded:
+## CLI commands
 
 ```text
-packet list -> validation -> intake -> queued
-queued -> waiting_for_lock -> running
-running -> workspace_preparation artifact -> implementation_dispatch artifact -> stop
-verification -> verification artifact + gate -> internal_review | fix_loop | blocked_needs_human
-internal_review -> internal-review artifact + gate -> pr_ready | fix_loop | blocked_needs_human
-pr_ready -> projection intent/result artifacts -> ready_for_manual_review
-recover -> replay + rebuild + quarantine when state is ambiguous
+/buran validate --packets <packet-list.json> [--json]
+/buran intake --packets <packet-list.json> [--registry <path>] [--json]
+/buran run --run <run_id> [--workspace-id <id>] [--workspace-path <path>] [--ttl-ms <ms>] [--registry <path>] [--json]
+/buran recover [--registry <path>] [--json]
+/buran lease acquire --run <run_id> --workspace-id <id> [--workspace-path <path>] [--ttl-ms <ms>] [--registry <path>] [--json]
+/buran lease release --run <run_id> [--registry <path>] [--json]
 ```
 
-A few important constraints:
+A useful mental model:
 
-- `run` is **local-only orchestration** on this branch;
-- the `running` stage records `workspace_preparation` and `implementation_dispatch` artifacts, then stops before worker execution;
-- packet-selected verification is intentionally allowlisted and rejects package-script delegation such as `npm test` or `npm run check`;
-- the default `pr_ready` path records a local fake PR projection handoff and does not perform a remote GitHub write.
+| Command | Purpose |
+| --- | --- |
+| `validate` | Check whether packet data is sufficient to execute. |
+| `intake` | Create local batch/run state in the registry. |
+| `run` | Advance one run through the implemented local runner slice. |
+| `lease acquire` | Reserve local execution surfaces for a run. |
+| `lease release` | Release an acquired lease. |
+| `recover` | Replay the registry and rebuild derived indexes. |
 
-## Registry, state, and observability
+### Verification command model
 
-Buran keeps three separate local evidence surfaces:
+The current verification adapter is intentionally narrow. It only executes a local allowlist of direct commands, currently including:
 
-1. **Durable execution journal** — `registry/runs/<run_id>/run.json` plus `events.jsonl` are the source of truth.
-2. **Operational logs** — `.openclaw-runtime/plugins/buran/logs/operational.jsonl` stores best-effort invocation breadcrumbs.
-3. **Diagnostic reports** — `.openclaw-runtime/plugins/buran/diagnostics/<trace_id>.json` stores one sanitized summary per invocation.
+- `node --test test/runner.test.js`
+- `node --test test/gate-ledger.test.js`
 
-Public CLI output includes an `observability` object with:
+Package-script delegation like `npm test` or `npm run check` is intentionally blocked in the verification gate.
 
-- `trace_id`
-- `log_path`
-- `diagnostic_report_path`
+## Core concepts
 
-There is no external telemetry in the current implementation.
+### Approved packets, not discovered work
 
-## Project map
+Buran does not discover tasks or write the packet for you. It starts from an explicit approved packet list.
 
-### Start here
+### Local registry as source of truth
+
+Every run is tracked locally with durable state and an append-only event journal.
+
+Main registry surfaces:
+
+- `registry/runs/<run_id>/run.json`
+- `registry/runs/<run_id>/events.jsonl`
+- `registry/runs/<run_id>/artifacts/...`
+- `registry/batches/<batch_id>/batch.json`
+- `registry/leases/*.json`
+- `registry/indexes/*.json`
+
+### Leases and conflict surfaces
+
+Buran uses conservative local locking across:
+
+- workspace id
+- workspace path / checkout path
+- repo
+- issue
+- branch
+- declared conflict surface
+
+That lets multiple workspaces run in parallel when their lock surfaces do not overlap.
+
+### Gates are recorded, not assumed
+
+Verification and internal review are first-class gate results with immutable artifacts and epoch/attempt tracking.
+
+### PR handoff is a projection
+
+In the current default runtime path, `pr_ready` records a deterministic local PR projection and transitions to `ready_for_manual_review`. The default path does not perform remote GitHub writes.
+
+### Observability stays local
+
+Buran keeps three local evidence surfaces:
+
+1. the durable run journal
+2. operational logs under `.openclaw-runtime/plugins/buran/logs/`
+3. per-invocation diagnostic reports under `.openclaw-runtime/plugins/buran/diagnostics/`
+
+Public output includes `trace_id`, `log_path`, and `diagnostic_report_path` so a run can be traced back to local evidence.
+
+## Architecture and docs
+
+Start here:
 
 - [`ARCHITECTURE.md`](ARCHITECTURE.md) — selected direction, constraints, and binding rules
-- [`CONTEXT.md`](CONTEXT.md) — what belongs in this repo and what does not
-- [`AGENTS.md`](AGENTS.md) — compact maintainer/agent guidance for working in the repo
+- [`CONTEXT.md`](CONTEXT.md) — ownership boundary for this repo
+- [`AGENTS.md`](AGENTS.md) — compact repo guidance for future agents/maintainers
 
-### Detailed docs
+Detailed docs:
 
 - [`docs/context-map.md`](docs/context-map.md) — upstream/downstream boundaries and side effects
 - [`docs/module-map.md`](docs/module-map.md) — source-tree responsibilities and runtime flow
-- [`docs/state-machine.md`](docs/state-machine.md) — lifecycle states, transitions, and gate rules
-- [`docs/execution-run-schema.md`](docs/execution-run-schema.md) — local registry layout and persistence contract
-- [`docs/github-projection-contract.md`](docs/github-projection-contract.md) — projection and PR handoff semantics
-- [`docs/acceptance-scenarios.md`](docs/acceptance-scenarios.md) — concrete scenarios already covered by tests
+- [`docs/state-machine.md`](docs/state-machine.md) — lifecycle states and transitions
+- [`docs/execution-run-schema.md`](docs/execution-run-schema.md) — registry layout and persistence contract
+- [`docs/github-projection-contract.md`](docs/github-projection-contract.md) — PR/projection rules
+- [`docs/acceptance-scenarios.md`](docs/acceptance-scenarios.md) — tested behavior summary
 - [`docs/migration-plan.md`](docs/migration-plan.md) — migration notes from legacy/reference surfaces
-- [`docs/observability.md`](docs/observability.md) — logging, diagnostics, sanitization, and trace correlation
+- [`docs/observability.md`](docs/observability.md) — logging, diagnostics, and sanitization
 
-### Code landmarks
+## Development checks
 
-- [`index.js`](index.js) — OpenClaw plugin export surface
-- [`bin/buran.js`](bin/buran.js) — shell CLI entrypoint
-- [`src/cli.js`](src/cli.js) — command parsing and dispatch
-- [`src/buran.js`](src/buran.js) — validation, intake, config resolution, and formatting
-- [`src/runner.js`](src/runner.js) — local mission runner orchestration
-- [`src/registry-store.js`](src/registry-store.js) — canonical registry writes and ledger persistence
-- [`src/recovery.js`](src/recovery.js) — replay, quarantine, and index rebuild flow
-
-## Development
-
-Repo checks used by this branch:
+Run these before claiming a change is ready:
 
 ```bash
 npm test
@@ -228,24 +322,35 @@ npm run check
 git diff --check
 ```
 
-The `check` script currently verifies that the plugin entrypoint imports cleanly, ignored runtime paths stay ignored, and `index.js`, `src/`, `bin/`, and `test/` pass Node syntax checks.
+What `npm run check` covers on this branch:
 
-## Limitations and near-term roadmap
+- imports the plugin entrypoint
+- verifies ignored runtime paths stay ignored
+- syntax-checks `index.js`, `src/`, `bin/`, and `test/`
 
-Current limitations:
+## Current status and limits
 
-- local-first only in the default CLI/runtime path;
-- no implementation worker dispatch from `running`;
-- no fix-loop worker implementation;
-- verification adapters are intentionally narrow and allowlisted;
-- remote PR transport exists as an injectable seam, not the default behavior.
+Buran is already useful as a local execution-state boundary, but the current default runtime slice is still deliberately bounded.
 
-Near-term roadmap implied by the existing architecture and docs:
+Current limits:
 
-- connect the recorded implementation-dispatch handoff to a real worker boundary;
-- flesh out fix-loop execution inside the approved packet envelope;
-- keep transport-backed PR projection contract-safe when remote writes are enabled deliberately;
-- continue hardening recovery, artifact integrity, and resume behavior.
+- no autonomous task discovery
+- no worker execution from the `running` stage
+- no implemented fix-loop worker path
+- verification is allowlist-only, not arbitrary command execution
+- the default PR handoff path is local projection, not a live GitHub write
+- Buran stops at `ready_for_manual_review`; it does not merge or babysit PRs
+
+## Roadmap direction
+
+The architecture and current seams point toward a larger execution system, but the repo does not pretend those parts are already done.
+
+Likely next steps from the existing design:
+
+- connect implementation-dispatch recording to a real worker boundary
+- flesh out the fix-loop execution path inside the approved packet envelope
+- keep transport-backed PR projection contract-safe when remote writes are enabled deliberately
+- continue hardening replay, artifact integrity, and resume behavior
 
 ## License
 
