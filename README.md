@@ -32,36 +32,76 @@ Buran is the execution layer that takes already approved work and moves it forwa
 
 ## Quick start
 
-1. Add Buran to your OpenClaw workspace as a local plugin.
-2. Set `registryRoot` in `openclaw.plugin.json` if you want Buran’s registry pinned to a specific path.
-3. Prepare an approved task or plan packet with the execution details OpenClaw is allowed to use.
-4. Start the run from OpenClaw so Buran can intake the approved work, reserve the workspace, and begin tracked execution.
+1. **Add Buran as a subtree inside your OpenClaw workspace.**
+
+   ```bash
+   git subtree add --prefix plugins/buran https://github.com/MrFlashAccount/Buran.git main --squash
+   ```
+
+2. **Add the plugin to your OpenClaw config** (for example `~/.openclaw/openclaw.json`).
+
+   ```json
+   {
+     "plugins": {
+       "load": {
+         "paths": [
+           "/absolute/path/to/your/openclaw-workspace/plugins/buran"
+         ]
+       },
+       "entries": {
+         "buran": {
+           "enabled": true,
+           "config": {
+             "registryRoot": ".openclaw-runtime/plugins/buran/registry"
+           }
+         }
+       }
+     }
+   }
+   ```
+
+   If your OpenClaw setup uses a plugin allowlist, add `buran` there too.
+
+3. **In your OpenClaw chat, send the task you want Buran to execute.** A GitHub issue or comment URL works well because it gives OpenClaw a concrete approved task to turn into a tracked run.
+
+   ```text
+   Run this through Buran:
+   https://github.com/your-org/your-repo/issues/123#issuecomment-0000000000
+
+   Use repo checkout: /absolute/path/to/your/repo
+   Use workspace id: repo-123
+   When done, hand back the PR and anything still needing manual review.
+   ```
+
+4. **Wait for the run to finish, then review the PR or handoff.** Buran is there to move approved work forward cleanly, not to hide the review step.
 
 ## How to use it
 
-1. **Approve the work first.** Buran is built for execution after planning, not for inventing missing scope or architecture on the fly.
-2. **Send the approved packet into OpenClaw.** Buran validates the packet, records the run locally, and blocks if execution-critical information is missing.
-3. **Let Buran keep the run controlled.** During execution it keeps ownership explicit, stores event history, and preserves enough state to recover if the session is interrupted.
-4. **Review the handoff.** When the run finishes, Buran gives OpenClaw a review-ready result so a human can inspect the PR instead of reconstructing what happened.
+1. **Start from approved work.** Buran is strongest when the issue, comment, or task packet already says what should be built and what constraints matter.
+2. **Let OpenClaw turn that task into a Buran run.** Buran records the run locally, validates the execution inputs, and keeps workspace ownership explicit before it moves anything forward.
+3. **Watch the run, not just the chat.** Buran keeps local run state, artifacts, and recovery data under its registry so interrupted sessions can resume with evidence instead of guesswork.
+4. **Review the result like a real handoff.** The finish line is a review-ready PR with enough context to inspect the change, see what happened, and decide the next human step.
 
 ## Configuration
 
+Most setups only need one plugin setting plus the run inputs OpenClaw passes when it executes a task.
+
 | Setting | Where it lives | What it controls | Notes |
 | --- | --- | --- | --- |
-| `registryRoot` | OpenClaw plugin config (`openclaw.plugin.json`) | Root directory for Buran’s local registry | If omitted, Buran resolves the registry from the current workspace/runtime context. |
-| Packet list path | Invocation input | Which approved tasks or plans Buran is allowed to execute | Required for validation and intake. Buran does not discover work on its own. |
-| Run ID | Invocation input | Which recorded run to continue | Used when execution resumes after intake. |
-| Workspace ID | Invocation input | Stable lease identity for the workspace doing the work | Helps prevent unsafe overlap between concurrent runs. |
-| Workspace path | Invocation input | Which checkout or local working directory is leased for the run | Useful when a run must stay pinned to a specific local repo path. |
-| Lease TTL | Invocation input | How long a workspace lease stays active before recovery can reclaim stale ownership | Optional override for longer-running work. |
+| `registryRoot` | OpenClaw plugin config | Root directory for Buran’s local registry | Optional. If omitted, Buran defaults to `.openclaw-runtime/plugins/buran/registry` inside the workspace/runtime context. |
+| Packet list path | Run input | Which approved tasks or plans Buran is allowed to intake | Required when you are validating or intaking explicit packet lists. |
+| Run ID | Run input | Which recorded run to continue | Used after intake, recovery, or a resumed execution step. |
+| Workspace ID | Run input | Stable lease identity for the workspace doing the work | Helps keep parallel runs from colliding. |
+| Workspace path | Run input | Which local checkout or working directory is leased for the run | Useful when the task must stay pinned to a specific repo path. |
+| Lease TTL | Run input | How long a workspace lease stays active before recovery can reclaim stale ownership | Optional override for longer-running work. |
 
 ## Recovery and review handoff
 
-Buran is designed to keep recovery practical and handoff quality high.
+Buran keeps enough local state to make interruptions recoverable and finished work easier to review.
 
-When a run is interrupted, the local registry gives Buran enough evidence to resume conservatively instead of improvising. When a run completes, that same recorded state helps OpenClaw hand back a cleaner PR with less manual follow-up and less ambiguity about what actually happened.
-
-For deeper implementation details, start with:
+- If a run stops halfway, Buran can rebuild state from the recorded registry instead of improvising.
+- If a run completes, the same recorded artifacts help OpenClaw hand back a cleaner PR or review handoff.
+- If you need the implementation details behind that flow, start with the docs below.
 
 - [docs/state-machine.md](docs/state-machine.md)
 - [docs/execution-run-schema.md](docs/execution-run-schema.md)
