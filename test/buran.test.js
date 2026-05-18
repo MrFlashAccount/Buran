@@ -45,7 +45,7 @@ function escapeRegExp(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function goodPacket({ taskId, issue, branch, conflictSurface, repo = "MrFlashAccount/example-repo" }) {
+function goodPacket({ taskId, issue, branch, conflictSurface, repo = "example-owner/example-repo" }) {
   return {
     task_id: taskId,
     approved: true,
@@ -77,16 +77,16 @@ function projectionReadySnapshot() {
     run_id: "run_projection_ready",
     task_id: "projection-ready",
     github: {
-      repo: "MrFlashAccount/example-repo",
+      repo: "example-owner/example-repo",
       issue_number: 17,
-      intended_branch: "sergey/feature",
+      intended_branch: "user/feature",
       base_branch: "develop",
       pr: {
         number: 123456,
         url: "local://github-pr/example/pull/123456",
-        repo: "MrFlashAccount/example-repo",
+        repo: "example-owner/example-repo",
         issue_number: 17,
-        head_branch: "sergey/feature",
+        head_branch: "user/feature",
         base_branch: "develop",
         state: "open",
         draft: false,
@@ -108,9 +108,9 @@ function projectionReadySnapshot() {
     execution: { current_epoch: 1 },
     workspace: { id: null, path: null, lease_status: "released" },
     locks: {
-      repo: "MrFlashAccount/example-repo",
+      repo: "example-owner/example-repo",
       issue: 17,
-      branch: "sergey/feature",
+      branch: "user/feature",
       conflict_surface: ["src/feature"],
       lease_status: "released",
     },
@@ -170,9 +170,9 @@ function projectionReadySnapshot() {
           github_pr: {
             number: 123456,
             url: "local://github-pr/example/pull/123456",
-            repo: "MrFlashAccount/example-repo",
+            repo: "example-owner/example-repo",
             issue_number: 17,
-            head_branch: "sergey/feature",
+            head_branch: "user/feature",
             base_branch: "develop",
             state: "open",
             draft: false,
@@ -475,7 +475,7 @@ test("state machine requires a recorded PR projection result before ready_for_ma
     snapshot: {
       state: "pr_ready",
       execution: { current_epoch: 1 },
-      github: { repo: "MrFlashAccount/example-repo", issue_number: 17, intended_branch: "sergey/feature", base_branch: "develop", pr: null },
+      github: { repo: "example-owner/example-repo", issue_number: 17, intended_branch: "user/feature", base_branch: "develop", pr: null },
       projections: {},
     },
   });
@@ -489,16 +489,16 @@ test("state machine requires a recorded PR projection result before ready_for_ma
       state: "pr_ready",
       execution: { current_epoch: 1 },
       github: {
-        repo: "MrFlashAccount/example-repo",
+        repo: "example-owner/example-repo",
         issue_number: 17,
-        intended_branch: "sergey/feature",
+        intended_branch: "user/feature",
         base_branch: "develop",
         pr: {
           number: 123456,
           url: "local://github-pr/example/pull/123456",
-          repo: "MrFlashAccount/example-repo",
+          repo: "example-owner/example-repo",
           issue_number: 17,
-          head_branch: "sergey/feature",
+          head_branch: "user/feature",
           base_branch: "develop",
           state: "open",
           draft: false,
@@ -526,9 +526,9 @@ test("state machine requires a recorded PR projection result before ready_for_ma
             github_pr: {
               number: 123456,
               url: "local://github-pr/example/pull/123456",
-              repo: "MrFlashAccount/example-repo",
+              repo: "example-owner/example-repo",
               issue_number: 17,
-              head_branch: "sergey/feature",
+              head_branch: "user/feature",
               base_branch: "develop",
               state: "open",
               draft: false,
@@ -548,16 +548,16 @@ test("state machine requires a recorded PR projection result before ready_for_ma
       state: "pr_ready",
       execution: { current_epoch: 1 },
       github: {
-        repo: "MrFlashAccount/example-repo",
+        repo: "example-owner/example-repo",
         issue_number: 17,
-        intended_branch: "sergey/feature",
+        intended_branch: "user/feature",
         base_branch: "develop",
         pr: {
           number: 123456,
           url: "local://github-pr/example/pull/123456",
-          repo: "MrFlashAccount/example-repo",
+          repo: "example-owner/example-repo",
           issue_number: 17,
-          head_branch: "sergey/feature",
+          head_branch: "user/feature",
           base_branch: "develop",
           state: "open",
           draft: false,
@@ -598,16 +598,16 @@ test("state machine requires a recorded PR projection result before ready_for_ma
       state: "pr_ready",
       execution: { current_epoch: 1 },
       github: {
-        repo: "MrFlashAccount/example-repo",
+        repo: "example-owner/example-repo",
         issue_number: 17,
-        intended_branch: "sergey/feature",
+        intended_branch: "user/feature",
         base_branch: "develop",
         pr: {
           number: 123456,
           url: "",
-          repo: "MrFlashAccount/example-repo",
+          repo: "example-owner/example-repo",
           issue_number: 17,
-          head_branch: "sergey/feature",
+          head_branch: "user/feature",
           base_branch: "develop",
           state: "open",
           draft: false,
@@ -635,9 +635,9 @@ test("state machine requires a recorded PR projection result before ready_for_ma
             github_pr: {
               number: 123456,
               url: "",
-              repo: "MrFlashAccount/example-repo",
+              repo: "example-owner/example-repo",
               issue_number: 17,
-              head_branch: "sergey/feature",
+              head_branch: "user/feature",
               base_branch: "develop",
               state: "open",
               draft: false,
@@ -665,7 +665,7 @@ test("run snapshot validation rejects corrupt successful projection state", () =
 test("projection adapter sanitizes durable projection artifacts", () => {
   const projection = buildLocalPrProjection({
     run_id: "run_projection_sanitized",
-    task_id: `task ${GITHUB_PAT_SECRET} /Users/sergey/private/notes.md`,
+    task_id: `task ${GITHUB_PAT_SECRET} /Users/user/private/notes.md`,
     state: "pr_ready",
     execution: { current_epoch: 1 },
     gates: {
@@ -673,9 +673,9 @@ test("projection adapter sanitizes durable projection artifacts", () => {
       internal_review: { status: "PASS", current_epoch: 1, current_attempt: 1, artifact_refs: [] },
     },
     github: {
-      repo: `MrFlashAccount/${GHP_SECRET}`,
+      repo: `example-owner/${GHP_SECRET}`,
       issue_number: 17,
-      intended_branch: `feature/${GLPAT_SECRET}/Users/sergey/private`,
+      intended_branch: `feature/${GLPAT_SECRET}/Users/user/private`,
       base_branch: `develop/${GITHUB_PAT_SECRET}`,
     },
     projections: {},
@@ -686,7 +686,7 @@ test("projection adapter sanitizes durable projection artifacts", () => {
 
   const durableText = `${projection.intentArtifactContent}\n${projection.resultArtifactContent}`;
   assertPublicOutputRedactsSyntheticSecrets(durableText);
-  assert.doesNotMatch(durableText, /\/Users\/sergey\//);
+  assert.doesNotMatch(durableText, /\/Users\/user\//);
   assert.match(durableText, /<absolute_path>|\[REDACTED_SECRET\]/);
 });
 
@@ -934,8 +934,8 @@ test("lease acquisition blocks conflicting active issue/branch/surface runs and 
   const tempDir = await makeTempDir();
   const registryRoot = path.join(tempDir, "registry");
   const packetPath = await writePacketList(tempDir, [
-    goodPacket({ taskId: "task-a", issue: 21, branch: "sergey/task-a", conflictSurface: "src/same-area" }),
-    goodPacket({ taskId: "task-b", issue: 21, branch: "sergey/task-a", conflictSurface: "src/same-area" }),
+    goodPacket({ taskId: "task-a", issue: 21, branch: "user/task-a", conflictSurface: "src/same-area" }),
+    goodPacket({ taskId: "task-b", issue: 21, branch: "user/task-a", conflictSurface: "src/same-area" }),
   ]);
   const report = await intakePacketListFile(packetPath, { registryRoot });
 
@@ -956,8 +956,8 @@ test("lease conflict reports dedupe exact active snapshot and lease-record overl
   const tempDir = await makeTempDir();
   const registryRoot = path.join(tempDir, "registry");
   const packetPath = await writePacketList(tempDir, [
-    goodPacket({ taskId: "dedupe-owner", issue: 71, branch: "sergey/dedupe", conflictSurface: "src/dedupe-area" }),
-    goodPacket({ taskId: "dedupe-contender", issue: 71, branch: "sergey/dedupe", conflictSurface: "src/dedupe-area" }),
+    goodPacket({ taskId: "dedupe-owner", issue: 71, branch: "user/dedupe", conflictSurface: "src/dedupe-area" }),
+    goodPacket({ taskId: "dedupe-contender", issue: 71, branch: "user/dedupe", conflictSurface: "src/dedupe-area" }),
   ]);
   const report = await intakePacketListFile(packetPath, { registryRoot });
   await acquireWorkspaceLease(registryRoot, report.runs[0].run_id, { workspaceId: "ws-dedupe-owner" });
@@ -976,8 +976,8 @@ test("lease acquisition blocks the same physical workspace path across different
   const registryRoot = path.join(tempDir, "registry");
   const sharedWorkspacePath = path.join(tempDir, "shared-workspace");
   const packetPath = await writePacketList(tempDir, [
-    goodPacket({ taskId: "path-owner", issue: 51, branch: "sergey/path-owner", conflictSurface: "src/path-owner", repo: "MrFlashAccount/repo-a" }),
-    goodPacket({ taskId: "path-contender", issue: 52, branch: "sergey/path-contender", conflictSurface: "src/path-contender", repo: "MrFlashAccount/repo-b" }),
+    goodPacket({ taskId: "path-owner", issue: 51, branch: "user/path-owner", conflictSurface: "src/path-owner", repo: "example-owner/repo-a" }),
+    goodPacket({ taskId: "path-contender", issue: 52, branch: "user/path-contender", conflictSurface: "src/path-contender", repo: "example-owner/repo-b" }),
   ]);
   const report = await intakePacketListFile(packetPath, { registryRoot });
 
@@ -1001,7 +1001,7 @@ test("lease manager supports four non-conflicting workspaces for the same repo",
   const packetPath = await writePacketList(tempDir, [0, 1, 2, 3].map((index) => goodPacket({
     taskId: `parallel-${index}`,
     issue: 100 + index,
-    branch: `sergey/parallel-${index}`,
+    branch: `user/parallel-${index}`,
     conflictSurface: `src/area-${index}`,
   })));
   const report = await intakePacketListFile(packetPath, { registryRoot });
@@ -1025,8 +1025,8 @@ test("lease conflicts are still detected from active run snapshots when lease fi
   const tempDir = await makeTempDir();
   const registryRoot = path.join(tempDir, "registry");
   const packetPath = await writePacketList(tempDir, [
-    goodPacket({ taskId: "snapshot-owner", issue: 41, branch: "sergey/snapshot-owner", conflictSurface: "src/snapshot-area" }),
-    goodPacket({ taskId: "snapshot-contender", issue: 41, branch: "sergey/snapshot-owner", conflictSurface: "src/snapshot-area" }),
+    goodPacket({ taskId: "snapshot-owner", issue: 41, branch: "user/snapshot-owner", conflictSurface: "src/snapshot-area" }),
+    goodPacket({ taskId: "snapshot-contender", issue: 41, branch: "user/snapshot-owner", conflictSurface: "src/snapshot-area" }),
   ]);
   const report = await intakePacketListFile(packetPath, { registryRoot });
   await acquireWorkspaceLease(registryRoot, report.runs[0].run_id, { workspaceId: "ws-owner" });
@@ -1041,7 +1041,7 @@ test("lease conflicts are still detected from active run snapshots when lease fi
 test("partial lease acquisition rolls back already-created local lock records on a concurrent write conflict", async () => {
   const tempDir = await makeTempDir();
   const registryRoot = path.join(tempDir, "registry");
-  const packetPath = await writePacketList(tempDir, [goodPacket({ taskId: "race-task", issue: 31, branch: "sergey/race-task", conflictSurface: "src/race-area" })]);
+  const packetPath = await writePacketList(tempDir, [goodPacket({ taskId: "race-task", issue: 31, branch: "user/race-task", conflictSurface: "src/race-area" })]);
   const report = await intakePacketListFile(packetPath, { registryRoot });
   let injected = false;
 
@@ -1062,9 +1062,9 @@ test("partial lease acquisition rolls back already-created local lock records on
         value: lock.value,
         workspace_id: "ws-interloper",
         workspace_path: path.join(tempDir, "workspace-interloper"),
-        repo: "MrFlashAccount/example-repo",
+        repo: "example-owner/example-repo",
         issue_number: 31,
-        branch: "sergey/race-task",
+        branch: "user/race-task",
         conflict_surface: ["src/race-area"],
         acquired_at: "2026-05-16T13:53:00.000Z",
         expires_at: "2026-05-16T14:53:00.000Z",
@@ -1109,8 +1109,8 @@ test("terminal runs immediately release active leases and do not block a later s
   const tempDir = await makeTempDir();
   const registryRoot = path.join(tempDir, "registry");
   const packetPath = await writePacketList(tempDir, [
-    goodPacket({ taskId: "terminal-owner", issue: 61, branch: "sergey/terminal-same", conflictSurface: "src/terminal-same" }),
-    goodPacket({ taskId: "terminal-contender", issue: 61, branch: "sergey/terminal-same", conflictSurface: "src/terminal-same" }),
+    goodPacket({ taskId: "terminal-owner", issue: 61, branch: "user/terminal-same", conflictSurface: "src/terminal-same" }),
+    goodPacket({ taskId: "terminal-contender", issue: 61, branch: "user/terminal-same", conflictSurface: "src/terminal-same" }),
   ]);
   const report = await intakePacketListFile(packetPath, { registryRoot });
   await acquireWorkspaceLease(registryRoot, report.runs[0].run_id, { workspaceId: "ws-terminal-a" });
@@ -1227,7 +1227,7 @@ test("observability CLI output and diagnostics do not leak private or synthetic 
 
   assert.equal(result.ok, true);
   assert.doesNotMatch(result.text, new RegExp(escapeRegExp(syntheticHome)));
-  assert.doesNotMatch(result.text, /\/Users\/sergeygarin/);
+  assert.doesNotMatch(result.text, /\/Users\/user/);
 
   const report = JSON.parse(result.text);
   assert.equal(report.registry.root, "<registry>");
@@ -1237,7 +1237,7 @@ test("observability CLI output and diagnostics do not leak private or synthetic 
   const diagnosticPath = path.join(runtime.diagnosticsDir, `${report.observability.trace_id}.json`);
   const diagnosticText = await fs.readFile(diagnosticPath, "utf8");
   assert.doesNotMatch(diagnosticText, new RegExp(escapeRegExp(syntheticHome)));
-  assert.doesNotMatch(diagnosticText, /\/Users\/sergeygarin/);
+  assert.doesNotMatch(diagnosticText, /\/Users\/user/);
   const diagnostic = JSON.parse(diagnosticText);
   assert.equal(diagnostic.paths.log_path, "<observability>/logs/operational.jsonl");
   assert.equal(diagnostic.paths.diagnostic_report_path, `<observability>/diagnostics/${report.observability.trace_id}.json`);
@@ -1247,8 +1247,8 @@ test("observability CLI output and diagnostics do not leak private or synthetic 
 
 test("path output sanitizer redacts unmapped absolute paths and preserves safe relative text", () => {
   assert.equal(sanitizePathForOutput("/tmp/synthetic-private-manual/path.js", []), "<absolute_path>/path.js");
-  assert.equal(sanitizePathForOutput("/Users/sergeygarin/private/subpath", []), "<absolute_path>");
-  assert.equal(sanitizePathForOutput("C:\\Users\\Sergey\\secret\\file.txt", []), "<absolute_path>/file.txt");
+  assert.equal(sanitizePathForOutput("/Users/user/private/subpath", []), "<absolute_path>");
+  assert.equal(sanitizePathForOutput("C:\\Users\\User\\secret\\file.txt", []), "<absolute_path>/file.txt");
   assert.equal(sanitizePathForOutput("docs/a/b", []), "docs/a/b");
   assert.equal(sanitizePathForOutput("relative text with docs/a/b", []), "relative text with docs/a/b");
   assert.equal(sanitizePathForOutput("https://example.com/tmp/safe/path.js", []), "https://example.com/tmp/safe/path.js");
@@ -1259,21 +1259,21 @@ test("public report sanitizer redacts arbitrary absolute paths while preserving 
     conflict_surface: [
       `/tmp/synthetic-private-${GLPAT_SECRET}/path.js`,
       `/var/folders/private-${GITHUB_PAT_SECRET}/cache/output.log`,
-      "/home/sergey/private/project/src/index.ts",
-      "/Users/sergeygarin/private/subpath",
+      "/home/user/private/project/src/index.ts",
+      "/Users/user/private/subpath",
       "/workspace/repo/src/public.js",
       "https://example.com/tmp/safe/path.js",
       "docs/a/b",
     ],
-    branch: `sergey/${GHP_SECRET}`,
+    branch: `user/${GHP_SECRET}`,
     nested: { message: `failed at /tmp/synthetic-private-${GHP_SECRET}/nested/file.ts` },
   });
   const text = JSON.stringify(sanitized);
 
   assert.doesNotMatch(text, /\/tmp\/synthetic-private/);
   assert.doesNotMatch(text, /\/var\/folders/);
-  assert.doesNotMatch(text, /\/home\/sergey/);
-  assert.doesNotMatch(text, /\/Users\/sergeygarin/);
+  assert.doesNotMatch(text, /\/home\/user/);
+  assert.doesNotMatch(text, /\/Users\/user/);
   assert.doesNotMatch(text, /private\/subpath/);
   assert.doesNotMatch(text, /subpath/);
   assertPublicOutputRedactsSyntheticSecrets(text);
@@ -1291,7 +1291,7 @@ test("validate public JSON report redacts secrets across packet ids, branches, a
   const packetPath = await writePacketList(tempDir, [goodPacket({
     taskId: `task-${GITHUB_PAT_SECRET}`,
     issue: 81,
-    branch: `sergey/secret-${GHP_SECRET}`,
+    branch: `user/secret-${GHP_SECRET}`,
     conflictSurface: ["src/safe-area", `src/conflict-${GITHUB_PAT_SECRET}`, `src/gitlab-${GLPAT_SECRET}`, `/tmp/synthetic-private-${GLPAT_SECRET}/path.js`],
   })]);
 
@@ -1302,7 +1302,7 @@ test("validate public JSON report redacts secrets across packet ids, branches, a
   const report = JSON.parse(result.text);
   assert.equal(report.packets[0].task_id, "task-[REDACTED_SECRET]");
   assert.match(report.packets[0].run_id, /\[REDACTED_SECRET\]/);
-  assert.equal(report.packets[0].github.intended_branch, "sergey/secret-[REDACTED_SECRET]");
+  assert.equal(report.packets[0].github.intended_branch, "user/secret-[REDACTED_SECRET]");
   assert.deepEqual(report.packets[0].conflict_surface, ["src/safe-area", "src/conflict-[REDACTED_SECRET]", "src/gitlab-[REDACTED_SECRET]", "<absolute_path>/path.js"]);
   assert.doesNotMatch(result.text, /\/tmp\/synthetic-private/);
 });
@@ -1312,7 +1312,7 @@ test("validate public text report redacts secret-like substrings in task ids", a
   const packetPath = await writePacketList(tempDir, [goodPacket({
     taskId: `task-${GLPAT_SECRET}`,
     issue: 82,
-    branch: "sergey/public-text-redaction",
+    branch: "user/public-text-redaction",
     conflictSurface: "src/public-text-redaction",
   })]);
 
@@ -1329,7 +1329,7 @@ test("intake public JSON and text reports redact secrets without hiding packet s
   const packetPath = await writePacketList(tempDir, [goodPacket({
     taskId: `intake-${GITHUB_PAT_SECRET}`,
     issue: 83,
-    branch: `sergey/intake-${GHP_SECRET}`,
+    branch: `user/intake-${GHP_SECRET}`,
     conflictSurface: [`src/intake-${GITHUB_PAT_SECRET}`, `src/intake-gitlab-${GLPAT_SECRET}`, `/tmp/synthetic-private-${GLPAT_SECRET}/path.js`],
   })]);
 
@@ -1344,7 +1344,7 @@ test("intake public JSON and text reports redact secrets without hiding packet s
   const report = JSON.parse(jsonResult.text);
   assert.equal(report.packets.length, 1);
   assert.equal(report.runs.length, 1);
-  assert.equal(report.packets[0].github.intended_branch, "sergey/intake-[REDACTED_SECRET]");
+  assert.equal(report.packets[0].github.intended_branch, "user/intake-[REDACTED_SECRET]");
   assert.deepEqual(report.packets[0].conflict_surface, ["src/intake-[REDACTED_SECRET]", "src/intake-gitlab-[REDACTED_SECRET]", "<absolute_path>/path.js"]);
   assert.doesNotMatch(jsonResult.text, /\/tmp\/synthetic-private/);
   assert.doesNotMatch(textResult.text, /\/tmp\/synthetic-private/);
@@ -1365,7 +1365,7 @@ test("operational logs, diagnostics, and api.logger mirror redact GitLab token-l
   const packetPath = await writePacketList(tempDir, [goodPacket({
     taskId: `gitlab-${GLPAT_SECRET}`,
     issue: 84,
-    branch: `sergey/gitlab-${GLPAT_SECRET}`,
+    branch: `user/gitlab-${GLPAT_SECRET}`,
     conflictSurface: [`src/gitlab-${GLPAT_SECRET}`],
   })]);
 
@@ -1414,12 +1414,12 @@ test("observability failure path sanitizes missing packet paths across public su
   assert.match(publicMessage, /<packet_list>/);
   assert.doesNotMatch(publicMessage, new RegExp(escapeRegExp(syntheticHome)));
   assert.doesNotMatch(publicMessage, new RegExp(escapeRegExp(missingPacketPath)));
-  assert.doesNotMatch(publicMessage, /\/Users\/sergeygarin/);
+  assert.doesNotMatch(publicMessage, /\/Users\/user/);
 
   const logText = await fs.readFile(runtime.logPath, "utf8");
   assert.doesNotMatch(logText, new RegExp(escapeRegExp(syntheticHome)));
   assert.doesNotMatch(logText, new RegExp(escapeRegExp(missingPacketPath)));
-  assert.doesNotMatch(logText, /\/Users\/sergeygarin/);
+  assert.doesNotMatch(logText, /\/Users\/user/);
   const failed = logText.trim().split("\n").map((line) => JSON.parse(line)).find((event) => event.event === "cli.invocation.failed");
   assert.ok(failed);
   assert.equal(failed.error_kind, "not_found");
@@ -1428,7 +1428,7 @@ test("observability failure path sanitizes missing packet paths across public su
   const mirroredText = JSON.stringify(mirroredLogs);
   assert.doesNotMatch(mirroredText, new RegExp(escapeRegExp(syntheticHome)));
   assert.doesNotMatch(mirroredText, new RegExp(escapeRegExp(missingPacketPath)));
-  assert.doesNotMatch(mirroredText, /\/Users\/sergeygarin/);
+  assert.doesNotMatch(mirroredText, /\/Users\/user/);
   assert.match(mirroredText, /<packet_list>/);
 
   const diagnosticFiles = (await fs.readdir(runtime.diagnosticsDir)).filter((name) => name.endsWith(".json"));
@@ -1436,7 +1436,7 @@ test("observability failure path sanitizes missing packet paths across public su
   const diagnosticText = await fs.readFile(path.join(runtime.diagnosticsDir, diagnosticFiles[0]), "utf8");
   assert.doesNotMatch(diagnosticText, new RegExp(escapeRegExp(syntheticHome)));
   assert.doesNotMatch(diagnosticText, new RegExp(escapeRegExp(missingPacketPath)));
-  assert.doesNotMatch(diagnosticText, /\/Users\/sergeygarin/);
+  assert.doesNotMatch(diagnosticText, /\/Users\/user/);
   const diagnostic = JSON.parse(diagnosticText);
   assert.equal(diagnostic.error_kind, "not_found");
   assert.match(diagnostic.reason, /<packet_list>/);
@@ -1447,7 +1447,7 @@ test("public CLI errors sanitize /Users-style paths and secrets on failure", asy
   const tempDir = await makeTempDir();
   const workspaceDir = path.join(tempDir, "workspace");
   await fs.mkdir(workspaceDir, { recursive: true });
-  const userHomeMissingPath = "/Users/sergeygarin/private/token=github_pat_1234567890abcdefghijklmnop/missing-packets.json";
+  const userHomeMissingPath = "/Users/user/private/token=github_pat_1234567890abcdefghijklmnop/missing-packets.json";
 
   let publicMessage = "";
   await assert.rejects(
@@ -1458,7 +1458,7 @@ test("public CLI errors sanitize /Users-style paths and secrets on failure", asy
     },
   );
 
-  assert.doesNotMatch(publicMessage, /\/Users\/sergeygarin/);
+  assert.doesNotMatch(publicMessage, /\/Users\/user/);
   assert.doesNotMatch(publicMessage, /github_pat_1234567890abcdefghijklmnop/);
   assert.match(publicMessage, /<packet_list>/);
 });
@@ -1467,10 +1467,10 @@ test("observability redacts secrets, raw packets, user docs, and private home pa
   const sanitized = sanitizeForObservability({
     token: "github_pat_1234567890abcdefghijklmnop",
     authorization: "Bearer ghp_1234567890abcdefghijklmnop",
-    branch: "sergey/glpat-1234567890abcdefghijklmnop",
+    branch: "user/glpat-1234567890abcdefghijklmnop",
     packets: [{ task_id: "should-not-leak", body: "full user document" }],
     raw: "raw packet payload",
-    message: "failed at /Users/sergeygarin/private/project with sk-1234567890abcdef",
+    message: "failed at /Users/user/private/project with sk-1234567890abcdef",
   });
   const text = JSON.stringify(sanitized);
 
@@ -1482,7 +1482,7 @@ test("observability redacts secrets, raw packets, user docs, and private home pa
   assert.doesNotMatch(text, /ghp_1234567890abcdefghijklmnop/);
   assert.doesNotMatch(text, /glpat-1234567890abcdefghijklmnop/);
   assert.doesNotMatch(text, /sk-1234567890abcdef/);
-  assert.doesNotMatch(text, /\/Users\/sergeygarin/);
+  assert.doesNotMatch(text, /\/Users\/user/);
 });
 
 test("observability logs failed CLI errors with bounded error_kind and no raw packet secret leakage", async () => {

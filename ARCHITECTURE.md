@@ -19,7 +19,7 @@ It owns local execution state as JSON, runs implementation/verification/review l
 
 ### Context
 
-Sergey needs repeatable execution of manually approved GitHub tasks without turning the system into planning, intake, dashboarding, or autonomous merge machinery. The existing `plugins/background-worker` and `scripts/github-*queue` surfaces may be useful references, but they are not the target architecture.
+The user needs repeatable execution of manually approved GitHub tasks without turning the system into planning, intake, dashboarding, or autonomous merge machinery. The existing `plugins/background-worker` and `scripts/github-*queue` surfaces may be useful references, but they are not the target architecture.
 
 ### Decision
 
@@ -64,19 +64,19 @@ Verification and internal review commands are not a loophole for arbitrary scrip
 
 ```mermaid
 flowchart LR
-  Sergey[Sergey / operator]
+  the user[the user / operator]
   Prep[Manual prep outside plugin\nResearch + architecture/implementation plan\napproved implementation packet]
   Plugin[buran]
   Local[(Local JSON run registry)]
   GitHub[GitHub issues / PRs / comments]
   TaskFlow[TaskFlow / project projection]
 
-  Sergey --> Prep --> Plugin
+  the user --> Prep --> Plugin
   Plugin <--> Local
   Plugin --> GitHub
   Plugin --> TaskFlow
-  GitHub -. projection/journal .-> Sergey
-  TaskFlow -. projection/journal .-> Sergey
+  GitHub -. projection/journal .-> the user
+  TaskFlow -. projection/journal .-> the user
 ```
 
 ## C4 container

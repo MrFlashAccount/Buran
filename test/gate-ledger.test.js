@@ -31,7 +31,7 @@ function packetReport(runId = "run_gate_good") {
     source_path: "/tmp/gate-packets.json",
     packet_hash: "hash-gate-good",
     raw: { task_id: "gate-good", approved: true },
-    github: { repo: "MrFlashAccount/example-repo", issue_number: 91, intended_branch: "sergey/gate-good", base_branch: "develop" },
+    github: { repo: "example-owner/example-repo", issue_number: 91, intended_branch: "user/gate-good", base_branch: "develop" },
     approval: { approved: true },
     sufficiency_status: "PASS",
     missing_fields: [],

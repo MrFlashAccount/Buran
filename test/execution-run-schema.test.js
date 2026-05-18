@@ -16,7 +16,7 @@ function sampleReport() {
   return {
     run_id: "run_schema_good",
     task_id: "schema-good",
-    github: { repo: "MrFlashAccount/example-repo", issue_number: 17, intended_branch: "sergey/schema-good" },
+    github: { repo: "example-owner/example-repo", issue_number: 17, intended_branch: "user/schema-good" },
     packet_hash: "abc123",
     source_path: "/tmp/packets.json",
     approval: { approved: true },
@@ -67,7 +67,7 @@ test("execution-run schema accepts queued, running with lease, and terminal bloc
   const running = initialSnapshot({
     state: "running",
     workspace: { id: "ws-a", path: "/tmp/ws-a", lease_status: "acquired", lease_id: "lease_a", acquired_at: "2026-05-16T13:54:00.000Z", expires_at: "2026-05-16T14:54:00.000Z", ttl_ms: 3_600_000 },
-    locks: { repo: "MrFlashAccount/example-repo", issue: 17, branch: "sergey/schema-good", conflict_surface: ["src/schema"], lease_status: "acquired", lease_id: "lease_a", lock_keys: [], acquired_at: "2026-05-16T13:54:00.000Z", expires_at: "2026-05-16T14:54:00.000Z", ttl_ms: 3_600_000 },
+    locks: { repo: "example-owner/example-repo", issue: 17, branch: "user/schema-good", conflict_surface: ["src/schema"], lease_status: "acquired", lease_id: "lease_a", lock_keys: [], acquired_at: "2026-05-16T13:54:00.000Z", expires_at: "2026-05-16T14:54:00.000Z", ttl_ms: 3_600_000 },
     updated_at: "2026-05-16T13:54:00.000Z",
     last_sequence: 4,
   });
@@ -149,9 +149,9 @@ test("execution-run schema owns lease record construction and validation", () =>
     task_id: "schema-good",
     workspace_id: "ws-schema",
     workspace_path: "/tmp/ws-schema",
-    repo: "MrFlashAccount/example-repo",
+    repo: "example-owner/example-repo",
     issue_number: 17,
-    branch: "sergey/schema-good",
+    branch: "user/schema-good",
     conflict_surface: ["src/schema"],
     acquired_at: "2026-05-16T13:54:00.000Z",
     expires_at: "2026-05-16T14:54:00.000Z",

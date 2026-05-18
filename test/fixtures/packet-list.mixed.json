@@ -4,9 +4,9 @@
       "task_id": "good-task-17",
       "approved": true,
       "github": {
-        "repo": "MrFlashAccount/example-repo",
+        "repo": "example-owner/example-repo",
         "issue_number": 17,
-        "intended_branch": "sergey/good-task-17"
+        "intended_branch": "user/good-task-17"
       },
       "scope": {
         "goal": "Add the approved local-only behavior for the fixture task.",
@@ -34,7 +34,7 @@
     {
       "task_id": "weak-task-18",
       "github": {
-        "repo": "MrFlashAccount/example-repo",
+        "repo": "example-owner/example-repo",
         "issue_number": 18
       },
       "scope": {
