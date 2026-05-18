@@ -1,0 +1,18 @@
+{
+  "id": "buran",
+  "name": "Buran",
+  "description": "Local JSON-first Buran boundary for approved GitHub implementation packets.",
+  "activation": {
+    "onStartup": false
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "registryRoot": {
+        "type": "string",
+        "minLength": 1
+      }
+    }
+  }
+}

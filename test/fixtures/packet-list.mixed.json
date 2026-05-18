@@ -1,0 +1,45 @@
+{
+  "packets": [
+    {
+      "task_id": "good-task-17",
+      "approved": true,
+      "github": {
+        "repo": "example-owner/example-repo",
+        "issue_number": 17,
+        "intended_branch": "user/good-task-17"
+      },
+      "scope": {
+        "goal": "Add the approved local-only behavior for the fixture task.",
+        "acceptance_criteria": [
+          "Validation passes from the explicit packet list"
+        ]
+      },
+      "implementation": {
+        "instructions": "Touch only the approved local files for this task. Do not contact GitHub."
+      },
+      "verification": {
+        "commands": [
+          "npm test"
+        ]
+      },
+      "review": {
+        "criteria": [
+          "Confirm the implementation stays within the approved packet envelope"
+        ]
+      },
+      "conflict_surface": [
+        "src/approved-local-area/"
+      ]
+    },
+    {
+      "task_id": "weak-task-18",
+      "github": {
+        "repo": "example-owner/example-repo",
+        "issue_number": 18
+      },
+      "scope": {
+        "goal": "This packet intentionally lacks required execution details."
+      }
+    }
+  ]
+}
