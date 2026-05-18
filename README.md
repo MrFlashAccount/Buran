@@ -1,4 +1,8 @@
-# buran
+<p align="center">
+  <img src="docs/assets/buran-logo-spaceplane.png" alt="Buran spacecraft" width="720">
+</p>
+
+<h1 align="center">Buran</h1>
 
 Local JSON-first Buran for already approved implementation packets.
 
