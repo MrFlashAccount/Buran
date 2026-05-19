@@ -148,17 +148,33 @@ function githubTransportError(code, message) {
   return projectionContractError(code, message);
 }
 
+function safeBodyField(value, fallback = "<unknown>") {
+  return nonEmptyString(sanitizeProjectionDurableValue(value)) || fallback;
+}
+
 function buildDefaultPrBody(context) {
   return [
     "## Buran stacked PR handoff",
     "",
-    `Run: ${context.run_id}`,
-    `Task: ${context.task_id}`,
-    `Base: ${context.base_branch}`,
-    `Head: ${context.head_branch}`,
+    `Run: ${safeBodyField(context.run_id)}`,
+    `Task: ${safeBodyField(context.task_id)}`,
+    `Base: ${safeBodyField(context.base_branch)}`,
+    `Head: ${safeBodyField(context.head_branch)}`,
     "",
     "Local registry remains the source of truth for verification/review artifacts.",
   ].join("\n");
+}
+
+function assertRemotePrMatchesStack(raw, { headBranch, baseBranch }) {
+  const remoteHead = nonEmptyString(raw?.headRefName);
+  const remoteBase = nonEmptyString(raw?.baseRefName);
+  const remoteState = nonEmptyString(raw?.state);
+  if (remoteHead !== headBranch || remoteBase !== baseBranch) {
+    throw githubTransportError("projection_github_remote_mismatch", "GitHub PR transport response did not match the explicit stacked head/base branches.");
+  }
+  if (remoteState !== "OPEN" && remoteState !== "open") {
+    throw githubTransportError("projection_github_remote_mismatch", "GitHub PR transport response was not an open PR.");
+  }
 }
 
 async function runGhJson({ execFileImpl, ghPath, args, env }) {
@@ -173,9 +189,12 @@ async function findExistingPullRequest({ execFileImpl, ghPath, env, repo, headBr
     execFileImpl,
     ghPath,
     env,
-    args: ["pr", "list", "--repo", repo, "--head", headBranch, "--base", baseBranch, "--state", "open", "--json", "number,url,isDraft,title", "--limit", "1"],
+    args: ["pr", "list", "--repo", repo, "--head", headBranch, "--base", baseBranch, "--state", "open", "--json", "number,url,isDraft,title,headRefName,baseRefName,state", "--limit", "1"],
   });
-  return Array.isArray(rows) && rows.length > 0 ? rows[0] : null;
+  if (!Array.isArray(rows)) {
+    throw githubTransportError("projection_github_remote_mismatch", "GitHub PR transport list response was not an array of open stacked PRs.");
+  }
+  return rows.length > 0 ? rows[0] : null;
 }
 
 async function createPullRequest({ execFileImpl, ghPath, env, repo, headBranch, baseBranch, title, body, draft }) {
@@ -187,7 +206,7 @@ async function createPullRequest({ execFileImpl, ghPath, env, repo, headBranch, 
     execFileImpl,
     ghPath,
     env,
-    args: ["pr", "view", prSelector, "--repo", repo, "--json", "number,url,isDraft,title"],
+    args: ["pr", "view", prSelector, "--repo", repo, "--json", "number,url,isDraft,title,headRefName,baseRefName,state"],
   });
 }
 
@@ -197,7 +216,7 @@ async function updatePullRequest({ execFileImpl, ghPath, env, repo, number, base
     execFileImpl,
     ghPath,
     env,
-    args: ["pr", "view", String(number), "--repo", repo, "--json", "number,url,isDraft,title"],
+    args: ["pr", "view", String(number), "--repo", repo, "--json", "number,url,isDraft,title,headRefName,baseRefName,state"],
   });
 }
 
@@ -231,20 +250,29 @@ export function createGithubCliProjectPr({
       throw githubTransportError("projection_github_stack_incomplete", "GitHub PR transport requires explicit stacked head and base branches.");
     }
 
-    const title = nonEmptyString(context.title) || `Buran handoff for ${context.task_id || context.run_id || "run"}`;
-    const body = nonEmptyString(bodyBuilder(context)) || buildDefaultPrBody(context);
+    const rawTitle = nonEmptyString(context.title) || `Buran handoff for ${context.task_id || context.run_id || "run"}`;
+    const title = safeBodyField(rawTitle, "Buran handoff for run");
+    const rawBody = nonEmptyString(bodyBuilder(context)) || buildDefaultPrBody(context);
+    const body = safeBodyField(rawBody, buildDefaultPrBody({}));
     const existing = await findExistingPullRequest({ execFileImpl, ghPath, env, repo, headBranch, baseBranch });
+    if (existing) {
+      assertRemotePrMatchesStack(existing, { headBranch, baseBranch });
+      if (!Number.isSafeInteger(existing.number) || existing.number < 1) {
+        throw githubTransportError("projection_github_remote_mismatch", "GitHub PR transport list response did not include a valid existing PR number.");
+      }
+    }
     const raw = existing
       ? await updatePullRequest({ execFileImpl, ghPath, env, repo, number: existing.number, baseBranch, title, body })
       : await createPullRequest({ execFileImpl, ghPath, env, repo, headBranch, baseBranch, title, body, draft });
+    assertRemotePrMatchesStack(raw, { headBranch, baseBranch });
 
     return {
       status: existing ? "updated" : "created",
       number: raw?.number,
       url: raw?.url,
       draft: Boolean(raw?.isDraft),
-      title: raw?.title || title,
-      state: "open",
+      title: safeBodyField(raw?.title || title, title),
+      state: nonEmptyString(raw?.state).toLowerCase() || "open",
       actor: GITHUB_PR_TRANSPORT_ADAPTER,
     };
   };
