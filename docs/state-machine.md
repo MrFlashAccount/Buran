@@ -2,7 +2,7 @@
 
 Buran executes only approved implementation packets. State is local-first: each transition is recorded in `events.jsonl` and reflected in `run.json`.
 
-`pr_ready` means ready-for-PR creation/update: verification and internal review have passed, but PR creation has not happened yet. In the current local-only slice, the `pr_ready` -> `ready_for_manual_review` transition records a deterministic fake/local PR projection handoff without a remote GitHub write.
+`pr_ready` means ready-for-PR creation/update: verification and internal review have passed, but PR creation has not happened yet. The `pr_ready` -> `ready_for_manual_review` transition records a deterministic projection handoff. By default this is a fake/local projection without a network write; when an embedding caller injects the GitHub CLI transport, Buran records local intent first, creates or updates the exact stacked PR, validates the returned PR payload, and records the result before transitioning.
 
 Gate-bearing states are epoch-aware in `execution-run.v2`: entering `verification` from `running` or `fix_loop` increments `execution.current_epoch` and resets both gate heads to `PENDING` for the new epoch.
 
@@ -66,7 +66,7 @@ Engine rules:
 | `internal_review` | `blocked_needs_human` | Fresh internal-review gate head for the current epoch is `BLOCKED`, either because the independent verdict artifact returned `BLOCKED` or because valid independent verdict evidence is missing/invalid, so human/manual intervention is still required. |
 | `fix_loop` | `verification` | A sanitized `fix_attempt` result artifact for the current epoch reports `COMPLETED`, includes durable changed-file evidence plus a durable result reference, and remains inside the approved packet envelope. Entering `verification` starts a fresh gate epoch. |
 | `fix_loop` | `blocked_needs_human` | Required fix exceeds the approved packet, needs new architecture/planning, or the bounded completed fix-attempt count is exhausted. |
-| `pr_ready` | `ready_for_manual_review` | A coherent PR projection result is recorded in the local journal for the current epoch; the current local adapter may satisfy this with a fake/local handoff artifact instead of a remote write. |
+| `pr_ready` | `ready_for_manual_review` | A coherent PR projection result is recorded in the local journal for the current epoch; the default local adapter may satisfy this with a fake/local handoff artifact, while an explicitly enabled GitHub CLI transport must create/update the exact stacked head/base PR and return a contract-valid result. |
 
 ## Gate rules
 
