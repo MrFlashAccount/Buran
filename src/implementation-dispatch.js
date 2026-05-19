@@ -12,6 +12,10 @@ const DISPATCH_EVIDENCE_MAX_KEYS = 12;
 const DISPATCH_EVIDENCE_MAX_ITEMS = 50;
 const DISPATCH_EVIDENCE_MAX_STRING = 240;
 const DISPATCH_EVIDENCE_BLOCKED_KEY_PATTERN = /(^|_)(prompt|transcript|stdout|stderr|output|raw|content|body|markdown|log|logs|session)($|_)/i;
+const DISPATCH_EVIDENCE_FILE_KEYS = new Set(["files_changed", "changed_files"]);
+const DISPATCH_EVIDENCE_STRING_KEYS = new Set(["implementation_result_id", "commit_sha", "patch_sha", "branch"]);
+const DISPATCH_EVIDENCE_REF_KEYS = new Set(["artifact_ref", "result_artifact_ref", "implementation_artifact_ref"]);
+const DISPATCH_EVIDENCE_REF_LIST_KEYS = new Set(["artifact_refs", "result_artifact_refs", "implementation_artifact_refs"]);
 
 function truncateDispatchString(value, max = DISPATCH_EVIDENCE_MAX_STRING) {
   const text = nonEmptyString(value);
@@ -54,21 +58,21 @@ function sanitizeDispatchReferenceList(value) {
 
 function isAllowedDispatchEvidenceKey(key) {
   if (!key || DISPATCH_EVIDENCE_BLOCKED_KEY_PATTERN.test(key)) return false;
-  return key === "files_changed"
-    || key === "changed_files"
-    || /(^|_)(id|sha|branch|count|ref|refs|path|paths)$/.test(key);
+  return DISPATCH_EVIDENCE_FILE_KEYS.has(key)
+    || DISPATCH_EVIDENCE_STRING_KEYS.has(key)
+    || DISPATCH_EVIDENCE_REF_KEYS.has(key)
+    || DISPATCH_EVIDENCE_REF_LIST_KEYS.has(key);
 }
 
 function sanitizeDispatchEvidenceValue(key, value) {
-  if (key === "files_changed" || key === "changed_files") return sanitizeDispatchStringList(value);
-  if (/(^|_)(count)$/.test(key)) return Number.isSafeInteger(value) && value >= 0 ? value : undefined;
-  if (/(^|_)(refs|paths)$/.test(key)) return sanitizeDispatchReferenceList(value);
-  if (/(^|_)(ref|path)$/.test(key)) return sanitizeDispatchReference(value);
-  if (/(^|_)(id|sha|branch)$/.test(key)) return truncateDispatchString(value);
+  if (DISPATCH_EVIDENCE_FILE_KEYS.has(key)) return sanitizeDispatchStringList(value);
+  if (DISPATCH_EVIDENCE_REF_LIST_KEYS.has(key)) return sanitizeDispatchReferenceList(value);
+  if (DISPATCH_EVIDENCE_REF_KEYS.has(key)) return sanitizeDispatchReference(value);
+  if (DISPATCH_EVIDENCE_STRING_KEYS.has(key)) return truncateDispatchString(value);
   return undefined;
 }
 
-function sanitizeDispatchEvidence(evidence) {
+export function sanitizeImplementationDispatchEvidence(evidence) {
   if (!isRecord(evidence)) return {};
 
   const output = {};
@@ -81,6 +85,24 @@ function sanitizeDispatchEvidence(evidence) {
   }
 
   return output;
+}
+
+export function hasMeaningfulImplementationDispatchCompletionEvidence(evidence) {
+  if (!isRecord(evidence)) return false;
+  const changedFiles = evidence.files_changed || evidence.changed_files;
+  const hasChangedFiles = Array.isArray(changedFiles) && changedFiles.length > 0;
+  const hasDurableResultRef = Boolean(
+    evidence.implementation_result_id
+      || evidence.commit_sha
+      || evidence.patch_sha
+      || evidence.artifact_ref
+      || evidence.result_artifact_ref
+      || evidence.implementation_artifact_ref
+      || (Array.isArray(evidence.artifact_refs) && evidence.artifact_refs.length > 0)
+      || (Array.isArray(evidence.result_artifact_refs) && evidence.result_artifact_refs.length > 0)
+      || (Array.isArray(evidence.implementation_artifact_refs) && evidence.implementation_artifact_refs.length > 0),
+  );
+  return hasChangedFiles && hasDurableResultRef;
 }
 
 function workspaceContexts(snapshot) {
@@ -100,9 +122,8 @@ function normalizeDispatchStatus(status) {
   return "BLOCKED";
 }
 
-function dispatchStatusSummary(status, problem = null) {
-  if (status === "COMPLETED") return "Implementation harness dispatch completed and returned immutable implementation evidence.";
-  if (problem?.message) return problem.message;
+function dispatchStatusSummary(status) {
+  if (status === "COMPLETED") return "Implementation harness dispatch completed and returned durable implementation evidence.";
   if (status === "FAILED") return "Implementation harness dispatch failed inside the approved envelope.";
   return "Implementation harness dispatch is blocked.";
 }
@@ -111,30 +132,37 @@ function buildProblem(code, message, extra = {}) {
   return { code, message, ...extra };
 }
 
+function sanitizeProblemCode(value, fallback) {
+  const code = nonEmptyString(value).toLowerCase().replace(/[^a-z0-9_.:-]+/g, "_").slice(0, 120);
+  if (!code || DISPATCH_EVIDENCE_BLOCKED_KEY_PATTERN.test(code)) return fallback;
+  return code;
+}
+
+function buildDispatchProblem(status, result, evidenceRequired) {
+  const fallbackCode = evidenceRequired
+    ? DISPATCH_EVIDENCE_REQUIRED_CODE
+    : status === "FAILED"
+      ? "implementation_dispatch_failed"
+      : "implementation_dispatch_blocked";
+  return buildProblem(
+    sanitizeProblemCode(result?.problem?.code, fallbackCode),
+    evidenceRequired ? DISPATCH_EVIDENCE_REQUIRED_MESSAGE : dispatchStatusSummary(status),
+  );
+}
+
 function normalizeResult(rawResult, snapshot) {
   const result = isRecord(rawResult) ? rawResult : {};
   const normalizedStatus = normalizeDispatchStatus(result.status);
-  const evidence = sanitizeDispatchEvidence(result.evidence);
-  const evidenceRequired = normalizedStatus === "COMPLETED" && Object.keys(evidence).length === 0;
+  const evidence = sanitizeImplementationDispatchEvidence(result.evidence);
+  const evidenceRequired = normalizedStatus === "COMPLETED" && !hasMeaningfulImplementationDispatchCompletionEvidence(evidence);
   const status = evidenceRequired ? "BLOCKED" : normalizedStatus;
   const problem = status === "COMPLETED"
     ? null
-    : sanitizeValue(isRecord(result.problem) ? result.problem : buildProblem(
-        evidenceRequired
-          ? DISPATCH_EVIDENCE_REQUIRED_CODE
-          : status === "FAILED"
-            ? "implementation_dispatch_failed"
-            : "implementation_dispatch_blocked",
-        evidenceRequired
-          ? DISPATCH_EVIDENCE_REQUIRED_MESSAGE
-          : nonEmptyString(result.summary) || dispatchStatusSummary(status),
-      ), snapshot);
+    : sanitizeValue(buildDispatchProblem(status, result, evidenceRequired), snapshot);
 
   return sanitizeValue({
     status,
-    summary: evidenceRequired
-      ? DISPATCH_EVIDENCE_REQUIRED_MESSAGE
-      : nonEmptyString(result.summary) || dispatchStatusSummary(status, problem),
+    summary: evidenceRequired ? DISPATCH_EVIDENCE_REQUIRED_MESSAGE : dispatchStatusSummary(status),
     implementation_epoch: Number.isSafeInteger(result.implementation_epoch) ? result.implementation_epoch : 1,
     evidence,
     problem,

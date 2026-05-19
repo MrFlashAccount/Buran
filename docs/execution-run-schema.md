@@ -22,6 +22,9 @@ registry/
       artifacts/
         packet.md
         implementation-log.md
+        implementation-dispatch/
+          intent-<hash>.json
+          result-<hash>.json
         verification.json
         internal-review/
           <hash>.json
@@ -135,10 +138,22 @@ Minimum expected artifacts:
 
 - `packet.md` — normalized approved packet copy or pointer with hash.
 - `implementation-log.md` — compact implementation summary and touched files.
+- `artifacts/implementation-dispatch/intent-<hash>.json` — immutable dispatch intent recorded before adapter execution. It includes `schema_version: implementation-dispatch-intent.v1`, `dispatch_status: dispatch_requested`, the run/task ids, repo/issue/branch summary, workspace id, current execution epoch/state, packet artifact ref, workspace-preparation artifact ref, and `dispatch_intent_id` derived from the canonical intent payload.
+- `artifacts/implementation-dispatch/result-<hash>.json` — immutable sanitized dispatch result recorded after adapter execution or reused on resume. Shape: `schema_version: implementation-dispatch-result.v1`, adapter/run/task ids, `dispatch_intent_id`, intent/packet/workspace-preparation artifact refs, timestamps, `status` (`COMPLETED`, `BLOCKED`, or `FAILED`), generic safe `summary`, `implementation_epoch`, sanitized `evidence`, optional sanitized `problem`, and actor. `COMPLETED` is accepted only when evidence includes changed-file evidence plus a durable implementation/result reference such as `implementation_result_id`, `commit_sha`, `patch_sha`, or implementation artifact ref(s). Raw prompt/stdout/stderr/output/transcript/session/content-like blobs are not valid evidence and must not be persisted through summary/problem/report fields.
 - `verification.json` — verification commands/checks, outcomes, and evidence.
 - `internal-review/<hash>.json` — immutable local internal-review findings, sanitized packet review context, and final review status.
 - `pr/projection-intent-<hash>.json` — immutable local PR handoff intent derived from the approved local contract.
 - `pr/projection-result-<hash>.json` — immutable local PR handoff result mirrored into `github.pr` / `projections.github_pr` only after a semantically valid successful projection record.
+
+Implementation-dispatch `problem` uses a small safe shape: `code` plus generic `message`; extra raw adapter fields are intentionally not copied into immutable artifacts or public runner reports. `BLOCKED` keeps the run in `running`; `FAILED` transitions `running -> failed_execution`; only `COMPLETED` with durable evidence transitions to `verification`.
+
+When implementation dispatch blocks or fails, the public runner report records an explicit blocker/report shape:
+
+- `implementation_dispatch.status` — dispatch result status: `BLOCKED`, `FAILED`, or `COMPLETED`.
+- `implementation_dispatch.problem` — sanitized object with `code` and generic `message` when status is not `COMPLETED`; otherwise `null`/absent.
+- `implementation_dispatch.intent_artifact_ref` — `{ path, sha256 }` reference to the recorded `artifacts/implementation-dispatch/intent-<hash>.json` artifact.
+- `implementation_dispatch.result_artifact_ref` — `{ path, sha256 }` reference to the recorded or reusable `artifacts/implementation-dispatch/result-<hash>.json` artifact.
+- `blockers[]` entry — `code: implementation_dispatch_blocked` for `BLOCKED` or `code: implementation_dispatch_failed` for `FAILED`, plus `dispatch_status`, nested `problem`, `intent_artifact_ref`, and `result_artifact_ref` mirroring the implementation-dispatch report.
 
 Verification and review command records describe allowed adapters/gates from the approved packet and Buran policy. They must not become a general-purpose arbitrary script execution surface.
 
@@ -148,7 +163,7 @@ Verification and review command records describe allowed adapters/gates from the
 
 - Intake: write packet artifact, initialize event journal, append `packet_received`, write `run.json`, commit sufficiency transition, then rebuild indexes.
 - Transition: append the transition event, write the matching snapshot, release terminal lease records when needed, then rebuild indexes for terminal transitions.
-- Artifact record: write artifact content, append `artifact.recorded`, update `run.json` artifact head/`last_sequence`, then return.
+- Artifact record: write artifact content, append `artifact.recorded`, update `run.json` artifact head/`last_sequence`, then return. Implementation-dispatch intent/result artifacts are recorded as `gate_name: implementation_dispatch` with `recorded_from_state: running`; resume reuses a current-epoch result artifact with matching dispatch intent and hash instead of invoking the adapter again.
 - Gate result record: append `gate.result_recorded`, update `run.json` gate head/`last_sequence`, then return.
 - Lease acquire/release/recovery: lease record writes/deletes are paired with lock/recovery events and snapshot updates through the store seam before indexes are rebuilt.
 - Index files under `indexes/` are derived from valid run folders and are never authoritative.
@@ -170,7 +185,7 @@ Recovery order:
 1. Load `run.json`.
 2. Replay `events.jsonl` and verify monotonic sequence.
 3. Verify each transition edge against `docs/state-machine.md`.
-4. Semantically replay `artifact.recorded` and `gate.result_recorded` to rebuild gate/artifact heads.
+4. Semantically replay `artifact.recorded` and `gate.result_recorded` to rebuild gate/artifact heads, including implementation-dispatch intent/result artifacts.
 5. Verify the replayed state/heads/`last_sequence` match the snapshot.
 6. Verify referenced artifact hashes where present.
 7. Rebuild active-run and workspace-lease indexes.

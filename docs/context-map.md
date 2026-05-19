@@ -49,7 +49,7 @@ Buran does **not** discover work on its own, draft plans, or upgrade weak packet
 
 1. **Before intake**: packet approval and task shaping happen outside Buran.
 2. **After intake**: Buran owns run state in the local registry.
-3. **At `running`**: current code records workspace-preparation and implementation-dispatch handoff artifacts, then stops before worker execution.
+3. **At `running`**: Buran records workspace-preparation and implementation-dispatch intent artifacts, calls the injected dispatch adapter only when no current result artifact can be reused, records the sanitized result artifact, and advances to `verification` only when the result is `COMPLETED` with durable evidence. `BLOCKED` stays safe in `running`; `FAILED` transitions to `failed_execution`.
 4. **At `ready_for_manual_review`**: Buran has recorded PR handoff evidence and stops for human review.
 
 ## External effect policy by command

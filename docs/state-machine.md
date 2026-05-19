@@ -56,7 +56,8 @@ Engine rules:
 | `queued` | `waiting_for_lock` | Run accepted into a manual batch. |
 | `waiting_for_lock` | `running` | Workspace lease acquired for workspace, repo, issue, branch, and conflict surface. |
 | `waiting_for_lock` | `blocked_lock_conflict` | Another active run owns an overlapping lease. |
-| `running` | `verification` | Implementation completed inside the approved packet envelope. |
+| `running` | `verification` | A sanitized implementation-dispatch `result-*` artifact for the current epoch reports `COMPLETED` and includes durable changed-file evidence plus a durable result reference. |
+| `running` | `failed_execution` | A sanitized implementation-dispatch `result-*` artifact for the current epoch reports `FAILED`, indicating unrecoverable implementation failure inside the approved envelope. |
 | `verification` | `internal_review` | Fresh verification gate head for the current epoch is `PASS`. |
 | `verification` | `fix_loop` | Fresh verification gate head for the current epoch is `FAIL`, and fixes remain inside approved scope. |
 | `verification` | `blocked_needs_human` | Fresh verification gate head for the current epoch is `BLOCKED`, so human/manual intervention is still required. |
