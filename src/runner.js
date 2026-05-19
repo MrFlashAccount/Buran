@@ -1662,6 +1662,8 @@ async function runFixLoopStage({ registryRoot, runId, current, previousState, st
     intent: fixIntent.intent,
     adapter: implementationDispatchAdapter,
     clock,
+    intentArtifactPath: fixIntent.artifactPath,
+    artifactDirectory: "artifacts/fix-loop",
   });
   const resultRecorded = await recordArtifact(registryRoot, runId, {
     artifactPath: dispatchResult.artifact_path,

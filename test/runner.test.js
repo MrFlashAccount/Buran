@@ -1527,7 +1527,7 @@ test("local runner executes a bounded fix attempt and reruns verification in a f
           adapter: "test-fix-harness",
           actor: "test-fix-harness",
           summary: "Fix worker updated the failing verification fixture.",
-          evidence: { files_changed: ["test/runner.test.js"] },
+          evidence: { files_changed: ["test/runner.test.js"], patch_sha: "fix-loop-test-patch" },
         };
       },
     },
@@ -1537,6 +1537,8 @@ test("local runner executes a bounded fix attempt and reruns verification in a f
   assert.equal(fixed.current_state, "verification");
   assert.equal(fixed.implementation_dispatch.fix_attempt, 1);
   assert.equal(fixed.implementation_dispatch.status, "COMPLETED");
+  assert.match(fixed.implementation_dispatch.intent_artifact_ref.path, /^artifacts\/fix-loop\/intent-1-[a-f0-9]{16}\.json$/);
+  assert.match(fixed.implementation_dispatch.result_artifact_ref.path, /^artifacts\/fix-loop\/result-[a-f0-9]{16}\.json$/);
   assert.deepEqual(fixed.steps_taken.map((step) => step.action), ["fix_attempt_intent", "fix_attempt_result", "transition"]);
 
   const verified = await runLocalMission({
@@ -1548,6 +1550,8 @@ test("local runner executes a bounded fix attempt and reruns verification in a f
   assert.equal(verified.verification.status, "PASS");
 
   const paths = getRunPaths(registryRoot, runId);
+  const fixResultArtifact = JSON.parse(await fs.readFile(path.join(paths.runDir, fixed.implementation_dispatch.result_artifact_ref.path), "utf8"));
+  assert.equal(fixResultArtifact.dispatch_intent_artifact.path, fixed.implementation_dispatch.intent_artifact_ref.path);
   const snapshot = await readRunSnapshot(paths.runPath);
   assert.equal(snapshot.execution.current_epoch, 2);
   const fixArtifacts = Object.values(snapshot.artifacts.recorded.by_path).filter((entry) => entry.gate_name === "fix_attempt");
@@ -1572,7 +1576,7 @@ test("local runner blocks fix_loop after bounded fix attempts are exhausted", as
         adapter: "test-noop-fix-harness",
         actor: "test-noop-fix-harness",
         summary: "Fix worker completed but left the failing fixture unchanged.",
-        evidence: { files_changed: [] },
+        evidence: { files_changed: ["test/runner.test.js"], patch_sha: "noop-fix-loop-test-patch" },
       };
     },
   };

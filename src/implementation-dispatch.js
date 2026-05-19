@@ -362,10 +362,16 @@ export function createUnavailableImplementationDispatchAdapter({ reason = "Imple
   };
 }
 
-export async function executeImplementationDispatch({ snapshot, intent, adapter = createUnavailableImplementationDispatchAdapter(), clock = () => new Date() } = {}) {
+export async function executeImplementationDispatch({ snapshot, intent, adapter = createUnavailableImplementationDispatchAdapter(), clock = () => new Date(), intentArtifactPath = "", artifactDirectory = "artifacts/implementation-dispatch" } = {}) {
   if (!snapshot?.run_id) throw new Error("run snapshot is required for implementation dispatch execution");
   if (!intent?.dispatch_intent_id) throw new Error("implementation dispatch intent is required");
+  const dispatchArtifactDirectory = nonEmptyString(artifactDirectory) || "artifacts/implementation-dispatch";
+  const dispatchIntentArtifactPath = nonEmptyString(intentArtifactPath) || `${dispatchArtifactDirectory}/intent-${intent.dispatch_intent_id.slice(0, 16)}.json`;
   const capturedProvenance = captureImplementationDispatchProvenance(snapshot, intent);
+  const capturedDispatchIntentArtifact = {
+    ...capturedProvenance.dispatch_intent_artifact,
+    path: dispatchIntentArtifactPath,
+  };
   const adapterSnapshot = cloneJson(snapshot);
   const adapterIntent = cloneJson(intent);
   const adapterPacketArtifact = cloneJson(capturedProvenance.packet_artifact);
@@ -412,7 +418,7 @@ export async function executeImplementationDispatch({ snapshot, intent, adapter 
     run_id: capturedProvenance.run_id,
     task_id: capturedProvenance.task_id,
     dispatch_intent_id: capturedProvenance.dispatch_intent_id,
-    dispatch_intent_artifact: capturedProvenance.dispatch_intent_artifact,
+    dispatch_intent_artifact: capturedDispatchIntentArtifact,
     packet_artifact: capturedProvenance.packet_artifact,
     workspace_preparation_artifact: capturedProvenance.workspace_preparation_artifact,
     started_at: startedAt,
@@ -433,7 +439,7 @@ export async function executeImplementationDispatch({ snapshot, intent, adapter 
     status: normalized.status,
     recorded_at: recordedAt,
     idempotency_key: `${capturedProvenance.run_id}:implementation_dispatch:${capturedProvenance.dispatch_intent_id}:${artifactHash.slice(0, 16)}`,
-    artifact_path: `artifacts/implementation-dispatch/result-${artifactHash.slice(0, 16)}.json`,
+    artifact_path: `${dispatchArtifactDirectory}/result-${artifactHash.slice(0, 16)}.json`,
     artifact_content: artifactContent,
     public_report: artifactPayload,
     provenance: {
