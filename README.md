@@ -101,6 +101,7 @@ Most setups only need one plugin setting plus the run inputs OpenClaw passes whe
 Buran keeps enough local state to make interruptions recoverable and finished work easier to review.
 
 - If a run stops halfway, Buran can rebuild state from the recorded registry instead of improvising.
+- If a stacked workflow tries to start the next slice too early, Buran can evaluate the previous slice’s local review-ready gates and block before mutating the next run.
 - If a run completes, the same recorded artifacts help OpenClaw hand back a cleaner PR or review handoff.
 - If you need the implementation details behind that flow, start with the docs below.
 

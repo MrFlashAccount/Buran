@@ -26,6 +26,7 @@ import { acquireWorkspaceLease } from "./locks.js";
 import { sanitizePublicReportForOutput } from "./observability.js";
 import { buildRecordedPrProjection, createLocalPrProjectionAdapter } from "./pr-projection-adapter.js";
 import { executeVerificationGate } from "./verification-adapter.js";
+import { evaluateReviewReadyPolicy } from "./workflow-policy.js";
 import { getRunPaths, readRunSnapshot, recordArtifact, recordGateResult, recordProjectionIntent, recordProjectionResult, transitionRun } from "./registry-store.js";
 import { canonicalJson, isRecord, nonEmptyString, sha256Hex } from "./utils.js";
 import { inspectWorkspacePreparation } from "./workspace-preparation.js";
@@ -76,6 +77,7 @@ function buildRunnerReport({
   fixLoop = null,
   projection = null,
   externalSideEffects = false,
+  workflowPolicy = null,
 } = {}) {
   return {
     schema_version: SCHEMA_VERSION,
@@ -96,6 +98,7 @@ function buildRunnerReport({
     fix_loop: fixLoop,
     projection,
     external_side_effects: Boolean(externalSideEffects),
+    workflow_policy: workflowPolicy,
   };
 }
 
@@ -2053,7 +2056,7 @@ async function runFixLoopStage({ registryRoot, runId, current, previousState, st
  * @returns {Promise<object>} Sanitized public runner report describing completed work, blockers, and current state.
  * @throws {Error} When required identifiers are missing or an unexpected storage/adapter error occurs.
  */
-export async function runLocalMission({ registryRoot, runId, workspaceId = "", workspacePath = "", ttlMs = "", clock = () => new Date(), actor = RUNNER_ACTOR, implementationDispatchAdapter = createUnavailableImplementationDispatchAdapter(), prProjectionAdapter = createLocalPrProjectionAdapter() } = {}) {
+export async function runLocalMission({ registryRoot, runId, workspaceId = "", workspacePath = "", ttlMs = "", clock = () => new Date(), actor = RUNNER_ACTOR, implementationDispatchAdapter = createUnavailableImplementationDispatchAdapter(), prProjectionAdapter = createLocalPrProjectionAdapter(), stackPrerequisite = null } = {}) {
   if (!registryRoot) throw new Error("registryRoot is required for local mission runner");
   if (!runId) throw new Error("runId is required for local mission runner");
 
@@ -2084,6 +2087,46 @@ export async function runLocalMission({ registryRoot, runId, workspaceId = "", w
   let verification = null;
   let internalReview = null;
   let fixLoop = null;
+  let workflowPolicy = null;
+
+  if (stackPrerequisite) {
+    const prerequisiteSnapshot = stackPrerequisite.snapshot || stackPrerequisite;
+    workflowPolicy = evaluateReviewReadyPolicy(prerequisiteSnapshot, {
+      currentSlice: stackPrerequisite.currentSlice || "",
+      nextSlice: stackPrerequisite.nextSlice || "",
+    });
+    if (!workflowPolicy.allowed_to_start_next_slice) {
+      const problem = buildIssue(
+        "stack_prerequisite_not_review_ready",
+        `Next slice cannot start until prerequisite run ${workflowPolicy.prerequisite_run_id || "<unknown>"} is review-ready.`,
+        { workflow_policy: workflowPolicy },
+      );
+      blockers.push(problem);
+      stepsTaken.push(buildStep({
+        action: "stack_progression_guard",
+        status: "blocked",
+        fromState: current.state,
+        toState: current.state,
+        detail: problem.message,
+      }));
+      return buildRunnerReport({
+        registryRoot,
+        runId,
+        previousState,
+        currentState: current.state,
+        outcome: "blocked",
+        stepsTaken,
+        blockers,
+        warnings,
+        workspacePreparation,
+        implementationDispatch,
+        verification,
+        internalReview,
+        fixLoop,
+        workflowPolicy,
+      });
+    }
+  }
 
   if (TERMINAL_STATES.has(current.state)) {
     return buildRunnerReport({

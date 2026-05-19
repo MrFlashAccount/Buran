@@ -193,6 +193,34 @@ function githubTransportError(code, message) {
   return projectionContractError(code, message);
 }
 
+function artifactRefsPresent(refs) {
+  return Array.isArray(refs)
+    && refs.length > 0
+    && refs.every((ref) => nonEmptyString(ref?.path) && nonEmptyString(ref?.sha256));
+}
+
+function gatePassedForEpoch(gate, executionEpoch) {
+  return isRecord(gate)
+    && gate.status === "PASS"
+    && gate.current_epoch === executionEpoch
+    && Number.isSafeInteger(gate.current_attempt)
+    && gate.current_attempt >= 1
+    && artifactRefsPresent(gate.artifact_refs);
+}
+
+function assertMasterWorkflowContext(context) {
+  const executionEpoch = context.execution_epoch;
+  if (!Number.isSafeInteger(executionEpoch) || executionEpoch < 1) {
+    throw githubTransportError("projection_github_workflow_context_missing", "GitHub PR transport requires a current local execution epoch from the recorded local master workflow.");
+  }
+  if (!nonEmptyString(context.intent_idempotency_key) || !nonEmptyString(context.result_idempotency_key)) {
+    throw githubTransportError("projection_github_workflow_context_missing", "GitHub PR transport requires recorded projection idempotency keys before any remote write.");
+  }
+  if (!gatePassedForEpoch(context.verification_gate, executionEpoch) || !gatePassedForEpoch(context.internal_review_gate, executionEpoch)) {
+    throw githubTransportError("projection_github_workflow_gates_not_passed", "GitHub PR transport requires current-epoch verification PASS and internal-review PASS from the local master workflow.");
+  }
+}
+
 function safeBodyField(value, fallback = "<unknown>") {
   return nonEmptyString(sanitizeProjectionDurableValue(value)) || fallback;
 }
@@ -391,6 +419,7 @@ export function createGithubCliProjectPr({
     if (!headBranch || !baseBranch) {
       throw githubTransportError("projection_github_stack_incomplete", "GitHub PR transport requires explicit stacked head and base branches.");
     }
+    assertMasterWorkflowContext(context);
 
     const rawTitle = nonEmptyString(context.title) || `Buran handoff for ${context.task_id || context.run_id || "run"}`;
     const title = safeBodyField(rawTitle, "Buran handoff for run");
