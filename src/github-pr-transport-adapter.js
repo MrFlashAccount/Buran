@@ -148,14 +148,39 @@ function githubTransportError(code, message) {
   return projectionContractError(code, message);
 }
 
+function gatePassedForEpoch(gate, executionEpoch) {
+  return isRecord(gate)
+    && gate.status === "PASS"
+    && gate.current_epoch === executionEpoch
+    && Number.isSafeInteger(gate.current_attempt)
+    && gate.current_attempt >= 1;
+}
+
+function assertMasterWorkflowContext(context) {
+  const executionEpoch = context.execution_epoch;
+  if (!Number.isSafeInteger(executionEpoch) || executionEpoch < 1) {
+    throw githubTransportError("projection_github_workflow_context_missing", "GitHub PR transport requires a current local execution epoch from the recorded local master workflow.");
+  }
+  if (!nonEmptyString(context.intent_idempotency_key) || !nonEmptyString(context.result_idempotency_key)) {
+    throw githubTransportError("projection_github_workflow_context_missing", "GitHub PR transport requires recorded projection idempotency keys before any remote write.");
+  }
+  if (!gatePassedForEpoch(context.verification_gate, executionEpoch) || !gatePassedForEpoch(context.internal_review_gate, executionEpoch)) {
+    throw githubTransportError("projection_github_workflow_gates_not_passed", "GitHub PR transport requires current-epoch verification PASS and internal-review PASS from the local master workflow.");
+  }
+}
+
+function safeBodyField(value, fallback = "<unknown>") {
+  return nonEmptyString(sanitizeProjectionDurableValue(value)) || fallback;
+}
+
 function buildDefaultPrBody(context) {
   return [
     "## Buran stacked PR handoff",
     "",
-    `Run: ${context.run_id}`,
-    `Task: ${context.task_id}`,
-    `Base: ${context.base_branch}`,
-    `Head: ${context.head_branch}`,
+    `Run: ${safeBodyField(context.run_id)}`,
+    `Task: ${safeBodyField(context.task_id)}`,
+    `Base: ${safeBodyField(context.base_branch)}`,
+    `Head: ${safeBodyField(context.head_branch)}`,
     "",
     "Local registry remains the source of truth for verification/review artifacts.",
   ].join("\n");
@@ -230,6 +255,7 @@ export function createGithubCliProjectPr({
     if (!headBranch || !baseBranch) {
       throw githubTransportError("projection_github_stack_incomplete", "GitHub PR transport requires explicit stacked head and base branches.");
     }
+    assertMasterWorkflowContext(context);
 
     const title = nonEmptyString(context.title) || `Buran handoff for ${context.task_id || context.run_id || "run"}`;
     const body = nonEmptyString(bodyBuilder(context)) || buildDefaultPrBody(context);

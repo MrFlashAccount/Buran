@@ -41,6 +41,7 @@ This file is the quick source-tree guide for maintainers. It maps the current co
 | `src/internal-review-adapter.js` | local internal-review report generation that treats packet review text as context only. |
 | `src/pr-projection-adapter.js` | local fake PR projection planning, artifact generation, and projection replay helpers. |
 | `src/github-pr-transport-adapter.js` | injectable transport-backed PR projection seam plus disabled-by-default GitHub CLI stacked-PR create/update hook with repo allowlisting, local-first intent, sanitization, and result validation. |
+| `src/workflow-policy.js` | review-ready stack progression policy; exposes prerequisite gates and refuses next-slice starts until local evidence is complete. |
 | `src/projection-contract.js` | projection payload normalization and contract checks shared by projection code. |
 | `src/observability.js` | redaction, public report sanitization, and observability path helpers. |
 
@@ -70,6 +71,7 @@ running -> workspace_preparation artifact -> implementation_dispatch artifact ->
 verification -> verification artifact + gate -> internal_review | fix_loop | blocked_needs_human
 internal_review -> internal-review artifact + gate -> pr_ready | fix_loop | blocked_needs_human
 pr_ready -> projection intent/result artifacts -> ready_for_manual_review
+next slice start -> workflow policy checks previous slice review-ready gates
 recover -> replay + rebuild + quarantine when state is ambiguous
 ```
 
