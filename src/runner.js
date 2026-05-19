@@ -1200,6 +1200,8 @@ async function runInternalReviewStage({ registryRoot, runId, current, previousSt
 async function runPrReadyStage({ registryRoot, runId, current, previousState, stepsTaken, blockers, warnings, workspacePreparation, implementationDispatch, verification, internalReview, clock, actor, prProjectionAdapter = createLocalPrProjectionAdapter() } = {}) {
   let projection = null;
   let plannedProjection;
+  let intentArtifactRef = null;
+  let intentRecordStatus = "not_recorded";
   let projectionExternalSideEffects = Boolean(prProjectionAdapter?.externalSideEffects);
 
   try {
@@ -1219,6 +1221,8 @@ async function runPrReadyStage({ registryRoot, runId, current, previousState, st
       recorded_at: plannedProjection.recordedAt,
     });
     current = intentRecorded.run;
+    intentArtifactRef = intentRecorded.artifact_ref;
+    intentRecordStatus = intentRecorded.status;
     stepsTaken.push(buildStep({
       action: "projection_intent_recorded",
       status: intentRecorded.status === "noop" ? "noop" : "completed",
@@ -1296,7 +1300,8 @@ async function runPrReadyStage({ registryRoot, runId, current, previousState, st
         adapter: prProjectionAdapter?.adapter || "local-github-pr-projection",
         mode: prProjectionAdapter?.mode || "local_fake",
       }),
-      intent_record_status: "blocked",
+      intent_artifact_ref: intentArtifactRef,
+      intent_record_status: intentRecordStatus,
       result_record_status: "blocked",
       problem,
     };
