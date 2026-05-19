@@ -149,8 +149,17 @@ export async function releaseLeaseReport({ registryRoot, runId, clock = () => ne
   };
 }
 
-export async function runLocalMissionReport({ registryRoot, runId, workspaceId = "", workspacePath = "", ttlMs = "", clock = () => new Date(), implementationDispatchAdapter = null } = {}) {
-  return runLocalMission({ registryRoot, runId, workspaceId, workspacePath, ttlMs, clock, ...(implementationDispatchAdapter ? { implementationDispatchAdapter } : {}) });
+export async function runLocalMissionReport({ registryRoot, runId, workspaceId = "", workspacePath = "", ttlMs = "", clock = () => new Date(), implementationDispatchAdapter = null, stackPrerequisite = null } = {}) {
+  return runLocalMission({
+    registryRoot,
+    runId,
+    workspaceId,
+    workspacePath,
+    ttlMs,
+    clock,
+    ...(implementationDispatchAdapter ? { implementationDispatchAdapter } : {}),
+    ...(stackPrerequisite ? { stackPrerequisite } : {}),
+  });
 }
 
 export function formatBuranReport(report) {
@@ -217,7 +226,7 @@ export function formatBuranReport(report) {
     if (report.warnings?.length) {
       for (const warning of report.warnings) lines.push(`Warning: ${warning.code}: ${warning.message}`);
     }
-    lines.push("External side effects: no");
+    lines.push(`External side effects: ${report.external_side_effects ? "yes" : "no"}`);
     return withObservabilityLines(lines.join("\n"), report);
   }
   if (report.mode === "lease_acquire") {

@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
-import { formatBuranReport } from "../src/buran.js";
+import { formatBuranReport, runLocalMissionReport } from "../src/buran.js";
 import { runBuranCli } from "../src/cli.js";
 import { createGithubCliProjectPr, createGithubPrTransportAdapter } from "../src/github-pr-transport-adapter.js";
 import { acquireWorkspaceLease } from "../src/locks.js";
@@ -624,6 +624,36 @@ test("local runner refuses next-slice work when the prerequisite slice is not re
   assert.equal(result.workflow_policy.allowed_to_start_next_slice, false);
   assert.ok(result.workflow_policy.gates.some((gate) => gate.name === "review_ready_terminal_state" && gate.status === "BLOCKED"));
   assert.equal(snapshot.state, "queued");
+});
+
+
+test("run local report wrapper forwards stack prerequisites and formats side-effect status", async () => {
+  const tempDir = await makeTempDir();
+  const registryRoot = path.join(tempDir, "registry");
+  const nextRun = await createRunFromPacketReport(packetReport("run_policy_report_next_slice"), {
+    registryRoot,
+    clock: () => new Date("2026-05-16T13:52:00.000Z"),
+  });
+
+  const result = await runLocalMissionReport({
+    registryRoot,
+    runId: nextRun.run.run_id,
+    stackPrerequisite: {
+      snapshot: reviewReadyPolicySnapshot({ runId: "run_policy_report_previous_slice", state: "pr_ready" }),
+      currentSlice: "slice 5",
+      nextSlice: "slice 6",
+    },
+    clock: () => new Date("2026-05-16T13:53:00.000Z"),
+  });
+
+  assert.equal(result.outcome, "blocked");
+  assert.equal(result.workflow_policy.allowed_to_start_next_slice, false);
+  assert.equal(result.blockers[0].code, "stack_prerequisite_not_review_ready");
+  assert.match(formatBuranReport({
+    ...result,
+    mode: "run_local",
+    external_side_effects: true,
+  }), /External side effects: yes/);
 });
 
 test("workflow policy remains blocked after recovery when durable gates are incomplete", async () => {
@@ -3017,6 +3047,7 @@ test("github cli PR transport builds a minimal noninteractive env by default", a
     head_branch: "feature/minimal-env",
     base_branch: "main",
     title: "Buran handoff",
+    ...passedProjectionWorkflowContext(),
   });
 
   assert.ok(calls.length >= 3);
@@ -3315,10 +3346,48 @@ test("github cli PR transport rejects incomplete view payloads instead of defaul
       head_branch: "feature/missing-draft",
       base_branch: "main",
       title: "Buran handoff",
+      ...passedProjectionWorkflowContext(),
     }),
     /isDraft as a boolean/i,
   );
 });
+
+
+test("transport-backed PR projection blocks live transport without artifact-backed workflow gates", async () => {
+  let transportCalls = 0;
+  const snapshot = {
+    run_id: "run_transport_missing_gate_artifacts",
+    task_id: "task-transport-missing-gate-artifacts",
+    state: "pr_ready",
+    execution: { current_epoch: 1 },
+    gates: {
+      verification: { status: "PASS", current_epoch: 1, current_attempt: 1, artifact_refs: [] },
+      internal_review: { status: "PASS", current_epoch: 1, current_attempt: 1, artifact_refs: [] },
+    },
+    github: {
+      repo: "example-owner/example-repo",
+      issue_number: 17,
+      intended_branch: "feature/missing-gate-artifacts",
+      base_branch: "main",
+    },
+    projections: {},
+  };
+  const prProjectionAdapter = createGithubPrTransportAdapter({
+    externalSideEffects: true,
+    projectPr() {
+      transportCalls += 1;
+      return { status: "created", number: 99, url: "https://github.com/example-owner/example-repo/pull/99", draft: true };
+    },
+  });
+  const plan = prProjectionAdapter.plan(snapshot, { clock: () => new Date("2026-05-19T00:00:00.000Z"), actor: "test" });
+
+  await assert.rejects(
+    () => prProjectionAdapter.execute(snapshot, plan),
+    /verification PASS and internal-review PASS/i,
+  );
+  assert.equal(transportCalls, 0);
+});
+
 
 test("transport-backed PR projection preserves contract-valid repo and branch values until durable sanitization", async () => {
   const snapshot = {

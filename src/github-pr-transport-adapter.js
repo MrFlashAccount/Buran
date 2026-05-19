@@ -159,7 +159,7 @@ export function createGithubPrTransportAdapter({
       });
     },
     async execute(snapshot, plan) {
-      const transportResult = await projectPr({
+      const transportContext = {
         run_id: snapshot?.run_id || "",
         task_id: snapshot?.task_id || "",
         repo: plan.repo,
@@ -173,7 +173,9 @@ export function createGithubPrTransportAdapter({
         verification_gate: plan.verificationGate,
         internal_review_gate: plan.internalReviewGate,
         existing_github_pr: snapshot?.github?.pr || null,
-      });
+      };
+      if (externalSideEffects) assertMasterWorkflowContext(transportContext);
+      const transportResult = await projectPr(transportContext);
       const normalized = normalizeTransportProjectionResult(transportResult, plan, { githubHost });
       return buildPrProjectionResult(snapshot, plan, {
         status: normalized.status,
