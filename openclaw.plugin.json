@@ -3,8 +3,17 @@
   "name": "Buran",
   "description": "Local JSON-first Buran boundary for approved GitHub implementation packets.",
   "activation": {
-    "onStartup": false
+    "onStartup": false,
+    "onCommands": [
+      "buran"
+    ]
   },
+  "commandAliases": [
+    {
+      "name": "buran",
+      "kind": "runtime-slash"
+    }
+  ],
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
