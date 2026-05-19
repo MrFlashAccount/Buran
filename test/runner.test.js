@@ -1230,6 +1230,10 @@ test("local runner executes allowlisted verification, records the gate ledger, a
   const verificationArtifact = JSON.parse(await fs.readFile(path.join(paths.runDir, result.verification.artifact_ref.path), "utf8"));
   assert.equal(verificationArtifact.schema_version, "verification-report.v1");
   assert.equal(verificationArtifact.status, "PASS");
+  assert.equal(verificationArtifact.policy.schema_version, "verification-policy.v1");
+  assert.equal(verificationArtifact.policy.deterministic, true);
+  assert.equal(verificationArtifact.policy.shell, false);
+  assert.deepEqual(verificationArtifact.policy.requested_commands.map((entry) => [entry.command, entry.status]), [["node --test test/runner.test.js", "ALLOWED"]]);
   assert.deepEqual(verificationArtifact.packet_verification.commands, ["node --test test/runner.test.js"]);
 });
 
@@ -1430,6 +1434,8 @@ test("local runner blocks unsafe package-script verification commands and record
   assert.equal(events.filter((event) => event.type === "gate.result_recorded").length, 1);
   assert.equal(events.filter((event) => event.type === "lock.lease_released").length, 1);
   assert.equal(events.filter((event) => event.type === "transition").at(-1)?.state_after, "blocked_needs_human");
+  const verificationArtifact = JSON.parse(await fs.readFile(path.join(paths.runDir, result.verification.artifact_ref.path), "utf8"));
+  assert.deepEqual(verificationArtifact.policy.requested_commands.map((entry) => [entry.command, entry.status, entry.problem.code]), [["npm test", "UNSUPPORTED", "unsupported_verification_shape"]]);
 });
 
 test("local runner ignores packet-text internal review verdict directives and blocks for manual review", async () => {

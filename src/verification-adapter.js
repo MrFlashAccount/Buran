@@ -23,6 +23,7 @@ import { nonEmptyString, sha256Hex } from "./utils.js";
 const execFileAsync = promisify(execFile);
 
 const VERIFICATION_ADAPTER_ID = "local-verification-allowlist.v1";
+const VERIFICATION_POLICY_SCHEMA_VERSION = "verification-policy.v1";
 const VERIFICATION_ACTOR = "local-verification-adapter";
 const COMMAND_TIMEOUT_MS = 300_000;
 const OUTPUT_LIMIT = 8_000;
@@ -98,6 +99,36 @@ function commandShapeProblem(command) {
   };
 }
 
+export function buildVerificationPolicy(commands = []) {
+  const requestedCommands = Array.isArray(commands) ? commands.map(nonEmptyString).filter(Boolean) : [];
+  const allowedCommands = Object.keys(COMMAND_SPECS).sort();
+  const entries = requestedCommands.map((command) => {
+    const spec = commandSpec(command);
+    return spec
+      ? {
+          command,
+          status: "ALLOWED",
+          adapter_command: [spec.file, ...spec.args].join(" "),
+          execution: "execFile_no_shell",
+        }
+      : {
+          command,
+          status: "UNSUPPORTED",
+          problem: commandShapeProblem(command),
+        };
+  });
+  return {
+    schema_version: VERIFICATION_POLICY_SCHEMA_VERSION,
+    adapter: VERIFICATION_ADAPTER_ID,
+    deterministic: true,
+    shell: false,
+    pass_requires_at_least_one_allowed_command: true,
+    allowed_commands: allowedCommands,
+    requested_commands: entries,
+  };
+}
+
+
 function buildCommandEnv() {
   return SAFE_ENV_KEYS.reduce((environment, key) => {
     if (nonEmptyString(process.env[key])) environment[key] = process.env[key];
@@ -129,10 +160,12 @@ function buildArtifactPayload({
   startedAt,
   finishedAt,
   contexts,
+  policy = buildVerificationPolicy(verification.commands),
 } = {}) {
   return sanitizeValue({
     schema_version: "verification-report.v1",
     adapter: VERIFICATION_ADAPTER_ID,
+    policy,
     run_id: runId,
     gate_name: "verification",
     execution_epoch: executionEpoch,
