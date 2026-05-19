@@ -579,6 +579,21 @@ test("workflow policy exposes review-ready gates and allows the next stacked sli
   assert.equal(notReady.allowed_to_start_next_slice, false);
   assert.ok(notReady.blockers.some((blocker) => blocker.gate === "review_ready_terminal_state"));
   assert.throws(() => assertNextSliceAllowed(reviewReadyPolicySnapshot({ state: "pr_ready" })), /ready_for_manual_review/);
+
+  const intentOnly = structuredClone(reviewReadyPolicySnapshot());
+  intentOnly.artifacts.recorded.by_path["artifacts/implementation-dispatch/result.json"].provenance = {
+    kind: "implementation-dispatch-intent",
+    status: "COMPLETED",
+  };
+  const blockedIntentOnly = evaluateReviewReadyPolicy(intentOnly);
+  assert.equal(blockedIntentOnly.allowed_to_start_next_slice, false);
+  assert.ok(blockedIntentOnly.blockers.some((blocker) => blocker.gate === "implementation_handoff"));
+
+  const blockedDispatch = structuredClone(reviewReadyPolicySnapshot());
+  blockedDispatch.artifacts.recorded.by_path["artifacts/implementation-dispatch/result.json"].provenance.status = "BLOCKED";
+  const blockedImplementation = evaluateReviewReadyPolicy(blockedDispatch);
+  assert.equal(blockedImplementation.allowed_to_start_next_slice, false);
+  assert.ok(blockedImplementation.blockers.some((blocker) => blocker.gate === "implementation_handoff"));
 });
 
 test("local runner refuses next-slice work when the prerequisite slice is not review-ready", async () => {

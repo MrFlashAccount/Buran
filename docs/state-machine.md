@@ -108,7 +108,7 @@ Any attempted transition from one of these states is invalid. Recovery treats te
 
 ## Stack progression policy
 
-A next stacked slice may start only after the prerequisite slice is locally review-ready. The policy is evaluated from durable registry evidence: approved packet/architect contract artifact, implementation handoff artifact, fresh verification PASS, fresh independent-review PASS, successful PR projection, and terminal `ready_for_manual_review` state. If recovery rebuilds an incomplete prerequisite snapshot, the same policy remains blocked; recovery does not synthesize missing gates or treat remote PR state as authority.
+A next stacked slice may start only after the prerequisite slice is locally review-ready. The policy is evaluated from durable registry evidence: approved packet/architect contract artifact, completed implementation dispatch/fix result artifact, fresh verification PASS, fresh independent-review PASS, successful PR projection, and terminal `ready_for_manual_review` state. If recovery rebuilds an incomplete prerequisite snapshot, the same policy remains blocked; recovery does not synthesize missing gates or treat remote PR state as authority.
 
 ## Event ordering
 

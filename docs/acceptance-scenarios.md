@@ -145,7 +145,7 @@ These scenarios summarize the behavior the current branch already proves through
 
 ### Scenario: next slice waits for review-ready evidence
 - Given a prerequisite slice run is not terminal in `ready_for_manual_review`
-- Or its implementation handoff, verification PASS, independent review PASS, or PR projection evidence is missing
+- Or its completed implementation dispatch/fix result, verification PASS, independent review PASS, or PR projection evidence is missing
 - When a next stacked slice tries to start with that prerequisite
 - Then Buran blocks before mutating the next run
 - And the runner report lists every prerequisite gate as `PASS` or `BLOCKED`

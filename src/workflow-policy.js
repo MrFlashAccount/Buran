@@ -34,6 +34,12 @@ function hasRecordedArtifact(snapshot, gateName, predicate = () => true) {
   return recordedArtifacts(snapshot).some((artifact) => artifact?.gate_name === gateName && artifactRefOk(artifact) && predicate(artifact));
 }
 
+function completedImplementationEvidence(artifact) {
+  const provenance = artifact?.provenance;
+  return (provenance?.kind === "implementation-dispatch-result" || provenance?.kind === "fix-attempt-result")
+    && provenance?.status === "COMPLETED";
+}
+
 function gate(name, ok, detail, evidence = {}) {
   return {
     name,
@@ -104,7 +110,11 @@ export function evaluateReviewReadyPolicy(snapshot, { currentSlice = "", nextSli
   const implementationReady = hasRecordedArtifact(
     snapshot,
     "implementation_dispatch",
-    (artifact) => artifact.execution_epoch === 0 || artifact.execution_epoch === epoch,
+    (artifact) => completedImplementationEvidence(artifact) && (artifact.execution_epoch === 0 || artifact.execution_epoch === epoch),
+  ) || hasRecordedArtifact(
+    snapshot,
+    "fix_attempt",
+    (artifact) => completedImplementationEvidence(artifact) && artifact.execution_epoch === epoch,
   );
   const verificationReady = freshGatePassed(snapshot, "verification");
   const reviewReady = freshGatePassed(snapshot, "internal_review");
@@ -118,8 +128,8 @@ export function evaluateReviewReadyPolicy(snapshot, { currentSlice = "", nextSli
         artifact_ref: snapshot?.artifacts?.packet || null,
       }),
     gate("implementation_handoff", implementationReady, implementationReady
-      ? "Implementation dispatch/fix evidence is recorded in the local artifact ledger."
-      : "Implementation dispatch evidence is missing from the local artifact ledger.", {
+      ? "Completed implementation dispatch/fix evidence is recorded in the local artifact ledger."
+      : "Completed implementation dispatch/fix result evidence is missing from the local artifact ledger.", {
         current_epoch: epoch,
       }),
     gate("verification", verificationReady, verificationReady
