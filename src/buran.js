@@ -160,10 +160,12 @@ export function formatBuranReport(report) {
     }
     if (report.implementation_dispatch) {
       const dispatch = report.implementation_dispatch;
-      if (dispatch.artifact_ref?.path) {
-        lines.push(`Implementation dispatch: ${dispatch.status}; artifact=${dispatch.artifact_ref.path}`);
-      } else if (dispatch.blocker?.code) {
-        lines.push(`Implementation dispatch: ${dispatch.status}; blocker=${dispatch.blocker.code}`);
+      if (dispatch.result_artifact_ref?.path) {
+        lines.push(`Implementation dispatch: ${dispatch.status}; result=${dispatch.result_artifact_ref.path}`);
+      } else if (dispatch.intent_artifact_ref?.path) {
+        lines.push(`Implementation dispatch: ${dispatch.status}; intent=${dispatch.intent_artifact_ref.path}`);
+      } else if (dispatch.problem?.code) {
+        lines.push(`Implementation dispatch: ${dispatch.status}; problem=${dispatch.problem.code}`);
       }
     }
     if (report.verification) {

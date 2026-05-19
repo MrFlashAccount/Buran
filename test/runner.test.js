@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
+import { formatBuranReport } from "../src/buran.js";
 import { runBuranCli } from "../src/cli.js";
 import { createGithubPrTransportAdapter } from "../src/github-pr-transport-adapter.js";
 import { acquireWorkspaceLease } from "../src/locks.js";
@@ -398,14 +399,15 @@ test("local runner can acquire a local lease and blocks when implementation harn
   assert.deepEqual(second.steps_taken.map((step) => [step.action, step.status, step.to_state]), [
     ["workspace_preparation", "noop", "running"],
     ["implementation_dispatch_intent", "noop", "running"],
-    ["implementation_dispatch_result", "noop", "running"],
+    ["implementation_dispatch_result", "blocked", "running"],
   ]);
   assert.equal(second.blockers[0].code, "implementation_dispatch_blocked");
   assert.equal(second.workspace_preparation.artifact_record_status, "noop");
   assert.deepEqual(second.workspace_preparation.artifact_ref, first.workspace_preparation.artifact_ref);
   assert.equal(second.implementation_dispatch.status, "BLOCKED");
   assert.equal(second.implementation_dispatch.intent_record_status, "noop");
-  assert.equal(second.implementation_dispatch.result_record_status, "noop");
+  assert.equal(second.implementation_dispatch.result_record_status, "stale_recorded_result");
+  assert.equal(second.implementation_dispatch.problem.code, "implementation_dispatch_result_artifact_missing");
   assert.deepEqual(second.implementation_dispatch.intent_artifact_ref, first.implementation_dispatch.intent_artifact_ref);
   assert.deepEqual(second.implementation_dispatch.result_artifact_ref, first.implementation_dispatch.result_artifact_ref);
   assert.equal(eventsAfterSecond.length, eventsAfterFirst.length);
@@ -415,23 +417,24 @@ test("local runner can acquire a local lease and blocks when implementation harn
   assert.equal(recoveredDispatchArtifact.dispatch_status, "dispatch_requested");
   assert.deepEqual(recoveredDispatchArtifact.workspace_preparation_artifact, first.workspace_preparation.artifact_ref);
   assert.deepEqual(recoveredDispatchArtifact.packet_artifact, snapshotAfterFirst.artifacts.packet);
-  const recoveredDispatchResultArtifact = JSON.parse(await fs.readFile(dispatchResultArtifactPath, "utf8"));
-  assert.equal(recoveredDispatchResultArtifact.schema_version, "implementation-dispatch-result.v1");
-  assert.equal(recoveredDispatchResultArtifact.status, "BLOCKED");
+  await assert.rejects(() => fs.readFile(dispatchResultArtifactPath, "utf8"), /ENOENT/);
 
   const recovery = await recoverRegistry(registryRoot, { clock: () => new Date("2026-05-16T13:55:00.000Z") });
-  assert.equal(recovery.summary.quarantined_runs, 0);
+  assert.equal(recovery.summary.quarantined_runs, 1);
 });
 
 
 test("local runner blocks completed implementation dispatch results that omit immutable evidence", async () => {
   const scenarios = [
-    ["missing", undefined],
-    ["empty", {}],
-    ["non-object", "worker stdout blob"],
+    ["missing", undefined, {}],
+    ["empty", {}, {}],
+    ["non-object", "worker stdout blob", {}],
+    ["weak-arbitrary-object", { looks_plausible: true }, {}],
+    ["weak-result-id-only", { implementation_result_id: "impl-weak" }, { implementation_result_id: "impl-weak" }],
+    ["weak-files-only", { files_changed: ["src/example.js"] }, { files_changed: ["src/example.js"] }],
   ];
 
-  for (const [suffix, evidence] of scenarios) {
+  for (const [suffix, evidence, expectedEvidence] of scenarios) {
     const tempDir = await makeTempDir();
     const registryRoot = path.join(tempDir, "registry");
     const intendedBranch = `user/run_runner_dispatch_${suffix}`;
@@ -465,7 +468,7 @@ test("local runner blocks completed implementation dispatch results that omit im
     assert.equal(result.current_state, "running");
     assert.equal(result.implementation_dispatch.status, "BLOCKED");
     assert.equal(result.implementation_dispatch.problem.code, "implementation_dispatch_evidence_required");
-    assert.equal(result.implementation_dispatch.evidence && Object.keys(result.implementation_dispatch.evidence).length, 0);
+    assert.deepEqual(result.implementation_dispatch.evidence, expectedEvidence);
     assert.equal(result.blockers[0].code, "implementation_dispatch_blocked");
     assert.equal(result.blockers[0].dispatch_status, "BLOCKED");
 
@@ -475,7 +478,61 @@ test("local runner blocks completed implementation dispatch results that omit im
     const dispatchResultArtifact = JSON.parse(await fs.readFile(path.join(paths.runDir, result.implementation_dispatch.result_artifact_ref.path), "utf8"));
     assert.equal(dispatchResultArtifact.status, "BLOCKED");
     assert.equal(dispatchResultArtifact.problem.code, "implementation_dispatch_evidence_required");
-    assert.deepEqual(dispatchResultArtifact.evidence, {});
+    assert.deepEqual(dispatchResultArtifact.evidence, expectedEvidence);
+  }
+});
+
+test("local runner sanitizes dispatch summary and problem fields before persistence", async () => {
+  const tempDir = await makeTempDir();
+  const registryRoot = path.join(tempDir, "registry");
+  const intendedBranch = "user/run_runner_dispatch_sanitize_report";
+  const workspacePath = await createLocalGitWorkspace(tempDir, intendedBranch);
+  const created = await createRunFromPacketReport(packetReport("run_runner_dispatch_sanitize_report", { intendedBranch }), {
+    registryRoot,
+    clock: () => new Date("2026-05-16T13:52:00.000Z"),
+  });
+
+  const result = await runLocalMission({
+    registryRoot,
+    runId: created.run.run_id,
+    workspaceId: "ws-runner-dispatch-sanitize-report",
+    workspacePath,
+    clock: () => new Date("2026-05-16T13:53:00.000Z"),
+    implementationDispatchAdapter: {
+      adapter: "test-implementation-harness",
+      async execute() {
+        return {
+          status: "BLOCKED",
+          adapter: "test-implementation-harness",
+          actor: "test-implementation-harness",
+          summary: "BEGIN PROMPT raw worker instruction must not persist",
+          problem: {
+            code: "adapter_leaked_stdout",
+            message: "stderr blob and raw transcript must not persist",
+            stdout: "stdout blob must not persist",
+            transcript: "session transcript must not persist",
+          },
+          evidence: { stdout: "stdout blob must not persist" },
+        };
+      },
+    },
+  });
+
+  assert.equal(result.outcome, "blocked");
+  assert.equal(result.implementation_dispatch.status, "BLOCKED");
+  assert.equal(result.implementation_dispatch.summary, "Implementation harness dispatch is blocked.");
+  assert.equal(result.implementation_dispatch.problem.code, "implementation_dispatch_blocked");
+  assert.equal(result.implementation_dispatch.problem.message, "Implementation harness dispatch is blocked.");
+
+  const paths = getRunPaths(registryRoot, created.run.run_id);
+  const artifactText = await fs.readFile(path.join(paths.runDir, result.implementation_dispatch.result_artifact_ref.path), "utf8");
+  const publicReportText = JSON.stringify(result.implementation_dispatch);
+  for (const text of [artifactText, publicReportText]) {
+    assert.equal(text.includes("BEGIN PROMPT"), false);
+    assert.equal(text.includes("stderr blob"), false);
+    assert.equal(text.includes("stdout blob"), false);
+    assert.equal(text.includes("session transcript"), false);
+    assert.equal(text.includes("raw transcript"), false);
   }
 });
 
@@ -555,6 +612,181 @@ test("local runner advances to verification only after sanitized immutable imple
   assert.equal("stderr" in dispatchResultArtifact.evidence, false);
   assert.equal("output" in dispatchResultArtifact.evidence, false);
   assert.equal("transcript" in dispatchResultArtifact.evidence, false);
+});
+
+test("local runner reuses an existing dispatch result artifact without invoking the adapter again", async () => {
+  const tempDir = await makeTempDir();
+  const registryRoot = path.join(tempDir, "registry");
+  const intendedBranch = "user/run_runner_dispatch_resume";
+  const workspacePath = await createLocalGitWorkspace(tempDir, intendedBranch);
+  const created = await createRunFromPacketReport(packetReport("run_runner_dispatch_resume", { intendedBranch }), {
+    registryRoot,
+    clock: () => new Date("2026-05-16T13:52:00.000Z"),
+  });
+  let adapterCalls = 0;
+
+  const first = await runLocalMission({
+    registryRoot,
+    runId: created.run.run_id,
+    workspaceId: "ws-runner-dispatch-resume",
+    workspacePath,
+    clock: () => new Date("2026-05-16T13:53:00.000Z"),
+    implementationDispatchAdapter: {
+      adapter: "test-implementation-harness",
+      async execute() {
+        adapterCalls += 1;
+        return {
+          status: "BLOCKED",
+          adapter: "test-implementation-harness",
+          actor: "test-implementation-harness",
+          problem: { code: "waiting_for_worker", message: "Worker has not finished yet." },
+        };
+      },
+    },
+  });
+
+  const paths = getRunPaths(registryRoot, created.run.run_id);
+  const eventsAfterFirst = await readEventsFile(paths.eventsPath);
+  assert.equal(adapterCalls, 1);
+  assert.equal(first.current_state, "running");
+  assert.equal(first.implementation_dispatch.result_record_status, "recorded");
+
+  const second = await runLocalMission({
+    registryRoot,
+    runId: created.run.run_id,
+    clock: () => new Date("2026-05-16T13:54:00.000Z"),
+    implementationDispatchAdapter: {
+      adapter: "test-implementation-harness",
+      async execute() {
+        adapterCalls += 1;
+        throw new Error("adapter must not be called when current dispatch result exists");
+      },
+    },
+  });
+  const eventsAfterSecond = await readEventsFile(paths.eventsPath);
+
+  assert.equal(adapterCalls, 1);
+  assert.equal(second.outcome, "blocked");
+  assert.equal(second.current_state, "running");
+  assert.equal(second.implementation_dispatch.resumed_recorded_result, true);
+  assert.equal(second.implementation_dispatch.result_record_status, "noop");
+  assert.deepEqual(second.implementation_dispatch.result_artifact_ref, first.implementation_dispatch.result_artifact_ref);
+  assert.equal(eventsAfterSecond.length, eventsAfterFirst.length);
+  assert.deepEqual(second.steps_taken.map((step) => [step.action, step.status, step.to_state]), [
+    ["workspace_preparation", "noop", "running"],
+    ["implementation_dispatch_intent", "noop", "running"],
+    ["implementation_dispatch_result", "noop", "running"],
+  ]);
+});
+
+test("local runner blocks dispatch resume when the recorded result artifact is missing", async () => {
+  const tempDir = await makeTempDir();
+  const registryRoot = path.join(tempDir, "registry");
+  const intendedBranch = "user/run_runner_dispatch_resume_missing";
+  const workspacePath = await createLocalGitWorkspace(tempDir, intendedBranch);
+  const created = await createRunFromPacketReport(packetReport("run_runner_dispatch_resume_missing", { intendedBranch }), {
+    registryRoot,
+    clock: () => new Date("2026-05-16T13:52:00.000Z"),
+  });
+  let adapterCalls = 0;
+
+  const first = await runLocalMission({
+    registryRoot,
+    runId: created.run.run_id,
+    workspaceId: "ws-runner-dispatch-resume-missing",
+    workspacePath,
+    clock: () => new Date("2026-05-16T13:53:00.000Z"),
+    implementationDispatchAdapter: {
+      adapter: "test-implementation-harness",
+      async execute() {
+        adapterCalls += 1;
+        return {
+          status: "BLOCKED",
+          adapter: "test-implementation-harness",
+          actor: "test-implementation-harness",
+          problem: { code: "waiting_for_worker", message: "Worker has not finished yet." },
+        };
+      },
+    },
+  });
+
+  const paths = getRunPaths(registryRoot, created.run.run_id);
+  const eventsAfterFirst = await readEventsFile(paths.eventsPath);
+  await fs.rm(path.join(paths.runDir, first.implementation_dispatch.result_artifact_ref.path), { force: true });
+
+  const second = await runLocalMission({
+    registryRoot,
+    runId: created.run.run_id,
+    clock: () => new Date("2026-05-16T13:54:00.000Z"),
+    implementationDispatchAdapter: {
+      adapter: "test-implementation-harness",
+      async execute() {
+        adapterCalls += 1;
+        throw new Error("adapter must not be called when a recorded result head is missing");
+      },
+    },
+  });
+  const eventsAfterSecond = await readEventsFile(paths.eventsPath);
+
+  assert.equal(adapterCalls, 1);
+  assert.equal(second.outcome, "blocked");
+  assert.equal(second.current_state, "running");
+  assert.equal(second.implementation_dispatch.resumed_recorded_result, false);
+  assert.equal(second.implementation_dispatch.result_record_status, "stale_recorded_result");
+  assert.equal(second.implementation_dispatch.problem.code, "implementation_dispatch_result_artifact_missing");
+  assert.equal(eventsAfterSecond.length, eventsAfterFirst.length);
+});
+
+test("local runner transitions failed implementation dispatch to failed_execution", async () => {
+  const tempDir = await makeTempDir();
+  const registryRoot = path.join(tempDir, "registry");
+  const intendedBranch = "user/run_runner_dispatch_failed";
+  const workspacePath = await createLocalGitWorkspace(tempDir, intendedBranch);
+  const created = await createRunFromPacketReport(packetReport("run_runner_dispatch_failed", { intendedBranch }), {
+    registryRoot,
+    clock: () => new Date("2026-05-16T13:52:00.000Z"),
+  });
+
+  const result = await runLocalMission({
+    registryRoot,
+    runId: created.run.run_id,
+    workspaceId: "ws-runner-dispatch-failed",
+    workspacePath,
+    clock: () => new Date("2026-05-16T13:53:00.000Z"),
+    implementationDispatchAdapter: {
+      adapter: "test-implementation-harness",
+      async execute() {
+        return {
+          status: "FAILED",
+          adapter: "test-implementation-harness",
+          actor: "test-implementation-harness",
+          problem: { code: "worker_failed", message: "Worker failed." },
+        };
+      },
+    },
+  });
+
+  assert.equal(result.outcome, "failed");
+  assert.equal(result.current_state, "failed_execution");
+  assert.equal(result.implementation_dispatch.status, "FAILED");
+  assert.equal(result.implementation_dispatch.problem.code, "worker_failed");
+  assert.equal(result.blockers[0].code, "implementation_dispatch_failed");
+  assert.deepEqual(result.steps_taken.map((step) => [step.action, step.status, step.to_state]), [
+    ["transition", "completed", "waiting_for_lock"],
+    ["lease_acquire", "completed", "running"],
+    ["workspace_preparation", "completed", "running"],
+    ["implementation_dispatch_intent", "completed", "running"],
+    ["implementation_dispatch_result", "failed", "running"],
+    ["transition", "completed", "failed_execution"],
+  ]);
+
+  const paths = getRunPaths(registryRoot, created.run.run_id);
+  const snapshot = await readRunSnapshot(paths.runPath);
+  assert.equal(snapshot.state, "failed_execution");
+  assert.equal(snapshot.workspace.lease_status, "released");
+  const dispatchResultArtifact = JSON.parse(await fs.readFile(path.join(paths.runDir, result.implementation_dispatch.result_artifact_ref.path), "utf8"));
+  assert.equal(dispatchResultArtifact.status, "FAILED");
+  assert.equal(dispatchResultArtifact.problem.code, "worker_failed");
 });
 
 test("local runner blocks running workspace preparation when workspace path is missing from the active lease snapshot", async () => {
@@ -1632,6 +1864,28 @@ test("local runner blocks pr_ready when base branch is missing from the local co
   ]);
   assert.equal(events.filter((event) => event.type === "projection.intent_recorded").length, 0);
   assert.equal(events.filter((event) => event.type === "projection.result_recorded").length, 0);
+});
+
+test("run report formatter prints implementation dispatch result artifact and problem fields", () => {
+  const text = formatBuranReport({
+    mode: "run_local",
+    registry_root: "/tmp/registry",
+    run_id: "run_formatter_dispatch",
+    outcome: "blocked",
+    previous_state: "running",
+    current_state: "running",
+    steps_taken: [],
+    implementation_dispatch: {
+      status: "BLOCKED",
+      intent_artifact_ref: { path: "artifacts/implementation-dispatch/intent-abc.json", sha256: "abc" },
+      result_artifact_ref: { path: "artifacts/implementation-dispatch/result-def.json", sha256: "def" },
+      problem: { code: "implementation_dispatch_blocked", message: "blocked" },
+    },
+    blockers: [],
+    warnings: [],
+  });
+
+  assert.match(text, /Implementation dispatch: BLOCKED; result=artifacts\/implementation-dispatch\/result-def\.json/);
 });
 
 test("run CLI returns structured JSON for missing and terminal runs", async () => {

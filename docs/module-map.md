@@ -21,7 +21,7 @@ This file is the quick source-tree guide for maintainers. It maps the current co
 | `src/runner.js` | local mission runner orchestration across `queued`, `waiting_for_lock`, `running`, `verification`, `internal_review`, and `pr_ready`. |
 | `src/locks.js` | workspace lease acquisition, conflict detection, TTL handling, and lease release. |
 | `src/workspace-preparation.js` | local git workspace inspection and immutable preparation artifact content. |
-| `src/implementation-dispatch.js` | deterministic implementation-dispatch handoff artifact builder for the current runner boundary. |
+| `src/implementation-dispatch.js` | implementation-dispatch intent/result artifact builder, result sanitizer, and durable completion-evidence contract. |
 
 ## Registry and persistence
 
@@ -66,7 +66,10 @@ This file is the quick source-tree guide for maintainers. It maps the current co
 ```text
 packet list -> sufficiency -> registry intake -> queued
 queued -> waiting_for_lock -> running
-running -> workspace_preparation artifact -> implementation_dispatch artifact -> stop
+running -> workspace_preparation artifact -> implementation_dispatch intent artifact -> adapter call or reusable result -> sanitized result artifact
+implementation_dispatch COMPLETED + durable evidence -> verification
+implementation_dispatch BLOCKED -> stay running with blocker
+implementation_dispatch FAILED -> failed_execution
 verification -> verification artifact + gate -> internal_review | fix_loop | blocked_needs_human
 internal_review -> internal-review artifact + gate -> pr_ready | fix_loop | blocked_needs_human
 pr_ready -> projection intent/result artifacts -> ready_for_manual_review
@@ -76,7 +79,7 @@ recover -> replay + rebuild + quarantine when state is ambiguous
 ## What is intentionally absent
 
 - no autonomous task discovery
-- no implementation worker execution yet
+- no direct implementation worker execution inside the runner; worker execution is behind the injected implementation-dispatch adapter
 - no fix-loop worker implementation yet
 - no default remote GitHub write path in the CLI/runtime slice
 - no dashboard or backlog management surface

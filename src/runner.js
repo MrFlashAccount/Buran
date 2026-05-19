@@ -3,11 +3,11 @@
  *
  * Responsibility:
  * - advance a single run through the local state machine,
- * - record immutable artifacts for workspace prep, gate execution, and PR projection,
+ * - record immutable artifacts for workspace prep, implementation dispatch, gate execution, and PR projection,
  * - enforce documented transition edges and resume semantics.
  *
  * Non-goals:
- * - no worker execution from the `running` state,
+ * - no direct worker implementation in the runner; implementation execution is delegated only through the injected dispatch adapter,
  * - no implicit lease acquisition without explicit workspace input,
  * - no transport-side writes outside the configured projection adapter path.
  *
@@ -20,14 +20,14 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 
 import { SCHEMA_VERSION, TERMINAL_STATES } from "./constants.js";
-import { buildImplementationDispatchIntent, createUnavailableImplementationDispatchAdapter, executeImplementationDispatch } from "./implementation-dispatch.js";
+import { buildImplementationDispatchIntent, createUnavailableImplementationDispatchAdapter, executeImplementationDispatch, hasMeaningfulImplementationDispatchCompletionEvidence, sanitizeImplementationDispatchEvidence } from "./implementation-dispatch.js";
 import { executeInternalReviewGate } from "./internal-review-adapter.js";
 import { acquireWorkspaceLease } from "./locks.js";
 import { sanitizePublicReportForOutput } from "./observability.js";
 import { buildRecordedPrProjection, createLocalPrProjectionAdapter } from "./pr-projection-adapter.js";
 import { executeVerificationGate } from "./verification-adapter.js";
 import { getRunPaths, readRunSnapshot, recordArtifact, recordGateResult, recordProjectionIntent, recordProjectionResult, transitionRun } from "./registry-store.js";
-import { nonEmptyString, sha256Hex } from "./utils.js";
+import { isRecord, nonEmptyString, sha256Hex } from "./utils.js";
 import { inspectWorkspacePreparation } from "./workspace-preparation.js";
 
 const RUNNER_MODE = "run_local";
@@ -105,6 +105,20 @@ function implementationBoundaryMessage() {
   return "Local mission runner recorded an implementation dispatch handoff but the implementation-harness adapter did not return completed implementation evidence.";
 }
 
+function implementationDispatchStatusSummary(status) {
+  if (status === "COMPLETED") return "Implementation harness dispatch completed and returned durable implementation evidence.";
+  if (status === "FAILED") return "Implementation harness dispatch failed inside the approved envelope.";
+  return "Implementation harness dispatch is blocked.";
+}
+
+function sanitizeImplementationDispatchProblem(status, problem) {
+  if (status === "COMPLETED") return null;
+  const fallbackCode = status === "FAILED" ? "implementation_dispatch_failed" : "implementation_dispatch_blocked";
+  const code = nonEmptyString(problem?.code).toLowerCase().replace(/[^a-z0-9_.:-]+/g, "_").slice(0, 120);
+  const unsafeCode = /(^|_)(prompt|transcript|stdout|stderr|output|raw|content|body|markdown|log|logs|session)($|_)/i.test(code);
+  return buildIssue((code && !unsafeCode) ? code : fallbackCode, implementationDispatchStatusSummary(status));
+}
+
 function unsupportedStageMessage(state) {
   return `Local mission runner skeleton does not execute ${state} adapters yet.`;
 }
@@ -148,6 +162,112 @@ function sanitizeRunnerReportMessage(message) {
 
 function buildProjectionProblem(code, message, extra = {}) {
   return buildIssue(projectionProblemCode(code), sanitizeRunnerReportMessage(message), extra);
+}
+
+function dispatchResultArtifactSummary(snapshot, dispatchIntentId) {
+  const currentEpoch = snapshot?.execution?.current_epoch;
+  if (!Number.isSafeInteger(currentEpoch)) return null;
+  const artifacts = Object.values(snapshot?.artifacts?.recorded?.by_path || {});
+  return artifacts
+    .filter((summary) => summary?.gate_name === "implementation_dispatch"
+      && summary?.recorded_from_state === "running"
+      && summary?.execution_epoch === currentEpoch
+      && summary?.provenance?.kind === "implementation-dispatch-result"
+      && summary?.provenance?.dispatch_intent_id === dispatchIntentId
+      && nonEmptyString(summary?.path)
+      && nonEmptyString(summary?.sha256))
+    .sort((left, right) => nonEmptyString(right.recorded_at).localeCompare(nonEmptyString(left.recorded_at)) || nonEmptyString(right.path).localeCompare(nonEmptyString(left.path)))[0] || null;
+}
+
+function dispatchResultArtifactProblem(code, message, artifactRef = null) {
+  return buildIssue(`implementation_dispatch_result_${code}`, message, artifactRef ? { result_artifact_ref: artifactRef } : {});
+}
+
+async function readReusableImplementationDispatchResult(runDir, snapshot, intent) {
+  const summary = dispatchResultArtifactSummary(snapshot, intent?.dispatch_intent_id);
+  if (!summary) return null;
+
+  const artifactRef = { path: summary.path, sha256: summary.sha256 };
+  const absoluteArtifactPath = path.join(runDir, summary.path);
+  let artifactContent;
+  try {
+    artifactContent = await fs.readFile(absoluteArtifactPath);
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return {
+        reusable: false,
+        artifact_ref: artifactRef,
+        problem: dispatchResultArtifactProblem(
+          "artifact_missing",
+          `Recorded implementation dispatch result cannot be resumed because artifact ${summary.path} is missing.`,
+          artifactRef,
+        ),
+      };
+    }
+    throw error;
+  }
+
+  if (sha256Hex(artifactContent) !== summary.sha256) {
+    return {
+      reusable: false,
+      artifact_ref: artifactRef,
+      problem: dispatchResultArtifactProblem(
+        "artifact_corrupt",
+        `Recorded implementation dispatch result cannot be resumed because artifact ${summary.path} no longer matches its recorded hash.`,
+        artifactRef,
+      ),
+    };
+  }
+
+  let artifactReport;
+  try {
+    artifactReport = JSON.parse(artifactContent.toString("utf8"));
+  } catch {
+    return {
+      reusable: false,
+      artifact_ref: artifactRef,
+      problem: dispatchResultArtifactProblem(
+        "artifact_invalid",
+        `Recorded implementation dispatch result cannot be resumed because artifact ${summary.path} is not valid JSON.`,
+        artifactRef,
+      ),
+    };
+  }
+
+  if (!isRecord(artifactReport)
+    || artifactReport.schema_version !== "implementation-dispatch-result.v1"
+    || artifactReport.run_id !== snapshot.run_id
+    || artifactReport.dispatch_intent_id !== intent.dispatch_intent_id
+    || !["COMPLETED", "BLOCKED", "FAILED"].includes(artifactReport.status)
+    || (artifactReport.status === "COMPLETED" && !hasMeaningfulImplementationDispatchCompletionEvidence(artifactReport.evidence))) {
+    return {
+      reusable: false,
+      artifact_ref: artifactRef,
+      problem: dispatchResultArtifactProblem(
+        "artifact_invalid",
+        `Recorded implementation dispatch result cannot be resumed because artifact ${summary.path} does not match the current dispatch intent.`,
+        artifactRef,
+      ),
+    };
+  }
+
+  const evidence = sanitizeImplementationDispatchEvidence(artifactReport.evidence);
+  return {
+    reusable: true,
+    artifact_ref: artifactRef,
+    public_report: {
+      status: artifactReport.status,
+      summary: implementationDispatchStatusSummary(artifactReport.status),
+      implementation_epoch: Number.isSafeInteger(artifactReport.implementation_epoch) ? artifactReport.implementation_epoch : 1,
+      evidence,
+      problem: sanitizeImplementationDispatchProblem(artifactReport.status, artifactReport.problem),
+      adapter: nonEmptyString(artifactReport.adapter) || "implementation-harness-dispatch.v1",
+      actor: nonEmptyString(artifactReport.actor) || "implementation-harness-dispatch.v1",
+    },
+    adapter: nonEmptyString(artifactReport.adapter) || "implementation-harness-dispatch.v1",
+    actor: nonEmptyString(artifactReport.actor) || "implementation-harness-dispatch.v1",
+    status: artifactReport.status,
+  };
 }
 
 async function readRecordedArtifactJson(runDir, artifactRef) {
@@ -902,9 +1022,12 @@ async function runPrReadyStage({ registryRoot, runId, current, previousState, st
  * Runs the local orchestration slice for a single registry run.
  *
  * The runner owns state advancement, artifact recording, and adapter invocation for
- * verification, internal review, and PR projection. It intentionally blocks in
- * `running` after recording workspace preparation and implementation dispatch, because
- * worker execution belongs to a separate boundary.
+ * implementation dispatch, verification, internal review, and PR projection. In
+ * `running`, it records workspace-preparation and dispatch-intent artifacts, invokes
+ * the configured implementation-dispatch adapter only when no current result artifact
+ * is already reusable, records the sanitized result artifact, and advances to
+ * verification only after durable completion evidence. BLOCKED results stay in
+ * `running`; FAILED results transition to `failed_execution`.
  *
  * @param {object} params
  * @param {string} params.registryRoot Absolute registry root that stores run snapshots.
@@ -914,6 +1037,8 @@ async function runPrReadyStage({ registryRoot, runId, current, previousState, st
  * @param {string|number} [params.ttlMs=""] Optional lease TTL forwarded to lease acquisition.
  * @param {() => Date} [params.clock=() => new Date()] Clock source used for artifact timestamps and transitions.
  * @param {string} [params.actor=RUNNER_ACTOR] Actor name recorded on state transitions and artifacts.
+ * @param {{adapter?: string, execute(options: object): Promise<object>}} [params.implementationDispatchAdapter=createUnavailableImplementationDispatchAdapter()]
+ * Implementation-dispatch adapter invoked from `running` only when no current result artifact can be safely reused.
  * @param {{plan(snapshot: object, options?: object): object, execute(snapshot: object, plan: object, options?: object): Promise<object>, externalSideEffects?: boolean}} [params.prProjectionAdapter=createLocalPrProjectionAdapter()]
  * Projection adapter used when the run reaches `pr_ready`.
  * @returns {Promise<object>} Sanitized public runner report describing completed work, blockers, and current state.
@@ -1155,56 +1280,115 @@ export async function runLocalMission({ registryRoot, runId, workspaceId = "", w
           artifactSha256: dispatchRecorded.artifact_ref.sha256,
         }));
 
-        const dispatchResult = await executeImplementationDispatch({
-          snapshot: current,
-          intent: dispatchIntent.intent,
-          adapter: implementationDispatchAdapter,
-          clock,
-        });
-        const dispatchResultRecorded = await recordArtifact(registryRoot, runId, {
-          artifactPath: dispatchResult.artifact_path,
-          content: dispatchResult.artifact_content,
-          gate_name: "implementation_dispatch",
-          execution_epoch: current.execution?.current_epoch || 0,
-          gate_attempt: 1,
-          recorded_from_state: "running",
-          actor: dispatchResult.actor,
-          recorded_at: dispatchResult.recorded_at,
-          provenance: dispatchResult.provenance,
-        });
-        current = dispatchResultRecorded.run;
-        implementationDispatch = {
-          ...dispatchResult.public_report,
-          intent_artifact_ref: dispatchRecorded.artifact_ref,
-          result_artifact_ref: dispatchResultRecorded.artifact_ref,
-          intent_record_status: dispatchRecorded.status,
-          result_record_status: dispatchResultRecorded.status,
-          workspace_preparation_artifact_ref: recorded.artifact_ref,
-        };
-        stepsTaken.push(buildStep({
-          action: "implementation_dispatch_result",
-          status: dispatchResultRecorded.status === "noop" ? "noop" : dispatchResult.status === "COMPLETED" ? "completed" : "blocked",
-          fromState: "running",
-          toState: "running",
-          detail: dispatchResult.public_report.summary || implementationBoundaryMessage(),
-          sequence: dispatchResultRecorded.event?.sequence ?? null,
-          workspaceId: current.workspace?.id || "",
-          artifactPath: dispatchResultRecorded.artifact_ref.path,
-          artifactSha256: dispatchResultRecorded.artifact_ref.sha256,
-        }));
+        let dispatchResult = null;
+        let dispatchResultRecorded = null;
+        const reusableDispatchResult = await readReusableImplementationDispatchResult(paths.runDir, current, dispatchIntent.intent);
+
+        if (reusableDispatchResult?.reusable === true) {
+          dispatchResult = reusableDispatchResult;
+          implementationDispatch = {
+            ...reusableDispatchResult.public_report,
+            intent_artifact_ref: dispatchRecorded.artifact_ref,
+            result_artifact_ref: reusableDispatchResult.artifact_ref,
+            intent_record_status: dispatchRecorded.status,
+            result_record_status: "noop",
+            resumed_recorded_result: true,
+            workspace_preparation_artifact_ref: recorded.artifact_ref,
+          };
+          stepsTaken.push(buildStep({
+            action: "implementation_dispatch_result",
+            status: "noop",
+            fromState: "running",
+            toState: "running",
+            detail: "Existing current-epoch implementation dispatch result was reused without invoking the adapter.",
+            workspaceId: current.workspace?.id || "",
+            artifactPath: reusableDispatchResult.artifact_ref.path,
+            artifactSha256: reusableDispatchResult.artifact_ref.sha256,
+          }));
+        } else if (reusableDispatchResult?.reusable === false) {
+          implementationDispatch = {
+            status: "BLOCKED",
+            summary: implementationBoundaryMessage(),
+            problem: reusableDispatchResult.problem,
+            intent_artifact_ref: dispatchRecorded.artifact_ref,
+            result_artifact_ref: reusableDispatchResult.artifact_ref,
+            intent_record_status: dispatchRecorded.status,
+            result_record_status: "stale_recorded_result",
+            resumed_recorded_result: false,
+            workspace_preparation_artifact_ref: recorded.artifact_ref,
+          };
+          stepsTaken.push(buildStep({
+            action: "implementation_dispatch_result",
+            status: "blocked",
+            fromState: "running",
+            toState: "running",
+            detail: reusableDispatchResult.problem.message,
+            workspaceId: current.workspace?.id || "",
+            artifactPath: reusableDispatchResult.artifact_ref.path,
+            artifactSha256: reusableDispatchResult.artifact_ref.sha256,
+          }));
+          blockers.push(buildIssue("implementation_dispatch_blocked", implementationBoundaryMessage(), {
+            dispatch_status: implementationDispatch.status,
+            problem: implementationDispatch.problem,
+            intent_artifact_ref: implementationDispatch.intent_artifact_ref,
+            result_artifact_ref: implementationDispatch.result_artifact_ref,
+          }));
+        } else {
+          dispatchResult = await executeImplementationDispatch({
+            snapshot: current,
+            intent: dispatchIntent.intent,
+            adapter: implementationDispatchAdapter,
+            clock,
+          });
+          dispatchResultRecorded = await recordArtifact(registryRoot, runId, {
+            artifactPath: dispatchResult.artifact_path,
+            content: dispatchResult.artifact_content,
+            gate_name: "implementation_dispatch",
+            execution_epoch: current.execution?.current_epoch || 0,
+            gate_attempt: 1,
+            recorded_from_state: "running",
+            actor: dispatchResult.actor,
+            recorded_at: dispatchResult.recorded_at,
+            provenance: dispatchResult.provenance,
+          });
+          current = dispatchResultRecorded.run;
+          implementationDispatch = {
+            ...dispatchResult.public_report,
+            intent_artifact_ref: dispatchRecorded.artifact_ref,
+            result_artifact_ref: dispatchResultRecorded.artifact_ref,
+            intent_record_status: dispatchRecorded.status,
+            result_record_status: dispatchResultRecorded.status,
+            resumed_recorded_result: false,
+            workspace_preparation_artifact_ref: recorded.artifact_ref,
+          };
+          stepsTaken.push(buildStep({
+            action: "implementation_dispatch_result",
+            status: dispatchResultRecorded.status === "noop" ? "noop" : dispatchResult.status === "COMPLETED" ? "completed" : dispatchResult.status === "FAILED" ? "failed" : "blocked",
+            fromState: "running",
+            toState: "running",
+            detail: dispatchResult.public_report.summary || implementationBoundaryMessage(),
+            sequence: dispatchResultRecorded.event?.sequence ?? null,
+            workspaceId: current.workspace?.id || "",
+            artifactPath: dispatchResultRecorded.artifact_ref.path,
+            artifactSha256: dispatchResultRecorded.artifact_ref.sha256,
+          }));
+        }
 
         warnings.push(...inspected.warnings);
-        if (dispatchResult.status === "COMPLETED") {
+        const dispatchStatus = implementationDispatch?.status;
+        const dispatchAdapter = dispatchResult?.adapter || implementationDispatch?.adapter || "implementation-harness-dispatch.v1";
+        if (dispatchStatus === "COMPLETED") {
           const transitioned = await transitionRun(registryRoot, runId, {
             toState: "verification",
             actor,
             evidence: {
               reason: "implementation completed",
               implementation_dispatch: {
-                adapter: dispatchResult.adapter,
-                status: dispatchResult.status,
+                adapter: dispatchAdapter,
+                status: dispatchStatus,
                 intent_artifact_ref: dispatchRecorded.artifact_ref,
-                result_artifact_ref: dispatchResultRecorded.artifact_ref,
+                result_artifact_ref: implementationDispatch.result_artifact_ref,
+                resumed_recorded_result: Boolean(implementationDispatch.resumed_recorded_result),
               },
             },
             clock,
@@ -1217,10 +1401,44 @@ export async function runLocalMission({ registryRoot, runId, workspaceId = "", w
             toState: current.state,
             detail: "Completed implementation-harness dispatch advanced the run to verification.",
             sequence: transitioned.event.sequence,
-            artifactPath: dispatchResultRecorded.artifact_ref.path,
-            artifactSha256: dispatchResultRecorded.artifact_ref.sha256,
+            artifactPath: implementationDispatch.result_artifact_ref.path,
+            artifactSha256: implementationDispatch.result_artifact_ref.sha256,
           }));
-        } else {
+        } else if (dispatchStatus === "FAILED") {
+          const transitioned = await transitionRun(registryRoot, runId, {
+            toState: "failed_execution",
+            actor,
+            evidence: {
+              reason: "unrecoverable implementation failure",
+              implementation_dispatch: {
+                adapter: dispatchAdapter,
+                status: dispatchStatus,
+                problem: implementationDispatch.problem || null,
+                intent_artifact_ref: dispatchRecorded.artifact_ref,
+                result_artifact_ref: implementationDispatch.result_artifact_ref,
+                resumed_recorded_result: Boolean(implementationDispatch.resumed_recorded_result),
+              },
+            },
+            clock,
+          });
+          current = transitioned.run;
+          stepsTaken.push(buildStep({
+            action: "transition",
+            status: "completed",
+            fromState: "running",
+            toState: current.state,
+            detail: "Failed implementation-harness dispatch advanced the run to failed_execution.",
+            sequence: transitioned.event.sequence,
+            artifactPath: implementationDispatch.result_artifact_ref.path,
+            artifactSha256: implementationDispatch.result_artifact_ref.sha256,
+          }));
+          blockers.push(buildIssue("implementation_dispatch_failed", "Implementation harness dispatch failed inside the approved envelope.", {
+            dispatch_status: implementationDispatch.status,
+            problem: implementationDispatch.problem || null,
+            intent_artifact_ref: implementationDispatch.intent_artifact_ref,
+            result_artifact_ref: implementationDispatch.result_artifact_ref,
+          }));
+        } else if (reusableDispatchResult?.reusable !== false) {
           blockers.push(buildIssue("implementation_dispatch_blocked", implementationBoundaryMessage(), {
             dispatch_status: implementationDispatch.status,
             problem: implementationDispatch.problem || null,
@@ -1236,7 +1454,7 @@ export async function runLocalMission({ registryRoot, runId, workspaceId = "", w
       runId,
       previousState,
       currentState: current.state,
-      outcome: blockers.length > 0 ? "blocked" : "completed",
+      outcome: current.state === "failed_execution" ? "failed" : blockers.length > 0 ? "blocked" : "completed",
       stepsTaken,
       blockers,
       warnings,

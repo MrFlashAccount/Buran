@@ -29,12 +29,14 @@ These scenarios summarize the behavior the current branch already proves through
 - Then Buran transitions the contender to `blocked_lock_conflict`
 - And the report includes the conflicting lock surfaces
 
-### Scenario: running stage records preparation-only handoff
+### Scenario: running stage dispatches through the implementation bridge
 - Given a leased local workspace
 - When the runner processes `running`
-- Then it records immutable `workspace_preparation` and `implementation_dispatch` artifacts
-- And it stops with `dispatch_ready_not_started`
-- And it does not start an implementation worker
+- Then it records immutable `workspace_preparation` and implementation-dispatch `intent-*` artifacts
+- And it invokes the configured implementation-dispatch adapter only if no current `result-*` artifact is already reusable
+- And it records a sanitized implementation-dispatch `result-*` artifact
+- And it advances to `verification` only for `COMPLETED` results with durable changed-file evidence plus a durable result reference
+- And `BLOCKED` results stay in `running` while `FAILED` results transition to `failed_execution`
 
 ## 3. Verification gate
 
@@ -102,7 +104,7 @@ These scenarios summarize the behavior the current branch already proves through
 - And valid runs remain available without quarantine
 
 ### Scenario: immutable artifact integrity is enforced on resume
-- Given a previously recorded verification, internal-review, or PR projection artifact
+- Given a previously recorded implementation-dispatch, verification, internal-review, or PR projection artifact
 - When the artifact is missing or no longer matches its recorded hash
 - Then resume is blocked
 - And Buran reports the artifact as missing or corrupt instead of silently reusing it
