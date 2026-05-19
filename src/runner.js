@@ -20,7 +20,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 
 import { SCHEMA_VERSION, TERMINAL_STATES } from "./constants.js";
-import { buildImplementationDispatchIntent } from "./implementation-dispatch.js";
+import { buildImplementationDispatchIntent, createUnavailableImplementationDispatchAdapter, executeImplementationDispatch } from "./implementation-dispatch.js";
 import { executeInternalReviewGate } from "./internal-review-adapter.js";
 import { acquireWorkspaceLease } from "./locks.js";
 import { sanitizePublicReportForOutput } from "./observability.js";
@@ -102,7 +102,7 @@ function leaseRequiredMessage(runId) {
 }
 
 function implementationBoundaryMessage() {
-  return "Local mission runner recorded an implementation dispatch handoff but stops before worker execution. This current local runner slice does not start workers, verification, review, or external writes.";
+  return "Local mission runner recorded an implementation dispatch handoff but the implementation-harness adapter did not return completed implementation evidence.";
 }
 
 function unsupportedStageMessage(state) {
@@ -919,7 +919,7 @@ async function runPrReadyStage({ registryRoot, runId, current, previousState, st
  * @returns {Promise<object>} Sanitized public runner report describing completed work, blockers, and current state.
  * @throws {Error} When required identifiers are missing or an unexpected storage/adapter error occurs.
  */
-export async function runLocalMission({ registryRoot, runId, workspaceId = "", workspacePath = "", ttlMs = "", clock = () => new Date(), actor = RUNNER_ACTOR, prProjectionAdapter = createLocalPrProjectionAdapter() } = {}) {
+export async function runLocalMission({ registryRoot, runId, workspaceId = "", workspacePath = "", ttlMs = "", clock = () => new Date(), actor = RUNNER_ACTOR, implementationDispatchAdapter = createUnavailableImplementationDispatchAdapter(), prProjectionAdapter = createLocalPrProjectionAdapter() } = {}) {
   if (!registryRoot) throw new Error("registryRoot is required for local mission runner");
   if (!runId) throw new Error("runId is required for local mission runner");
 
@@ -1143,30 +1143,91 @@ export async function runLocalMission({ registryRoot, runId, workspaceId = "", w
           },
         });
         current = dispatchRecorded.run;
-        implementationDispatch = {
-          status: "dispatch_ready_not_started",
-          artifact_ref: dispatchRecorded.artifact_ref,
-          artifact_record_status: dispatchRecorded.status,
-          blocker: null,
-          workspace_preparation_artifact_ref: recorded.artifact_ref,
-        };
         stepsTaken.push(buildStep({
-          action: "implementation_dispatch",
+          action: "implementation_dispatch_intent",
           status: dispatchRecorded.status === "noop" ? "noop" : "completed",
           fromState: "running",
           toState: "running",
-          detail: "Implementation dispatch handoff was recorded locally without starting a worker.",
+          detail: "Implementation-harness dispatch intent was recorded locally before adapter execution.",
           sequence: dispatchRecorded.event?.sequence ?? null,
           workspaceId: current.workspace?.id || "",
           artifactPath: dispatchRecorded.artifact_ref.path,
           artifactSha256: dispatchRecorded.artifact_ref.sha256,
         }));
 
-        warnings.push(...inspected.warnings);
-        blockers.push(buildIssue("implementation_dispatch_not_implemented", implementationBoundaryMessage(), {
-          dispatch_status: implementationDispatch.status,
-          handoff_artifact_ref: implementationDispatch.artifact_ref,
+        const dispatchResult = await executeImplementationDispatch({
+          snapshot: current,
+          intent: dispatchIntent.intent,
+          adapter: implementationDispatchAdapter,
+          clock,
+        });
+        const dispatchResultRecorded = await recordArtifact(registryRoot, runId, {
+          artifactPath: dispatchResult.artifact_path,
+          content: dispatchResult.artifact_content,
+          gate_name: "implementation_dispatch",
+          execution_epoch: current.execution?.current_epoch || 0,
+          gate_attempt: 1,
+          recorded_from_state: "running",
+          actor: dispatchResult.actor,
+          recorded_at: dispatchResult.recorded_at,
+          provenance: dispatchResult.provenance,
+        });
+        current = dispatchResultRecorded.run;
+        implementationDispatch = {
+          ...dispatchResult.public_report,
+          intent_artifact_ref: dispatchRecorded.artifact_ref,
+          result_artifact_ref: dispatchResultRecorded.artifact_ref,
+          intent_record_status: dispatchRecorded.status,
+          result_record_status: dispatchResultRecorded.status,
+          workspace_preparation_artifact_ref: recorded.artifact_ref,
+        };
+        stepsTaken.push(buildStep({
+          action: "implementation_dispatch_result",
+          status: dispatchResultRecorded.status === "noop" ? "noop" : dispatchResult.status === "COMPLETED" ? "completed" : "blocked",
+          fromState: "running",
+          toState: "running",
+          detail: dispatchResult.public_report.summary || implementationBoundaryMessage(),
+          sequence: dispatchResultRecorded.event?.sequence ?? null,
+          workspaceId: current.workspace?.id || "",
+          artifactPath: dispatchResultRecorded.artifact_ref.path,
+          artifactSha256: dispatchResultRecorded.artifact_ref.sha256,
         }));
+
+        warnings.push(...inspected.warnings);
+        if (dispatchResult.status === "COMPLETED") {
+          const transitioned = await transitionRun(registryRoot, runId, {
+            toState: "verification",
+            actor,
+            evidence: {
+              reason: "implementation completed",
+              implementation_dispatch: {
+                adapter: dispatchResult.adapter,
+                status: dispatchResult.status,
+                intent_artifact_ref: dispatchRecorded.artifact_ref,
+                result_artifact_ref: dispatchResultRecorded.artifact_ref,
+              },
+            },
+            clock,
+          });
+          current = transitioned.run;
+          stepsTaken.push(buildStep({
+            action: "transition",
+            status: "completed",
+            fromState: "running",
+            toState: current.state,
+            detail: "Completed implementation-harness dispatch advanced the run to verification.",
+            sequence: transitioned.event.sequence,
+            artifactPath: dispatchResultRecorded.artifact_ref.path,
+            artifactSha256: dispatchResultRecorded.artifact_ref.sha256,
+          }));
+        } else {
+          blockers.push(buildIssue("implementation_dispatch_blocked", implementationBoundaryMessage(), {
+            dispatch_status: implementationDispatch.status,
+            problem: implementationDispatch.problem || null,
+            intent_artifact_ref: implementationDispatch.intent_artifact_ref,
+            result_artifact_ref: implementationDispatch.result_artifact_ref,
+          }));
+        }
       }
     }
 
@@ -1175,7 +1236,7 @@ export async function runLocalMission({ registryRoot, runId, workspaceId = "", w
       runId,
       previousState,
       currentState: current.state,
-      outcome: "blocked",
+      outcome: blockers.length > 0 ? "blocked" : "completed",
       stepsTaken,
       blockers,
       warnings,
