@@ -49,6 +49,7 @@ export const GATE_STATE_BY_NAME = Object.freeze({
 export const ARTIFACT_STAGE_STATE_BY_NAME = Object.freeze({
   workspace_preparation: "running",
   implementation_dispatch: "running",
+  fix_attempt: "fix_loop",
   verification: "verification",
   internal_review: "internal_review",
 });

@@ -20,6 +20,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 
 import { SCHEMA_VERSION, TERMINAL_STATES } from "./constants.js";
+import { buildFixLoopAttempt, createUnavailableFixLoopAdapter, currentFixAttempts, DEFAULT_MAX_FIX_ATTEMPTS, executeFixLoopAttempt } from "./fix-loop-adapter.js";
 import { buildImplementationDispatchIntent, createUnavailableImplementationDispatchAdapter, executeImplementationDispatch } from "./implementation-dispatch.js";
 import { executeInternalReviewGate } from "./internal-review-adapter.js";
 import { acquireWorkspaceLease } from "./locks.js";
@@ -27,7 +28,7 @@ import { sanitizePublicReportForOutput } from "./observability.js";
 import { buildRecordedPrProjection, createLocalPrProjectionAdapter } from "./pr-projection-adapter.js";
 import { executeVerificationGate } from "./verification-adapter.js";
 import { getRunPaths, readRunSnapshot, recordArtifact, recordGateResult, recordProjectionIntent, recordProjectionResult, transitionRun } from "./registry-store.js";
-import { nonEmptyString, sha256Hex } from "./utils.js";
+import { canonicalJson, nonEmptyString, sha256Hex } from "./utils.js";
 import { inspectWorkspacePreparation } from "./workspace-preparation.js";
 
 const RUNNER_MODE = "run_local";
@@ -73,6 +74,7 @@ function buildRunnerReport({
   implementationDispatch = null,
   verification = null,
   internalReview = null,
+  fixLoop = null,
   projection = null,
   externalSideEffects = false,
 } = {}) {
@@ -92,6 +94,7 @@ function buildRunnerReport({
     implementation_dispatch: implementationDispatch,
     verification,
     internal_review: internalReview,
+    fix_loop: fixLoop,
     projection,
     external_side_effects: Boolean(externalSideEffects),
   };
@@ -139,6 +142,49 @@ function projectionTransitionReason() {
 
 function projectionProblemCode(suffix) {
   return `pr_projection_${suffix}`;
+}
+
+
+const MAX_FIX_ATTEMPTS = 2;
+
+function recordedFixAttemptArtifacts(snapshot) {
+  const byPath = snapshot?.artifacts?.recorded?.by_path || {};
+  return Object.values(byPath).filter((summary) => summary?.gate_name === "fix_attempt");
+}
+
+function fixAttemptCount(snapshot) {
+  return recordedFixAttemptArtifacts(snapshot).filter((summary) => summary?.provenance?.kind === "fix-attempt-result").length;
+}
+
+function buildFixAttemptIntent(snapshot, { attempt, maxAttempts } = {}) {
+  const intent = {
+    schema_version: "fix-attempt-intent.v1",
+    run_id: snapshot?.run_id || "",
+    task_id: snapshot?.task_id || "",
+    fix_attempt: attempt,
+    max_fix_attempts: maxAttempts,
+    state: snapshot?.state || "",
+    execution_epoch: snapshot?.execution?.current_epoch || 0,
+    packet_artifact: snapshot?.artifacts?.packet || null,
+    workspace: {
+      id: snapshot?.workspace?.id || "",
+    },
+    failed_gates: {
+      verification: snapshot?.gates?.verification || null,
+      internal_review: snapshot?.gates?.internal_review || null,
+    },
+    scope_boundary: "approved_packet_artifact",
+    dispatch_boundary: "implementation-harness",
+    rerun_required: ["verification", "internal_review"],
+  };
+  const dispatchIntentId = sha256Hex(canonicalJson(intent));
+  return {
+    intent: {
+      ...intent,
+      dispatch_intent_id: dispatchIntentId,
+    },
+    artifactPath: `artifacts/fix-loop/intent-${attempt}-${dispatchIntentId.slice(0, 16)}.json`,
+  };
 }
 
 function sanitizeRunnerReportMessage(message) {
@@ -898,6 +944,224 @@ async function runPrReadyStage({ registryRoot, runId, current, previousState, st
   });
 }
 
+
+/**
+ * Executes one bounded implementation-harness fix attempt, then returns the run to verification.
+ */
+async function runFixLoopStage({ registryRoot, runId, current, previousState, stepsTaken, blockers, warnings, workspacePreparation, implementationDispatch, verification, internalReview, clock, actor, implementationDispatchAdapter } = {}) {
+  const completedAttempts = fixAttemptCount(current);
+  if (completedAttempts >= MAX_FIX_ATTEMPTS) {
+    const problem = buildIssue("fix_attempts_exhausted", `Fix loop stopped after ${completedAttempts} completed attempt${completedAttempts === 1 ? "" : "s"}; maximum is ${MAX_FIX_ATTEMPTS}.`);
+    blockers.push(problem);
+    const transitioned = await transitionRun(registryRoot, runId, {
+      toState: "blocked_needs_human",
+      actor,
+      evidence: {
+        reason: "fix envelope exceeded",
+        terminal_reason: problem.message,
+        fix_loop: {
+          completed_attempts: completedAttempts,
+          max_attempts: MAX_FIX_ATTEMPTS,
+        },
+      },
+      clock,
+    });
+    current = transitioned.run;
+    stepsTaken.push(buildStep({
+      action: "fix_loop_bounds",
+      status: "blocked",
+      fromState: "fix_loop",
+      toState: current.state,
+      detail: problem.message,
+      sequence: transitioned.event.sequence,
+    }));
+    return buildRunnerReport({
+      registryRoot,
+      runId,
+      previousState,
+      currentState: current.state,
+      outcome: "blocked",
+      stepsTaken,
+      blockers,
+      warnings,
+      workspacePreparation,
+      implementationDispatch,
+      verification,
+      internalReview,
+    });
+  }
+
+  if (!hasActiveLease(current)) {
+    const problem = buildIssue("lease_required", "Fix loop requires the active workspace lease from the failed verification/review epoch.");
+    blockers.push(problem);
+    stepsTaken.push(buildStep({
+      action: "fix_loop_dispatch",
+      status: "blocked",
+      fromState: "fix_loop",
+      toState: "fix_loop",
+      detail: problem.message,
+    }));
+    return buildRunnerReport({
+      registryRoot,
+      runId,
+      previousState,
+      currentState: current.state,
+      outcome: "blocked",
+      stepsTaken,
+      blockers,
+      warnings,
+      workspacePreparation,
+      implementationDispatch,
+      verification,
+      internalReview,
+    });
+  }
+
+  const attempt = completedAttempts + 1;
+  const fixIntent = buildFixAttemptIntent(current, {
+    attempt,
+    maxAttempts: MAX_FIX_ATTEMPTS,
+  });
+  const recordedAt = clock().toISOString();
+  const intentRecorded = await recordArtifact(registryRoot, runId, {
+    artifactPath: fixIntent.artifactPath,
+    content: `${JSON.stringify(fixIntent.intent, null, 2)}\n`,
+    gate_name: "fix_attempt",
+    execution_epoch: current.execution?.current_epoch || 0,
+    gate_attempt: 1,
+    recorded_from_state: "fix_loop",
+    actor,
+    recorded_at: recordedAt,
+    provenance: {
+      kind: "fix-attempt-intent",
+      fix_attempt: attempt,
+      max_fix_attempts: MAX_FIX_ATTEMPTS,
+      failed_gates: fixIntent.intent.failed_gates,
+    },
+  });
+  current = intentRecorded.run;
+  stepsTaken.push(buildStep({
+    action: "fix_attempt_intent",
+    status: intentRecorded.status === "noop" ? "noop" : "completed",
+    fromState: "fix_loop",
+    toState: "fix_loop",
+    detail: `Fix attempt ${attempt}/${MAX_FIX_ATTEMPTS} intent was recorded before implementation-harness dispatch.`,
+    sequence: intentRecorded.event?.sequence ?? null,
+    artifactPath: intentRecorded.artifact_ref.path,
+    artifactSha256: intentRecorded.artifact_ref.sha256,
+  }));
+
+  const dispatchResult = await executeImplementationDispatch({
+    snapshot: current,
+    intent: fixIntent.intent,
+    adapter: implementationDispatchAdapter,
+    clock,
+  });
+  const resultRecorded = await recordArtifact(registryRoot, runId, {
+    artifactPath: dispatchResult.artifact_path,
+    content: dispatchResult.artifact_content,
+    gate_name: "fix_attempt",
+    execution_epoch: current.execution?.current_epoch || 0,
+    gate_attempt: 1,
+    recorded_from_state: "fix_loop",
+    actor: dispatchResult.actor,
+    recorded_at: dispatchResult.recorded_at,
+    provenance: {
+      kind: "fix-attempt-result",
+      adapter: dispatchResult.adapter,
+      status: dispatchResult.status,
+      fix_attempt: attempt,
+      intent_artifact: intentRecorded.artifact_ref,
+    },
+  });
+  current = resultRecorded.run;
+  implementationDispatch = {
+    ...dispatchResult.public_report,
+    fix_attempt: attempt,
+    max_fix_attempts: MAX_FIX_ATTEMPTS,
+    intent_artifact_ref: intentRecorded.artifact_ref,
+    result_artifact_ref: resultRecorded.artifact_ref,
+    intent_record_status: intentRecorded.status,
+    result_record_status: resultRecorded.status,
+  };
+  stepsTaken.push(buildStep({
+    action: "fix_attempt_result",
+    status: resultRecorded.status === "noop" ? "noop" : dispatchResult.status === "COMPLETED" ? "completed" : "blocked",
+    fromState: "fix_loop",
+    toState: "fix_loop",
+    detail: dispatchResult.public_report.summary || implementationBoundaryMessage(),
+    sequence: resultRecorded.event?.sequence ?? null,
+    artifactPath: resultRecorded.artifact_ref.path,
+    artifactSha256: resultRecorded.artifact_ref.sha256,
+  }));
+
+  if (dispatchResult.status !== "COMPLETED") {
+    blockers.push(buildIssue("fix_attempt_blocked", implementationBoundaryMessage(), {
+      fix_attempt: attempt,
+      max_fix_attempts: MAX_FIX_ATTEMPTS,
+      dispatch_status: dispatchResult.status,
+      problem: dispatchResult.public_report?.problem || null,
+      intent_artifact_ref: intentRecorded.artifact_ref,
+      result_artifact_ref: resultRecorded.artifact_ref,
+    }));
+    return buildRunnerReport({
+      registryRoot,
+      runId,
+      previousState,
+      currentState: current.state,
+      outcome: "blocked",
+      stepsTaken,
+      blockers,
+      warnings,
+      workspacePreparation,
+      implementationDispatch,
+      verification,
+      internalReview,
+    });
+  }
+
+  const transitioned = await transitionRun(registryRoot, runId, {
+    toState: "verification",
+    actor,
+    evidence: {
+      reason: "fixes applied",
+      fix_loop: {
+        fix_attempt: attempt,
+        max_fix_attempts: MAX_FIX_ATTEMPTS,
+        intent_artifact_ref: intentRecorded.artifact_ref,
+        result_artifact_ref: resultRecorded.artifact_ref,
+      },
+    },
+    clock,
+  });
+  current = transitioned.run;
+  stepsTaken.push(buildStep({
+    action: "transition",
+    status: "completed",
+    fromState: "fix_loop",
+    toState: current.state,
+    detail: "Completed fix attempt advanced the run to a fresh verification epoch.",
+    sequence: transitioned.event.sequence,
+    artifactPath: resultRecorded.artifact_ref.path,
+    artifactSha256: resultRecorded.artifact_ref.sha256,
+  }));
+
+  return buildRunnerReport({
+    registryRoot,
+    runId,
+    previousState,
+    currentState: current.state,
+    outcome: "completed",
+    stepsTaken,
+    blockers,
+    warnings,
+    workspacePreparation,
+    implementationDispatch,
+    verification,
+    internalReview,
+  });
+}
+
 /**
  * Runs the local orchestration slice for a single registry run.
  *
@@ -949,6 +1213,7 @@ export async function runLocalMission({ registryRoot, runId, workspaceId = "", w
   let implementationDispatch = null;
   let verification = null;
   let internalReview = null;
+  let fixLoop = null;
 
   if (TERMINAL_STATES.has(current.state)) {
     return buildRunnerReport({
@@ -1301,14 +1566,12 @@ export async function runLocalMission({ registryRoot, runId, workspaceId = "", w
     });
   }
 
-  if (["fix_loop"].includes(current.state)) {
-    blockers.push(buildIssue("stage_not_implemented", unsupportedStageMessage(current.state)));
-    return buildRunnerReport({
+  if (current.state === "fix_loop") {
+    return runFixLoopStage({
       registryRoot,
       runId,
+      current,
       previousState,
-      currentState: current.state,
-      outcome: "blocked",
       stepsTaken,
       blockers,
       warnings,
@@ -1316,6 +1579,9 @@ export async function runLocalMission({ registryRoot, runId, workspaceId = "", w
       implementationDispatch,
       verification,
       internalReview,
+      clock,
+      actor,
+      implementationDispatchAdapter,
     });
   }
 
