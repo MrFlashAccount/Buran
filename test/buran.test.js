@@ -275,6 +275,20 @@ test("plugin entrypoint imports locally and registers the buran command", async 
   assert.equal(report.registry_written, false);
 });
 
+test("plugin manifest advertises lazy buran command activation", async () => {
+  const manifestPath = path.join(__dirname, "..", "openclaw.plugin.json");
+  const manifest = JSON.parse(await fs.readFile(manifestPath, "utf8"));
+
+  assert.equal(manifest.activation?.onStartup, false);
+  assert.deepEqual(manifest.activation?.onCommands, ["buran"]);
+  assert.deepEqual(manifest.commandAliases, [
+    {
+      name: "buran",
+      kind: "runtime-slash",
+    },
+  ]);
+});
+
 test("missing --packets is rejected instead of discovering tasks autonomously", async () => {
   const result = await runBuranCli(["validate"]);
 
