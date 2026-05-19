@@ -424,7 +424,62 @@ test("local runner can acquire a local lease and blocks when implementation harn
 });
 
 
-test("local runner advances to verification only after immutable implementation dispatch evidence", async () => {
+test("local runner blocks completed implementation dispatch results that omit immutable evidence", async () => {
+  const scenarios = [
+    ["missing", undefined],
+    ["empty", {}],
+    ["non-object", "worker stdout blob"],
+  ];
+
+  for (const [suffix, evidence] of scenarios) {
+    const tempDir = await makeTempDir();
+    const registryRoot = path.join(tempDir, "registry");
+    const intendedBranch = `user/run_runner_dispatch_${suffix}`;
+    const workspacePath = await createLocalGitWorkspace(tempDir, intendedBranch);
+    const created = await createRunFromPacketReport(packetReport(`run_runner_dispatch_${suffix}`, { intendedBranch }), {
+      registryRoot,
+      clock: () => new Date("2026-05-16T13:52:00.000Z"),
+    });
+
+    const result = await runLocalMission({
+      registryRoot,
+      runId: created.run.run_id,
+      workspaceId: `ws-runner-dispatch-${suffix}`,
+      workspacePath,
+      clock: () => new Date("2026-05-16T13:53:00.000Z"),
+      implementationDispatchAdapter: {
+        adapter: "test-implementation-harness",
+        async execute() {
+          return {
+            status: "COMPLETED",
+            adapter: "test-implementation-harness",
+            actor: "test-implementation-harness",
+            summary: "Implementation worker completed within the approved packet scope.",
+            evidence,
+          };
+        },
+      },
+    });
+
+    assert.equal(result.outcome, "blocked");
+    assert.equal(result.current_state, "running");
+    assert.equal(result.implementation_dispatch.status, "BLOCKED");
+    assert.equal(result.implementation_dispatch.problem.code, "implementation_dispatch_evidence_required");
+    assert.equal(result.implementation_dispatch.evidence && Object.keys(result.implementation_dispatch.evidence).length, 0);
+    assert.equal(result.blockers[0].code, "implementation_dispatch_blocked");
+    assert.equal(result.blockers[0].dispatch_status, "BLOCKED");
+
+    const paths = getRunPaths(registryRoot, created.run.run_id);
+    const snapshot = await readRunSnapshot(paths.runPath);
+    assert.equal(snapshot.state, "running");
+    const dispatchResultArtifact = JSON.parse(await fs.readFile(path.join(paths.runDir, result.implementation_dispatch.result_artifact_ref.path), "utf8"));
+    assert.equal(dispatchResultArtifact.status, "BLOCKED");
+    assert.equal(dispatchResultArtifact.problem.code, "implementation_dispatch_evidence_required");
+    assert.deepEqual(dispatchResultArtifact.evidence, {});
+  }
+});
+
+test("local runner advances to verification only after sanitized immutable implementation dispatch evidence", async () => {
   const tempDir = await makeTempDir();
   const registryRoot = path.join(tempDir, "registry");
   const intendedBranch = "user/run_runner_dispatch_success";
@@ -451,6 +506,13 @@ test("local runner advances to verification only after immutable implementation 
           evidence: {
             implementation_result_id: `impl-${intent.dispatch_intent_id.slice(0, 8)}`,
             files_changed: ["src/example.js"],
+            commit_sha: "abc123def456",
+            worker_session_id: "worker-session-42",
+            prompt: "Do not retain this worker prompt.",
+            stdout: "line\n".repeat(200),
+            stderr: "Do not retain this stderr blob.",
+            output: { raw: "Do not retain this output blob." },
+            transcript: "Do not retain this transcript blob.",
           },
         };
       },
@@ -462,6 +524,11 @@ test("local runner advances to verification only after immutable implementation 
   assert.equal(result.current_state, "verification");
   assert.deepEqual(result.blockers, []);
   assert.equal(result.implementation_dispatch.status, "COMPLETED");
+  assert.deepEqual(result.implementation_dispatch.evidence, {
+    implementation_result_id: result.implementation_dispatch.evidence.implementation_result_id,
+    files_changed: ["src/example.js"],
+    commit_sha: "abc123def456",
+  });
   assert.equal(result.implementation_dispatch.result_record_status, "recorded");
   assert.match(result.implementation_dispatch.result_artifact_ref.path, /^artifacts\/implementation-dispatch\/result-[a-f0-9]{16}\.json$/);
   assert.deepEqual(result.steps_taken.map((step) => [step.action, step.status, step.to_state]), [
@@ -482,6 +549,12 @@ test("local runner advances to verification only after immutable implementation 
   assert.equal(dispatchResultArtifact.schema_version, "implementation-dispatch-result.v1");
   assert.equal(dispatchResultArtifact.status, "COMPLETED");
   assert.equal(dispatchResultArtifact.packet_artifact.sha256, snapshot.artifacts.packet.sha256);
+  assert.deepEqual(dispatchResultArtifact.evidence, result.implementation_dispatch.evidence);
+  assert.equal("prompt" in dispatchResultArtifact.evidence, false);
+  assert.equal("stdout" in dispatchResultArtifact.evidence, false);
+  assert.equal("stderr" in dispatchResultArtifact.evidence, false);
+  assert.equal("output" in dispatchResultArtifact.evidence, false);
+  assert.equal("transcript" in dispatchResultArtifact.evidence, false);
 });
 
 test("local runner blocks running workspace preparation when workspace path is missing from the active lease snapshot", async () => {

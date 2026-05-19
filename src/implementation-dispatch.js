@@ -6,6 +6,82 @@ const DISPATCH_SCHEMA_VERSION = "implementation-dispatch-intent.v1";
 const DISPATCH_RESULT_SCHEMA_VERSION = "implementation-dispatch-result.v1";
 const IMPLEMENTATION_DISPATCH_ADAPTER = "implementation-harness-dispatch.v1";
 const DEFAULT_UNAVAILABLE_ADAPTER = "implementation-harness-unavailable.v1";
+const DISPATCH_EVIDENCE_REQUIRED_CODE = "implementation_dispatch_evidence_required";
+const DISPATCH_EVIDENCE_REQUIRED_MESSAGE = "Implementation harness dispatch must return immutable implementation evidence before verification.";
+const DISPATCH_EVIDENCE_MAX_KEYS = 12;
+const DISPATCH_EVIDENCE_MAX_ITEMS = 50;
+const DISPATCH_EVIDENCE_MAX_STRING = 240;
+const DISPATCH_EVIDENCE_BLOCKED_KEY_PATTERN = /(^|_)(prompt|transcript|stdout|stderr|output|raw|content|body|markdown|log|logs|session)($|_)/i;
+
+function truncateDispatchString(value, max = DISPATCH_EVIDENCE_MAX_STRING) {
+  const text = nonEmptyString(value);
+  if (!text) return "";
+  return text.length > max ? `${text.slice(0, max)}…` : text;
+}
+
+function sanitizeDispatchReference(value) {
+  if (typeof value === "string") return truncateDispatchString(value);
+  if (!isRecord(value)) return undefined;
+
+  const output = {};
+  const id = truncateDispatchString(value.id, 120);
+  const path = truncateDispatchString(value.path);
+  const sha256 = truncateDispatchString(value.sha256, 128);
+
+  if (id) output.id = id;
+  if (path) output.path = path;
+  if (sha256) output.sha256 = sha256;
+  return Object.keys(output).length > 0 ? output : undefined;
+}
+
+function sanitizeDispatchStringList(value) {
+  const entries = Array.isArray(value) ? value : typeof value === "string" ? [value] : [];
+  const sanitized = entries
+    .map((entry) => truncateDispatchString(entry))
+    .filter(Boolean)
+    .slice(0, DISPATCH_EVIDENCE_MAX_ITEMS);
+  return sanitized.length > 0 ? sanitized : undefined;
+}
+
+function sanitizeDispatchReferenceList(value) {
+  const entries = Array.isArray(value) ? value : isRecord(value) ? Object.values(value) : [];
+  const sanitized = entries
+    .map((entry) => sanitizeDispatchReference(entry))
+    .filter(Boolean)
+    .slice(0, DISPATCH_EVIDENCE_MAX_ITEMS);
+  return sanitized.length > 0 ? sanitized : undefined;
+}
+
+function isAllowedDispatchEvidenceKey(key) {
+  if (!key || DISPATCH_EVIDENCE_BLOCKED_KEY_PATTERN.test(key)) return false;
+  return key === "files_changed"
+    || key === "changed_files"
+    || /(^|_)(id|sha|branch|count|ref|refs|path|paths)$/.test(key);
+}
+
+function sanitizeDispatchEvidenceValue(key, value) {
+  if (key === "files_changed" || key === "changed_files") return sanitizeDispatchStringList(value);
+  if (/(^|_)(count)$/.test(key)) return Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+  if (/(^|_)(refs|paths)$/.test(key)) return sanitizeDispatchReferenceList(value);
+  if (/(^|_)(ref|path)$/.test(key)) return sanitizeDispatchReference(value);
+  if (/(^|_)(id|sha|branch)$/.test(key)) return truncateDispatchString(value);
+  return undefined;
+}
+
+function sanitizeDispatchEvidence(evidence) {
+  if (!isRecord(evidence)) return {};
+
+  const output = {};
+  for (const [rawKey, value] of Object.entries(evidence).slice(0, DISPATCH_EVIDENCE_MAX_KEYS)) {
+    const key = nonEmptyString(rawKey).toLowerCase();
+    if (!isAllowedDispatchEvidenceKey(key)) continue;
+    const sanitizedValue = sanitizeDispatchEvidenceValue(key, value);
+    if (sanitizedValue === undefined) continue;
+    output[key] = sanitizedValue;
+  }
+
+  return output;
+}
 
 function workspaceContexts(snapshot) {
   const contexts = [];
@@ -37,19 +113,30 @@ function buildProblem(code, message, extra = {}) {
 
 function normalizeResult(rawResult, snapshot) {
   const result = isRecord(rawResult) ? rawResult : {};
-  const status = normalizeDispatchStatus(result.status);
+  const normalizedStatus = normalizeDispatchStatus(result.status);
+  const evidence = sanitizeDispatchEvidence(result.evidence);
+  const evidenceRequired = normalizedStatus === "COMPLETED" && Object.keys(evidence).length === 0;
+  const status = evidenceRequired ? "BLOCKED" : normalizedStatus;
   const problem = status === "COMPLETED"
     ? null
     : sanitizeValue(isRecord(result.problem) ? result.problem : buildProblem(
-        status === "FAILED" ? "implementation_dispatch_failed" : "implementation_dispatch_blocked",
-        nonEmptyString(result.summary) || dispatchStatusSummary(status),
+        evidenceRequired
+          ? DISPATCH_EVIDENCE_REQUIRED_CODE
+          : status === "FAILED"
+            ? "implementation_dispatch_failed"
+            : "implementation_dispatch_blocked",
+        evidenceRequired
+          ? DISPATCH_EVIDENCE_REQUIRED_MESSAGE
+          : nonEmptyString(result.summary) || dispatchStatusSummary(status),
       ), snapshot);
 
   return sanitizeValue({
     status,
-    summary: nonEmptyString(result.summary) || dispatchStatusSummary(status, problem),
+    summary: evidenceRequired
+      ? DISPATCH_EVIDENCE_REQUIRED_MESSAGE
+      : nonEmptyString(result.summary) || dispatchStatusSummary(status, problem),
     implementation_epoch: Number.isSafeInteger(result.implementation_epoch) ? result.implementation_epoch : 1,
-    evidence: isRecord(result.evidence) ? result.evidence : {},
+    evidence,
     problem,
     adapter: nonEmptyString(result.adapter) || IMPLEMENTATION_DISPATCH_ADAPTER,
     actor: nonEmptyString(result.actor) || IMPLEMENTATION_DISPATCH_ADAPTER,
