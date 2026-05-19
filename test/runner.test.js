@@ -1489,6 +1489,112 @@ test("local runner records FAIL verification results and advances to fix_loop", 
   assert.equal(JSON.stringify(result.verification).includes(process.execPath), false);
 });
 
+
+test("local runner executes a bounded fix attempt and reruns verification in a fresh epoch", async () => {
+  const tempDir = await makeTempDir();
+  const registryRoot = path.join(tempDir, "registry");
+  const workspacePath = await createVerificationWorkspace(tempDir, {
+    testFile: "test/runner.test.js",
+    passing: false,
+  });
+  const runId = await prepareVerificationRun(registryRoot, workspacePath, {
+    runId: "run_runner_fix_loop_rerun",
+  });
+
+  const failedVerification = await runLocalMission({
+    registryRoot,
+    runId,
+    clock: () => new Date("2026-05-16T13:55:00.000Z"),
+  });
+  assert.equal(failedVerification.current_state, "fix_loop");
+  assert.equal(failedVerification.verification.status, "FAIL");
+
+  const fixed = await runLocalMission({
+    registryRoot,
+    runId,
+    clock: () => new Date("2026-05-16T13:56:00.000Z"),
+    implementationDispatchAdapter: {
+      adapter: "test-fix-harness",
+      async execute({ workspace_path }) {
+        await fs.writeFile(path.join(workspace_path, "test/runner.test.js"), [
+          'import test from "node:test";',
+          'import assert from "node:assert/strict";',
+          'test("fixed verification passes", () => { assert.equal(1, 1); });',
+          "",
+        ].join("\n"), "utf8");
+        return {
+          status: "COMPLETED",
+          adapter: "test-fix-harness",
+          actor: "test-fix-harness",
+          summary: "Fix worker updated the failing verification fixture.",
+          evidence: { files_changed: ["test/runner.test.js"] },
+        };
+      },
+    },
+  });
+
+  assert.equal(fixed.outcome, "completed");
+  assert.equal(fixed.current_state, "verification");
+  assert.equal(fixed.implementation_dispatch.fix_attempt, 1);
+  assert.equal(fixed.implementation_dispatch.status, "COMPLETED");
+  assert.deepEqual(fixed.steps_taken.map((step) => step.action), ["fix_attempt_intent", "fix_attempt_result", "transition"]);
+
+  const verified = await runLocalMission({
+    registryRoot,
+    runId,
+    clock: () => new Date("2026-05-16T13:57:00.000Z"),
+  });
+  assert.equal(verified.current_state, "internal_review");
+  assert.equal(verified.verification.status, "PASS");
+
+  const paths = getRunPaths(registryRoot, runId);
+  const snapshot = await readRunSnapshot(paths.runPath);
+  assert.equal(snapshot.execution.current_epoch, 2);
+  const fixArtifacts = Object.values(snapshot.artifacts.recorded.by_path).filter((entry) => entry.gate_name === "fix_attempt");
+  assert.equal(fixArtifacts.filter((entry) => entry.provenance.kind === "fix-attempt-result").length, 1);
+});
+
+test("local runner blocks fix_loop after bounded fix attempts are exhausted", async () => {
+  const tempDir = await makeTempDir();
+  const registryRoot = path.join(tempDir, "registry");
+  const workspacePath = await createVerificationWorkspace(tempDir, {
+    testFile: "test/runner.test.js",
+    passing: false,
+  });
+  const runId = await prepareVerificationRun(registryRoot, workspacePath, {
+    runId: "run_runner_fix_loop_bounds",
+  });
+  const noOpFixAdapter = {
+    adapter: "test-noop-fix-harness",
+    async execute() {
+      return {
+        status: "COMPLETED",
+        adapter: "test-noop-fix-harness",
+        actor: "test-noop-fix-harness",
+        summary: "Fix worker completed but left the failing fixture unchanged.",
+        evidence: { files_changed: [] },
+      };
+    },
+  };
+
+  await runLocalMission({ registryRoot, runId, clock: () => new Date("2026-05-16T13:55:00.000Z") });
+  await runLocalMission({ registryRoot, runId, clock: () => new Date("2026-05-16T13:56:00.000Z"), implementationDispatchAdapter: noOpFixAdapter });
+  await runLocalMission({ registryRoot, runId, clock: () => new Date("2026-05-16T13:57:00.000Z") });
+  await runLocalMission({ registryRoot, runId, clock: () => new Date("2026-05-16T13:58:00.000Z"), implementationDispatchAdapter: noOpFixAdapter });
+  await runLocalMission({ registryRoot, runId, clock: () => new Date("2026-05-16T13:59:00.000Z") });
+  const bounded = await runLocalMission({ registryRoot, runId, clock: () => new Date("2026-05-16T14:00:00.000Z") });
+
+  assert.equal(bounded.outcome, "blocked");
+  assert.equal(bounded.current_state, "blocked_needs_human");
+  assert.equal(bounded.blockers[0].code, "fix_attempts_exhausted");
+  assert.match(bounded.blockers[0].message, /maximum is 2/);
+
+  const paths = getRunPaths(registryRoot, runId);
+  const snapshot = await readRunSnapshot(paths.runPath);
+  assert.equal(snapshot.state, "blocked_needs_human");
+  assert.equal(snapshot.workspace.lease_status, "released");
+});
+
 test("local runner blocks unsafe package-script verification commands and records BLOCKED gate evidence", async () => {
   const tempDir = await makeTempDir();
   const registryRoot = path.join(tempDir, "registry");
