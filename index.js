@@ -90,7 +90,7 @@ export { acquireWorkspaceLease, releaseWorkspaceLease } from "./src/locks.js";
 export { normalizePacket, normalizePacketList, summarizePacketReports } from "./src/packet-sufficiency.js";
 export { createInvocationObserver, normalizeObservabilityConfig, sanitizeError, sanitizeForObservability } from "./src/observability.js";
 export { recoverRegistry } from "./src/recovery.js";
-export { createGithubPrTransportAdapter } from "./src/github-pr-transport-adapter.js";
+export { createGithubCliPrProjectionAdapter, createGithubCliProjectPr, createGithubPrTransportAdapter } from "./src/github-pr-transport-adapter.js";
 export { buildLocalPrProjection, buildRecordedPrProjection, buildPrProjectionPlan, buildPrProjectionResult, createLocalPrProjectionAdapter } from "./src/pr-projection-adapter.js";
 export { runLocalMission } from "./src/runner.js";
 export { appendRunEvent, createBatchFromPacketReports, createRunFromPacketReport, getRegistryPaths, rebuildIndexes, transitionRun, writeJsonAtomic } from "./src/registry.js";

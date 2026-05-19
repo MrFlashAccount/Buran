@@ -83,9 +83,19 @@ These scenarios summarize the behavior the current branch already proves through
 ### Scenario: transport-backed projection remains contract-safe
 - Given an injected PR transport adapter
 - When it returns a valid result
-- Then Buran records the projection result locally first-class
+- Then Buran records the projection intent before any transport call
+- And records the projection result locally first-class
 - And sanitizes secret-like repo or branch values in public-facing recorded payloads
 - And can resume the recorded result idempotently without calling the transport again
+
+### Scenario: GitHub CLI PR transport is opt-in and stacked
+- Given GitHub PR transport is disabled or the repo is not allowlisted
+- When a `pr_ready` run tries to project remotely
+- Then Buran blocks in `pr_ready` without calling `gh`
+- Given transport is enabled for an allowlisted repo
+- When the exact head/base pair has no open PR
+- Then Buran creates a draft PR for that stack pair
+- And when the pair already has an open PR, Buran updates it instead of creating a duplicate
 
 ### Scenario: invalid projection results do not advance the run
 - Given an injected PR transport adapter that returns an invalid or corrupt result
