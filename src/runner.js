@@ -20,7 +20,6 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 
 import { SCHEMA_VERSION, TERMINAL_STATES } from "./constants.js";
-import { buildFixLoopAttempt, createUnavailableFixLoopAdapter, currentFixAttempts, DEFAULT_MAX_FIX_ATTEMPTS, executeFixLoopAttempt } from "./fix-loop-adapter.js";
 import { buildImplementationDispatchIntent, createUnavailableImplementationDispatchAdapter, executeImplementationDispatch } from "./implementation-dispatch.js";
 import { executeInternalReviewGate } from "./internal-review-adapter.js";
 import { acquireWorkspaceLease } from "./locks.js";
