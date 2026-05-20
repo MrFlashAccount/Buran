@@ -40,7 +40,7 @@ This file is the quick source-tree guide for maintainers. It maps the current co
 | `src/verification-adapter.js` | allowlisted verification command execution and verification report generation. |
 | `src/internal-review-adapter.js` | local internal-review report generation that treats packet review text as context only. |
 | `src/pr-projection-adapter.js` | local fake PR projection planning, artifact generation, and projection replay helpers. |
-| `src/github-pr-transport-adapter.js` | injectable transport-backed PR projection seam with sanitization and result validation. |
+| `src/github-pr-transport-adapter.js` | injectable transport-backed PR projection seam plus disabled-by-default GitHub CLI stacked-PR create/update hook with repo allowlisting, local-first intent, sanitization, and result validation. |
 | `src/projection-contract.js` | projection payload normalization and contract checks shared by projection code. |
 | `src/observability.js` | redaction, public report sanitization, and observability path helpers. |
 
@@ -83,6 +83,8 @@ recover -> replay + rebuild + quarantine when state is ambiguous
 ## What is intentionally absent
 
 - no autonomous task discovery
-- no direct implementation or fix worker execution inside the runner; worker execution is behind the injected implementation-dispatch adapter
-- no default remote GitHub write path in the CLI/runtime slice
+- no direct implementation or fix worker execution inside the runner; worker execution is behind injected approved adapters
+- no implementation worker execution outside the approved implementation-harness adapter boundary
+- no fix-loop worker execution outside the approved implementation-harness adapter boundary
+- no default remote GitHub write path in the CLI/runtime slice; live GitHub PR transport is injected and explicitly enabled only
 - no dashboard or backlog management surface

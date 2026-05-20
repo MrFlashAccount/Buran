@@ -9,7 +9,7 @@ import { promisify } from "node:util";
 
 import { formatBuranReport } from "../src/buran.js";
 import { runBuranCli } from "../src/cli.js";
-import { createGithubPrTransportAdapter } from "../src/github-pr-transport-adapter.js";
+import { createGithubCliProjectPr, createGithubPrTransportAdapter } from "../src/github-pr-transport-adapter.js";
 import { acquireWorkspaceLease } from "../src/locks.js";
 import { executeImplementationDispatch, validateImplementationDispatchResultReport } from "../src/implementation-dispatch.js";
 import { recoverRegistry } from "../src/recovery.js";
@@ -2596,7 +2596,7 @@ test("local runner records a local PR projection handoff and advances pr_ready t
 test("transport-backed PR projection reuses a sanitized recorded result without duplicate transport calls", async () => {
   const tempDir = await makeTempDir();
   const registryRoot = path.join(tempDir, "registry");
-  const repo = "example-owner/ghp_abcdefghijklmnopqrstuvwxyz123456";
+  const repo = "example-owner/example-repo";
   const intendedBranch = "feature/glpat-abcdefghijklmnopqrstuvwxyz123456/Users/user/private";
   const baseBranch = "develop/github_pat_abcdefghijklmnopqrstuvwxyz123456";
   const runId = await preparePrReadyRun(registryRoot, tempDir, {
@@ -2633,7 +2633,7 @@ test("transport-backed PR projection reuses a sanitized recorded result without 
   assert.equal(first.projection.status, "created");
   assert.equal(first.projection.mode, "github_transport");
   assert.equal(first.projection.github_pr.number, 4242);
-  assert.equal(first.projection.github_pr.repo, "example-owner/[REDACTED_SECRET]");
+  assert.equal(first.projection.github_pr.repo, "example-owner/example-repo");
   assert.equal(first.projection.github_pr.head_branch, "feature/[REDACTED_SECRET]<absolute_path>/private");
   assert.equal(first.projection.github_pr.base_branch, "develop/[REDACTED_SECRET]");
   assert.equal(transportCalls, 1);
@@ -2665,16 +2665,409 @@ test("transport-backed PR projection reuses a sanitized recorded result without 
     ["transition", "completed", "ready_for_manual_review"],
   ]);
   assert.equal(transportCalls, 1);
-  assert.equal(retried.projection.github_pr.repo, "example-owner/[REDACTED_SECRET]");
+  assert.equal(retried.projection.github_pr.repo, "example-owner/example-repo");
   assert.equal(retried.projection.github_pr.head_branch, "feature/[REDACTED_SECRET]<absolute_path>/private");
   assert.equal(retried.projection.github_pr.base_branch, "develop/[REDACTED_SECRET]");
   assert.equal(retriedSnapshot.github.pr.url, "https://github.com/example-owner/example-repo/pull/4242");
-  assert.equal(retriedSnapshot.github.pr.repo, "example-owner/[REDACTED_SECRET]");
+  assert.equal(retriedSnapshot.github.pr.repo, "example-owner/example-repo");
   assert.equal(retriedSnapshot.github.pr.head_branch, "feature/[REDACTED_SECRET]<absolute_path>/private");
   assert.equal(retriedSnapshot.github.pr.base_branch, "develop/[REDACTED_SECRET]");
   assert.equal(eventsAfterRetry.filter((event) => event.type === "projection.intent_recorded").length, 1);
   assert.equal(eventsAfterRetry.filter((event) => event.type === "projection.result_recorded").length, 1);
   assert.equal(eventsAfterRetry.length, eventsBeforeRetry.length + 1);
+});
+
+
+test("github cli PR transport is disabled by default and requires an allowlisted repo", async () => {
+  const disabledProjectPr = createGithubCliProjectPr({
+    allowedRepos: ["example-owner/example-repo"],
+    execFileImpl: async () => {
+      throw new Error("gh should not run while disabled");
+    },
+  });
+  await assert.rejects(
+    () => disabledProjectPr({ repo: "example-owner/example-repo", head_branch: "feature/one", base_branch: "main" }),
+    /disabled/i,
+  );
+
+  const notAllowedProjectPr = createGithubCliProjectPr({
+    enabled: true,
+    allowedRepos: ["example-owner/example-repo"],
+    execFileImpl: async () => {
+      throw new Error("gh should not run for non-allowlisted repos");
+    },
+  });
+  await assert.rejects(
+    () => notAllowedProjectPr({ repo: "other-owner/other-repo", head_branch: "feature/one", base_branch: "main" }),
+    /allowlisted/i,
+  );
+});
+
+test("transport-backed PR projection rejects PR URLs outside the configured provider binding", async () => {
+  const snapshot = {
+    run_id: "run_transport_url_binding",
+    task_id: "transport-url-binding",
+    state: "pr_ready",
+    execution: { current_epoch: 1 },
+    gates: {
+      verification: { status: "PASS", current_epoch: 1, current_attempt: 1, artifact_refs: [] },
+      internal_review: { status: "PASS", current_epoch: 1, current_attempt: 1, artifact_refs: [] },
+    },
+    github: {
+      repo: "example-owner/example-repo",
+      issue_number: 17,
+      intended_branch: "feature/url-binding",
+      base_branch: "main",
+    },
+    projections: {},
+  };
+
+  for (const [name, url, number] of [
+    ["wrong host", "https://evil.example.com/example-owner/example-repo/pull/4242", 4242],
+    ["wrong repo", "https://github.com/other-owner/example-repo/pull/4242", 4242],
+    ["wrong number", "https://github.com/example-owner/example-repo/pull/4243", 4242],
+  ]) {
+    const adapter = createGithubPrTransportAdapter({
+      externalSideEffects: false,
+      projectPr() {
+        return {
+          status: "created",
+          number,
+          url,
+          state: "open",
+          draft: false,
+          title: `Buran handoff ${name}`,
+        };
+      },
+    });
+    const plan = adapter.plan(snapshot, { clock: () => new Date("2026-05-16T13:57:00.000Z"), actor: "runner-test" });
+
+    await assert.rejects(
+      () => adapter.execute(snapshot, plan),
+      (error) => error?.code === "projection_invalid_transport_result" && /host\/repo\/number/i.test(error.message),
+    );
+  }
+
+  const enterpriseAdapter = createGithubPrTransportAdapter({
+    externalSideEffects: false,
+    githubHost: "github.internal.example",
+    projectPr() {
+      return {
+        status: "created",
+        number: 4242,
+        url: "https://github.internal.example/example-owner/example-repo/pull/4242",
+        state: "open",
+        draft: false,
+        title: "Buran handoff enterprise",
+      };
+    },
+  });
+  const enterprisePlan = enterpriseAdapter.plan(snapshot, { clock: () => new Date("2026-05-16T13:57:00.000Z"), actor: "runner-test" });
+  const enterpriseProjection = await enterpriseAdapter.execute(snapshot, enterprisePlan);
+  assert.equal(enterpriseProjection.githubPr.url, "https://github.internal.example/example-owner/example-repo/pull/4242");
+});
+
+
+test("github cli PR transport builds a minimal noninteractive env by default", async () => {
+  const calls = [];
+  const projectPr = createGithubCliProjectPr({
+    enabled: true,
+    allowedRepos: ["example-owner/example-repo"],
+    env: {
+      PATH: "/usr/bin",
+      HOME: "/tmp/home",
+      GH_TOKEN: "token-fixture",
+      API_SECRET_SHOULD_NOT_LEAK: "caller-secret",
+    },
+    extraEnv: {
+      GH_CONFIG_DIR: "/tmp/gh-config",
+    },
+    timeoutMs: 1234,
+    async execFileImpl(file, args, options) {
+      calls.push({ file, args, options });
+      if (args[0] === "pr" && args[1] === "list") return { stdout: "[]\n" };
+      if (args[0] === "pr" && args[1] === "create") return { stdout: "https://github.com/example-owner/example-repo/pull/91\n" };
+      if (args[0] === "pr" && args[1] === "view") return { stdout: JSON.stringify({ number: 91, url: "https://github.com/example-owner/example-repo/pull/91", isDraft: true, title: "Buran handoff", headRefName: "feature/minimal-env", baseRefName: "main", state: "OPEN" }) };
+      throw new Error(`unexpected gh call: ${args.join(" ")}`);
+    },
+  });
+
+  await projectPr({
+    run_id: "run_cli_minimal_env",
+    task_id: "task-cli-minimal-env",
+    repo: "example-owner/example-repo",
+    head_branch: "feature/minimal-env",
+    base_branch: "main",
+    title: "Buran handoff",
+  });
+
+  assert.ok(calls.length >= 3);
+  for (const call of calls) {
+    assert.deepEqual(call.options.env, {
+      PATH: "/usr/bin",
+      HOME: "/tmp/home",
+      GH_TOKEN: "token-fixture",
+      GH_PROMPT_DISABLED: "1",
+      GIT_TERMINAL_PROMPT: "0",
+      GH_CONFIG_DIR: "/tmp/gh-config",
+    });
+    assert.equal(call.options.timeout, 1234);
+    assert.equal(call.options.windowsHide, true);
+    assert.equal(Object.hasOwn(call.options.env, "API_SECRET_SHOULD_NOT_LEAK"), false);
+  }
+});
+
+
+test("github cli PR transport creates draft stacked PRs with explicit base and head", async () => {
+  const calls = [];
+  const privatePath = ["", "Users", "user", "private", "notes.md"].join("/");
+  const projectPr = createGithubCliProjectPr({
+    enabled: true,
+    allowedRepos: ["example-owner/example-repo"],
+    env: { PATH: "/usr/bin" },
+    async execFileImpl(file, args, options) {
+      calls.push({ file, args, options });
+      if (args[0] === "pr" && args[1] === "list") return { stdout: "[]\n" };
+      if (args[0] === "pr" && args[1] === "create") return { stdout: "https://github.com/example-owner/example-repo/pull/77\n" };
+      if (args[0] === "pr" && args[1] === "view") return { stdout: JSON.stringify({ number: 77, url: "https://github.com/example-owner/example-repo/pull/77", isDraft: true, title: "Buran handoff", headRefName: "buran/slice-05-github-stacked-pr-transport", baseRefName: "buran/slice-04-fix-rereview-loop", state: "OPEN" }) };
+      throw new Error(`unexpected gh call: ${args.join(" ")}`);
+    },
+  });
+
+  const result = await projectPr({
+    run_id: "run_cli_create",
+    task_id: `task-cli-create ghp_abcdefghijklmnopqrstuvwxyz123456 ${privatePath}`,
+    repo: "example-owner/example-repo",
+    head_branch: "buran/slice-05-github-stacked-pr-transport",
+    base_branch: "buran/slice-04-fix-rereview-loop",
+    title: "Buran handoff",
+  });
+
+  assert.equal(result.status, "created");
+  assert.equal(result.number, 77);
+  assert.equal(result.draft, true);
+  const createCall = calls.find((call) => call.args[0] === "pr" && call.args[1] === "create");
+  assert.ok(createCall);
+  assert.deepEqual(createCall.args.slice(0, 10), ["pr", "create", "--repo", "example-owner/example-repo", "--head", "buran/slice-05-github-stacked-pr-transport", "--base", "buran/slice-04-fix-rereview-loop", "--title", "Buran handoff"]);
+  assert.equal(createCall.args.includes("--body"), true);
+  const body = createCall.args[createCall.args.indexOf("--body") + 1];
+  assert.match(body, /\[REDACTED_SECRET\]/);
+  assert.match(body, /<absolute_path>\/notes\.md/);
+  assert.doesNotMatch(body, /ghp_abcdefghijklmnopqrstuvwxyz123456/);
+  assert.doesNotMatch(body, new RegExp(privatePath.replaceAll("/", "\\/")));
+  assert.equal(createCall.args.includes("--draft"), true);
+  assert.equal(createCall.args.includes("--json"), false);
+  assert.deepEqual(createCall.options.env, {
+    PATH: "/usr/bin",
+    GH_PROMPT_DISABLED: "1",
+    GIT_TERMINAL_PROMPT: "0",
+  });
+  assert.equal(createCall.options.timeout, 30_000);
+  const viewCall = calls.find((call) => call.args[0] === "pr" && call.args[1] === "view");
+  assert.ok(viewCall);
+  assert.equal(viewCall.args[2], "https://github.com/example-owner/example-repo/pull/77");
+  assert.equal(viewCall.args.includes("number,url,isDraft,title,headRefName,baseRefName,state"), true);
+});
+
+
+test("github cli PR transport sanitizes caller-provided title and body before gh writes", async () => {
+  const calls = [];
+  let createdTitle = "";
+  const privatePath = ["", "Users", "user", "private", "body.md"].join("/");
+  const projectPr = createGithubCliProjectPr({
+    enabled: true,
+    allowedRepos: ["example-owner/example-repo"],
+    bodyBuilder() {
+      return `Custom body ghp_abcdefghijklmnopqrstuvwxyz123456 ${privatePath}`;
+    },
+    async execFileImpl(file, args) {
+      calls.push({ file, args });
+      if (args[0] === "pr" && args[1] === "list") return { stdout: "[]\n" };
+      if (args[0] === "pr" && args[1] === "create") {
+        createdTitle = args[args.indexOf("--title") + 1];
+        return { stdout: "https://github.com/example-owner/example-repo/pull/78\n" };
+      }
+      if (args[0] === "pr" && args[1] === "view") return { stdout: JSON.stringify({ number: 78, url: "https://github.com/example-owner/example-repo/pull/78", isDraft: true, title: createdTitle, headRefName: "feature/custom-body", baseRefName: "main", state: "OPEN" }) };
+      throw new Error(`unexpected gh call: ${args.join(" ")}`);
+    },
+  });
+
+  const result = await projectPr({
+    run_id: "run_cli_custom_body",
+    task_id: "task-cli-custom-body",
+    repo: "example-owner/example-repo",
+    head_branch: "feature/custom-body",
+    base_branch: "main",
+    title: "Title github_pat_abcdefghijklmnopqrstuvwxyz123456",
+  });
+
+  const createCall = calls.find((call) => call.args[0] === "pr" && call.args[1] === "create");
+  assert.ok(createCall);
+  const title = createCall.args[createCall.args.indexOf("--title") + 1];
+  const body = createCall.args[createCall.args.indexOf("--body") + 1];
+  assert.match(title, /\[REDACTED_SECRET\]/);
+  assert.doesNotMatch(title, /github_pat_abcdefghijklmnopqrstuvwxyz123456/);
+  assert.match(body, /\[REDACTED_SECRET\]/);
+  assert.match(body, /<absolute_path>\/body\.md/);
+  assert.doesNotMatch(body, /ghp_abcdefghijklmnopqrstuvwxyz123456/);
+  assert.doesNotMatch(body, new RegExp(privatePath.replaceAll("/", "\\/")));
+  assert.equal(result.title, title);
+});
+
+test("github cli PR transport updates an existing stacked PR instead of creating a duplicate", async () => {
+  const calls = [];
+  const projectPr = createGithubCliProjectPr({
+    enabled: true,
+    allowedRepos: ["example-owner/example-repo"],
+    draft: false,
+    async execFileImpl(file, args) {
+      calls.push({ file, args });
+      if (args[0] === "pr" && args[1] === "list") return { stdout: JSON.stringify([{ number: 88, url: "https://github.com/example-owner/example-repo/pull/88", isDraft: false, title: "Old", headRefName: "feature/existing", baseRefName: "buran/slice-04-fix-rereview-loop", state: "OPEN" }]) };
+      if (args[0] === "pr" && args[1] === "edit") return { stdout: "" };
+      if (args[0] === "pr" && args[1] === "view") return { stdout: JSON.stringify({ number: 88, url: "https://github.com/example-owner/example-repo/pull/88", isDraft: false, title: "New", headRefName: "feature/existing", baseRefName: "buran/slice-04-fix-rereview-loop", state: "OPEN" }) };
+      throw new Error(`unexpected gh call: ${args.join(" ")}`);
+    },
+  });
+
+  const result = await projectPr({
+    run_id: "run_cli_update",
+    task_id: "task-cli-update",
+    repo: "example-owner/example-repo",
+    head_branch: "feature/existing",
+    base_branch: "buran/slice-04-fix-rereview-loop",
+    title: "New",
+  });
+
+  assert.equal(result.status, "updated");
+  assert.equal(result.number, 88);
+  assert.equal(calls.some((call) => call.args[0] === "pr" && call.args[1] === "create"), false);
+  const editCall = calls.find((call) => call.args[0] === "pr" && call.args[1] === "edit");
+  assert.deepEqual(editCall.args.slice(0, 7), ["pr", "edit", "88", "--repo", "example-owner/example-repo", "--base", "buran/slice-04-fix-rereview-loop"]);
+});
+
+
+test("github cli PR transport rejects mismatched existing PR metadata before edit", async () => {
+  const calls = [];
+  const projectPr = createGithubCliProjectPr({
+    enabled: true,
+    allowedRepos: ["example-owner/example-repo"],
+    async execFileImpl(file, args) {
+      calls.push({ file, args });
+      if (args[0] === "pr" && args[1] === "list") {
+        return { stdout: JSON.stringify([{ number: 88, url: "https://github.com/example-owner/example-repo/pull/88", isDraft: false, title: "Old", headRefName: "wrong/head", baseRefName: "buran/slice-04-fix-rereview-loop", state: "OPEN" }]) };
+      }
+      if (args[0] === "pr" && args[1] === "edit") throw new Error("gh pr edit must not run for mismatched existing PR metadata");
+      throw new Error(`unexpected gh call: ${args.join(" ")}`);
+    },
+  });
+
+  await assert.rejects(
+    () => projectPr({
+      run_id: "run_cli_existing_mismatch",
+      task_id: "task-cli-existing-mismatch",
+      repo: "example-owner/example-repo",
+      head_branch: "feature/existing",
+      base_branch: "buran/slice-04-fix-rereview-loop",
+      title: "New",
+    }),
+    /explicit stacked head\/base branches/i,
+  );
+  assert.equal(calls.some((call) => call.args[0] === "pr" && call.args[1] === "edit"), false);
+});
+
+
+
+test("github cli PR transport rejects malformed existing PR list payloads before writes", async () => {
+  for (const [name, listStdout] of [
+    ["missing number", JSON.stringify([{ url: "https://github.com/example-owner/example-repo/pull/88", isDraft: false, title: "Old", headRefName: "feature/existing", baseRefName: "buran/slice-04-fix-rereview-loop", state: "OPEN" }])],
+    ["non-array", JSON.stringify({ number: 88, headRefName: "feature/existing", baseRefName: "buran/slice-04-fix-rereview-loop", state: "OPEN" })],
+    ["duplicate rows", JSON.stringify([
+      { number: 88, url: "https://github.com/example-owner/example-repo/pull/88", isDraft: false, title: "Old", headRefName: "feature/existing", baseRefName: "buran/slice-04-fix-rereview-loop", state: "OPEN" },
+      { number: 89, url: "https://github.com/example-owner/example-repo/pull/89", isDraft: false, title: "Also old", headRefName: "feature/existing", baseRefName: "buran/slice-04-fix-rereview-loop", state: "OPEN" },
+    ])],
+  ]) {
+    const calls = [];
+    const projectPr = createGithubCliProjectPr({
+      enabled: true,
+      allowedRepos: ["example-owner/example-repo"],
+      async execFileImpl(file, args) {
+        calls.push({ file, args });
+        if (args[0] === "pr" && args[1] === "list") return { stdout: listStdout };
+        if (args[0] === "pr" && (args[1] === "edit" || args[1] === "create")) throw new Error(`gh pr ${args[1]} must not run for malformed existing PR list payload: ${name}`);
+        throw new Error(`unexpected gh call for ${name}: ${args.join(" ")}`);
+      },
+    });
+
+    await assert.rejects(
+      () => projectPr({
+        run_id: `run_cli_existing_${name.replaceAll(" ", "_")}`,
+        task_id: `task-cli-existing-${name.replaceAll(" ", "-")}`,
+        repo: "example-owner/example-repo",
+        head_branch: "feature/existing",
+        base_branch: "buran/slice-04-fix-rereview-loop",
+        title: "New",
+      }),
+      /valid existing PR number|array of open stacked PRs|multiple open PRs/i,
+    );
+    assert.equal(calls.some((call) => call.args[0] === "pr" && (call.args[1] === "edit" || call.args[1] === "create")), false);
+  }
+});
+
+test("github cli PR transport rejects remote PR responses with mismatched or incomplete stack metadata", async () => {
+  for (const [name, remotePr] of [
+    ["mismatched head", { number: 99, url: "https://github.com/example-owner/example-repo/pull/99", isDraft: true, title: "Buran handoff", headRefName: "wrong/head", baseRefName: "buran/slice-04-fix-rereview-loop", state: "OPEN" }],
+    ["missing stack metadata", { number: 100, url: "https://github.com/example-owner/example-repo/pull/100", isDraft: true, title: "Buran handoff", state: "OPEN" }],
+    ["missing state", { number: 101, url: "https://github.com/example-owner/example-repo/pull/101", isDraft: true, title: "Buran handoff", headRefName: "buran/slice-05-github-stacked-pr-transport", baseRefName: "buran/slice-04-fix-rereview-loop" }],
+    ["closed state", { number: 102, url: "https://github.com/example-owner/example-repo/pull/102", isDraft: true, title: "Buran handoff", headRefName: "buran/slice-05-github-stacked-pr-transport", baseRefName: "buran/slice-04-fix-rereview-loop", state: "CLOSED" }],
+  ]) {
+    const projectPr = createGithubCliProjectPr({
+      enabled: true,
+      allowedRepos: ["example-owner/example-repo"],
+      async execFileImpl(file, args) {
+        if (args[0] === "pr" && args[1] === "list") return { stdout: "[]\n" };
+        if (args[0] === "pr" && args[1] === "create") return { stdout: `${remotePr.url}\n` };
+        if (args[0] === "pr" && args[1] === "view") return { stdout: JSON.stringify(remotePr) };
+        throw new Error(`unexpected gh call for ${name}: ${args.join(" ")}`);
+      },
+    });
+
+    await assert.rejects(
+      () => projectPr({
+        run_id: `run_cli_${name.replaceAll(" ", "_")}`,
+        task_id: `task-cli-${name.replaceAll(" ", "-")}`,
+        repo: "example-owner/example-repo",
+        head_branch: "buran/slice-05-github-stacked-pr-transport",
+        base_branch: "buran/slice-04-fix-rereview-loop",
+        title: "Buran handoff",
+      }),
+      /explicit stacked head\/base branches|open PR/i,
+    );
+  }
+});
+
+test("github cli PR transport rejects incomplete view payloads instead of defaulting missing draft state", async () => {
+  const projectPr = createGithubCliProjectPr({
+    enabled: true,
+    allowedRepos: ["example-owner/example-repo"],
+    async execFileImpl(file, args) {
+      if (args[0] === "pr" && args[1] === "list") return { stdout: "[]\n" };
+      if (args[0] === "pr" && args[1] === "create") return { stdout: "https://github.com/example-owner/example-repo/pull/103\n" };
+      if (args[0] === "pr" && args[1] === "view") return { stdout: JSON.stringify({ number: 103, url: "https://github.com/example-owner/example-repo/pull/103", title: "Buran handoff", headRefName: "feature/missing-draft", baseRefName: "main", state: "OPEN" }) };
+      throw new Error(`unexpected gh call: ${args.join(" ")}`);
+    },
+  });
+
+  await assert.rejects(
+    () => projectPr({
+      run_id: "run_cli_missing_draft",
+      task_id: "task-cli-missing-draft",
+      repo: "example-owner/example-repo",
+      head_branch: "feature/missing-draft",
+      base_branch: "main",
+      title: "Buran handoff",
+    }),
+    /isDraft as a boolean/i,
+  );
 });
 
 test("transport-backed PR projection preserves contract-valid repo and branch values until durable sanitization", async () => {
@@ -2688,7 +3081,7 @@ test("transport-backed PR projection preserves contract-valid repo and branch va
       internal_review: { status: "PASS", current_epoch: 1, current_attempt: 1, artifact_refs: [] },
     },
     github: {
-      repo: "example-owner/ghp_abcdefghijklmnopqrstuvwxyz123456",
+      repo: "example-owner/example-repo",
       issue_number: 17,
       intended_branch: "feature/glpat-abcdefghijklmnopqrstuvwxyz123456/Users/user/private",
       base_branch: "develop/github_pat_abcdefghijklmnopqrstuvwxyz123456",
@@ -2716,10 +3109,10 @@ test("transport-backed PR projection preserves contract-valid repo and branch va
   const projection = await prProjectionAdapter.execute(snapshot, plan);
 
   assert.equal(projection.result.status, "created");
-  assert.equal(projection.githubPr.repo, "example-owner/[REDACTED_SECRET]");
+  assert.equal(projection.githubPr.repo, "example-owner/example-repo");
   assert.equal(projection.githubPr.head_branch, "feature/[REDACTED_SECRET]<absolute_path>/private");
   assert.equal(projection.githubPr.base_branch, "develop/[REDACTED_SECRET]");
-  assert.equal(projection.result.github_pr.repo, "example-owner/[REDACTED_SECRET]");
+  assert.equal(projection.result.github_pr.repo, "example-owner/example-repo");
   assert.equal(projection.result.github_pr.head_branch, "feature/[REDACTED_SECRET]<absolute_path>/private");
   assert.equal(projection.result.github_pr.base_branch, "develop/[REDACTED_SECRET]");
   assert.match(plan.intentIdempotencyKey, /^github\.pr:[a-f0-9]{64}:intent$/);
@@ -2787,6 +3180,101 @@ test("local runner records sanitized projection payloads and safe idempotency ke
     resultEvent.evidence.intent_idempotency_key,
   ]) {
     assert.doesNotMatch(value, /(github_pat_|ghp_|glpat-|\/Users\/)/);
+  }
+});
+
+test("local runner preserves structured GitHub transport blocker classifications", async () => {
+  const cases = [
+    {
+      name: "disabled",
+      runId: "run_runner_pr_projection_cli_disabled",
+      expectedCode: "pr_projection_github_transport_disabled",
+      projectPr: () => createGithubCliProjectPr({
+        enabled: false,
+        allowedRepos: ["example-owner/example-repo"],
+      }),
+    },
+    {
+      name: "repo not allowed",
+      runId: "run_runner_pr_projection_cli_repo_not_allowed",
+      expectedCode: "pr_projection_github_repo_not_allowed",
+      repo: "other-owner/other-repo",
+      projectPr: () => createGithubCliProjectPr({
+        enabled: true,
+        allowedRepos: ["example-owner/example-repo"],
+      }),
+    },
+    {
+      name: "gh unavailable",
+      runId: "run_runner_pr_projection_cli_unavailable",
+      expectedCode: "pr_projection_github_unavailable",
+      projectPr: () => createGithubCliProjectPr({
+        enabled: true,
+        allowedRepos: ["example-owner/example-repo"],
+        async execFileImpl() {
+          const error = new Error("spawn gh ENOENT");
+          error.code = "ENOENT";
+          throw error;
+        },
+      }),
+    },
+    {
+      name: "gh auth failure",
+      runId: "run_runner_pr_projection_cli_auth_failed",
+      expectedCode: "pr_projection_github_auth_failed",
+      projectPr: () => createGithubCliProjectPr({
+        enabled: true,
+        allowedRepos: ["example-owner/example-repo"],
+        async execFileImpl() {
+          const error = new Error("gh auth required");
+          error.stderr = "authentication required: run gh auth login";
+          throw error;
+        },
+      }),
+    },
+    {
+      name: "gh timeout",
+      runId: "run_runner_pr_projection_cli_timeout",
+      expectedCode: "pr_projection_github_timeout",
+      projectPr: () => createGithubCliProjectPr({
+        enabled: true,
+        allowedRepos: ["example-owner/example-repo"],
+        async execFileImpl() {
+          const error = new Error("Command timed out");
+          error.timedOut = true;
+          throw error;
+        },
+      }),
+    },
+  ];
+
+  for (const scenario of cases) {
+    const tempDir = await makeTempDir();
+    const registryRoot = path.join(tempDir, "registry");
+    const runId = await preparePrReadyRun(registryRoot, tempDir, {
+      runId: scenario.runId,
+      repo: scenario.repo || "example-owner/example-repo",
+    });
+    const prProjectionAdapter = createGithubPrTransportAdapter({
+      externalSideEffects: false,
+      projectPr: scenario.projectPr(),
+    });
+
+    const result = await runLocalMission({
+      registryRoot,
+      runId,
+      clock: () => new Date("2026-05-16T13:57:00.000Z"),
+      prProjectionAdapter,
+    });
+
+    assert.equal(result.outcome, "blocked", scenario.name);
+    assert.equal(result.current_state, "pr_ready", scenario.name);
+    assert.equal(result.projection.problem.code, scenario.expectedCode, scenario.name);
+    assert.equal(result.blockers[0].code, scenario.expectedCode, scenario.name);
+    assert.deepEqual(result.steps_taken.map((step) => [step.action, step.status, step.toState || step.to_state]), [
+      ["projection_intent_recorded", "completed", "pr_ready"],
+      ["projection_result_recorded", "blocked", "pr_ready"],
+    ], scenario.name);
   }
 });
 

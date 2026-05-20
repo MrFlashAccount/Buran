@@ -2,7 +2,7 @@
 
 GitHub, TaskFlow, comments, labels, and project fields are projection/journal surfaces. They never replace the local ExecutionRun registry as source of truth.
 
-Current implementation note: the default CLI/runtime `pr_ready` path still uses a deterministic `local_fake` projection flow that records intent/result artifacts plus `github.pr`/`projections.github_pr` metadata without a network write. Slice 7 adds an injectable PR transport seam for tests and future launch wiring, but launch/config/auth plumbing remains separate: any transport-backed projection must still record local intent first, validate the returned PR payload against the local contract, and fail closed on invalid/corrupt replay evidence.
+Current implementation note: the default CLI/runtime `pr_ready` path uses a deterministic `local_fake` projection flow that records intent/result artifacts plus `github.pr`/`projections.github_pr` metadata without a network write. A GitHub CLI-backed transport is available only when explicitly enabled by the embedding caller, with a repo allowlist and explicit stacked `head_branch`/`base_branch`; any transport-backed projection still records local intent first, validates the returned PR payload against the local contract, and fails closed in `pr_ready` on invalid/corrupt/blocked transport evidence.
 
 ## Projection ownership
 
@@ -44,7 +44,8 @@ Every remote write must include or derive a stable idempotency key from:
 - `run_id`;
 - projection target;
 - local state/event sequence;
-- target issue/PR id.
+- target issue/PR id;
+- explicit stacked PR identity, including `github.base_branch` and `github.intended_branch` for PR projection.
 
 Retries must update or no-op existing projection records rather than duplicate comments when the remote API allows it. If duplication cannot be prevented, local projection logs must make duplicates auditable.
 
@@ -58,7 +59,12 @@ The projector may create or update a PR only when local state proves:
 - branch/head/base data are present;
 - artifact references exist for verification and review summaries.
 
-After PR handoff, the local terminal state is `ready_for_manual_review`. In local fake mode, that handoff is proven by the recorded projection artifact/result rather than a live GitHub response.
+After PR handoff, the local terminal state is `ready_for_manual_review`. In local fake mode, that handoff is proven by the recorded projection artifact/result rather than a live GitHub response. In GitHub CLI transport mode, Buran first records the projection intent locally, then creates or updates the open stacked PR for the exact head/base pair, records the validated result, and only then advances. The returned PR URL must match the configured GitHub host and the expected `owner/repo/pull/<number>` binding. Transport failure, disabled config, non-allowlisted repos, missing stack branches, remote stack mismatch, unavailable `gh`, auth failure, timeout, or invalid GitHub responses leave the run in `pr_ready` with a structured `pr_projection_*` blocker.
+
+
+### GitHub CLI transport reliability
+
+Live `gh` transport runs with a minimal allowlisted environment rather than inheriting the caller process environment. By default it forwards only shell/location/auth values needed by GitHub CLI (`PATH`, `HOME`/XDG directories, `GH_TOKEN`/`GITHUB_TOKEN`, `GH_HOST`, `NO_COLOR`, `CI`) plus noninteractive guards (`GH_PROMPT_DISABLED=1`, `GIT_TERMINAL_PROMPT=0`). Additional environment variables require explicit adapter opt-in. Every `gh` invocation is bounded by a timeout and CLI failures are reported as structured blockers such as `pr_projection_github_transport_disabled`, `pr_projection_github_repo_not_allowed`, `pr_projection_github_stack_incomplete`, `pr_projection_github_remote_mismatch`, `pr_projection_github_unavailable`, `pr_projection_github_auth_failed`, or `pr_projection_github_timeout`.
 
 ## Projection repair
 

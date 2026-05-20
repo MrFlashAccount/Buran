@@ -94,6 +94,7 @@ Most setups only need one plugin setting plus the run inputs OpenClaw passes whe
 | Workspace ID | Run input | Stable lease identity for the workspace doing the work | Helps keep parallel runs from colliding. |
 | Workspace path | Run input | Which local checkout or working directory is leased for the run | Useful when the task must stay pinned to a specific repo path. |
 | Lease TTL | Run input | How long a workspace lease stays active before recovery can reclaim stale ownership | Optional override for longer-running work. |
+| GitHub PR transport | Embedding/runtime adapter config | Whether `pr_ready` may create/update a real stacked GitHub PR | Disabled by default. Enable only with an explicit repo allowlist; Buran records local projection intent before any remote write and requires exact head/base branches. |
 
 ## Recovery and review handoff
 
