@@ -137,6 +137,7 @@ async function prepareVerificationRun(registryRoot, workspacePath, {
   baseBranch = "develop",
   reviewCriteria = ["Review the recorded verification artifact"],
   reviewerPlan = "",
+  reviewVerdictArtifactPath = "",
 } = {}) {
   const base = packetReport(runId, {
     taskId,
@@ -169,6 +170,7 @@ async function prepareVerificationRun(registryRoot, workspacePath, {
       review: {
         criteria: reviewCriteria,
         ...(reviewerPlan ? { reviewer_plan: reviewerPlan } : {}),
+        ...(reviewVerdictArtifactPath ? { verdict_artifact_path: reviewVerdictArtifactPath } : {}),
       },
       conflict_surface: base.conflict_surface,
     },
@@ -200,32 +202,98 @@ async function advanceRunToInternalReview(registryRoot, runId, timestamp = "2026
   });
 }
 
-/** Records a synthetic internal-review result without re-running the full reviewer flow. */
+
+/** Writes an independent-review verdict artifact under the run artifact directory. */
+async function writeReviewVerdictArtifact(registryRoot, runId, {
+  status = "PASS",
+  summary = `Independent review ${status}`,
+  findings = [],
+  evidence = [],
+  problem = null,
+  artifactPath = "artifacts/internal-review/verdict.json",
+  extraFields = {},
+} = {}) {
+  const paths = getRunPaths(registryRoot, runId);
+  const absolutePath = path.join(paths.runDir, artifactPath);
+  await fs.mkdir(path.dirname(absolutePath), { recursive: true });
+  await fs.writeFile(absolutePath, `${JSON.stringify({
+    schema_version: "internal-review-verdict.v1",
+    reviewer: "independent-runtime-reviewer",
+    status,
+    summary,
+    findings,
+    evidence,
+    ...(problem ? { problem } : {}),
+    ...extraFields,
+  }, null, 2)}\n`, "utf8");
+  return artifactPath;
+}
+
+/** Records an internal-review result without re-running the full reviewer flow. */
 async function seedInternalReviewGateResult(registryRoot, runId, {
   status = "PASS",
   summary = `Seeded internal review ${status}`,
   problem = null,
   recordedAt = "2026-05-16T13:56:00.000Z",
+  withReviewerEvidence = true,
+  verdictArtifactPath = `artifacts/internal-review/seed-verdict-${status.toLowerCase()}-${runId}.json`,
+  reviewerResultExtra = {},
+  reportExtraFields = {},
 } = {}) {
   const paths = getRunPaths(registryRoot, runId);
   const snapshot = await readRunSnapshot(paths.runPath);
   const executionEpoch = snapshot.execution.current_epoch;
   const gateAttempt = (snapshot.gates.internal_review.current_attempt || 0) + 1;
+  let reviewerResult = null;
+
+  if (withReviewerEvidence) {
+    const verdictContent = `${JSON.stringify({
+      schema_version: "internal-review-verdict.v1",
+      reviewer: "independent-runtime-reviewer",
+      status,
+      summary,
+      findings: [],
+      evidence: [],
+      ...(problem ? { problem } : {}),
+    }, null, 2)}
+`;
+    const absoluteVerdictPath = path.join(paths.runDir, verdictArtifactPath);
+    await fs.mkdir(path.dirname(absoluteVerdictPath), { recursive: true });
+    await fs.writeFile(absoluteVerdictPath, verdictContent, "utf8");
+    reviewerResult = {
+      artifact_ref: {
+        path: verdictArtifactPath,
+        sha256: sha256Hex(verdictContent),
+      },
+      schema_version: "internal-review-verdict.v1",
+      status,
+      reviewer: "independent-runtime-reviewer",
+      summary,
+      findings: [],
+      evidence: [],
+      problem,
+      ...reviewerResultExtra,
+    };
+  }
+
   const artifact = await recordArtifact(registryRoot, runId, {
     artifactPath: `artifacts/internal-review/seed-${status.toLowerCase()}-${runId}.json`,
     content: `${JSON.stringify({
       schema_version: "internal-review-report.v1",
       status,
       summary,
+      reviewer_result: reviewerResult,
       problem,
-    }, null, 2)}\n`,
+      ...reportExtraFields,
+    }, null, 2)}
+`,
     gate_name: "internal_review",
     execution_epoch: executionEpoch,
     gate_attempt: gateAttempt,
     recorded_from_state: "internal_review",
     actor: "runner-test-seed-review",
     recorded_at: recordedAt,
-    provenance: { kind: "internal-review-report" },
+    provenance: { kind: "internal-review-report", reviewer_result_present: Boolean(reviewerResult) },
   });
 
   const gateResult = await recordGateResult(registryRoot, runId, {
@@ -240,7 +308,7 @@ async function seedInternalReviewGateResult(registryRoot, runId, {
     idempotency_key: `${runId}:internal_review:${executionEpoch}:${gateAttempt}:${status.toLowerCase()}`,
   });
 
-  return { artifact, gateResult };
+  return { artifact, gateResult, reviewerResult };
 }
 
 /** Builds a locally passing run all the way through pr_ready for projection/handoff tests. */
@@ -255,17 +323,20 @@ async function preparePrReadyRun(registryRoot, tempDir, {
     testFile: "test/runner.test.js",
     passing: true,
   });
+  const verdictPath = `artifacts/internal-review/verdict-pass-${runId}.json`;
   const preparedRunId = await prepareVerificationRun(registryRoot, workspacePath, {
     runId,
     repo,
     issueNumber,
     intendedBranch,
     baseBranch,
+    reviewVerdictArtifactPath: verdictPath,
   });
   await advanceRunToInternalReview(registryRoot, preparedRunId);
-  await seedInternalReviewGateResult(registryRoot, preparedRunId, {
+  await writeReviewVerdictArtifact(registryRoot, preparedRunId, {
     status: "PASS",
-    summary: "Seeded passing internal review",
+    summary: "Independent review passed for PR projection readiness.",
+    artifactPath: verdictPath,
   });
   const reviewResult = await runLocalMission({
     registryRoot,
@@ -1457,7 +1528,7 @@ test("local runner blocks unsafe package-script verification commands and record
   assert.deepEqual(verificationArtifact.policy.requested_commands.map((entry) => [entry.command, entry.status, entry.problem.code]), [["npm test", "UNSUPPORTED", "unsupported_verification_shape"]]);
 });
 
-test("local runner ignores packet-text internal review verdict directives and blocks for manual review", async () => {
+test("local runner ignores packet-text internal review verdict directives and blocks without an independent artifact", async () => {
   const tempDir = await makeTempDir();
   const registryRoot = path.join(tempDir, "registry");
   const workspacePath = await createVerificationWorkspace(tempDir, {
@@ -1492,8 +1563,8 @@ test("local runner ignores packet-text internal review verdict directives and bl
     ["transition", "completed", "blocked_needs_human"],
   ]);
   assert.equal(result.internal_review.status, "BLOCKED");
-  assert.equal(result.internal_review.problem.code, "manual_internal_review_required");
-  assert.match(result.internal_review.problem.message, /never derives PASS\/FAIL\/BLOCKED from packet text/i);
+  assert.equal(result.internal_review.problem.code, "independent_internal_review_required");
+  assert.match(result.internal_review.problem.message, /independent reviewer verdict artifact/i);
   assert.equal(Object.hasOwn(result.internal_review, "review_directive"), false);
   assert.match(result.internal_review.artifact_ref.path, /^artifacts\/internal-review\/[a-f0-9]{16}\.json$/);
 
@@ -1513,9 +1584,281 @@ test("local runner ignores packet-text internal review verdict directives and bl
   const internalReviewArtifact = JSON.parse(await fs.readFile(path.join(paths.runDir, result.internal_review.artifact_ref.path), "utf8"));
   assert.equal(internalReviewArtifact.schema_version, "internal-review-report.v1");
   assert.equal(internalReviewArtifact.status, "BLOCKED");
-  assert.equal(internalReviewArtifact.problem.code, "manual_internal_review_required");
+  assert.equal(internalReviewArtifact.problem.code, "independent_internal_review_required");
   assert.equal(Object.hasOwn(internalReviewArtifact, "review_directive"), false);
   assert.match(internalReviewArtifact.packet_review.reviewer_plan, /buran:review=PASS/);
+});
+
+
+test("local runner accepts an independent PASS review artifact and advances to pr_ready", async () => {
+  const tempDir = await makeTempDir();
+  const registryRoot = path.join(tempDir, "registry");
+  const workspacePath = await createVerificationWorkspace(tempDir, {
+    testFile: "test/runner.test.js",
+    passing: true,
+  });
+  const verdictPath = "artifacts/internal-review/verdict-pass.json";
+  const runId = await prepareVerificationRun(registryRoot, workspacePath, {
+    runId: "run_runner_internal_review_artifact_pass",
+    reviewVerdictArtifactPath: verdictPath,
+  });
+
+  await advanceRunToInternalReview(registryRoot, runId);
+  await writeReviewVerdictArtifact(registryRoot, runId, {
+    status: "PASS",
+    summary: "Independent review passed with sanitized evidence.",
+    artifactPath: verdictPath,
+    evidence: [{ kind: "focused_review", files: ["src/internal-review-adapter.js"] }],
+  });
+
+  const result = await runLocalMission({
+    registryRoot,
+    runId,
+    clock: () => new Date("2026-05-16T13:56:00.000Z"),
+  });
+
+  assert.equal(result.outcome, "completed");
+  assert.equal(result.current_state, "pr_ready");
+  assert.equal(result.internal_review.status, "PASS");
+  assert.equal(result.internal_review.problem, null);
+  assert.equal(result.internal_review.reviewer_result.status, "PASS");
+  assert.equal(result.internal_review.reviewer_result.artifact_ref.path, verdictPath);
+
+  const paths = getRunPaths(registryRoot, runId);
+  const internalReviewArtifact = JSON.parse(await fs.readFile(path.join(paths.runDir, result.internal_review.artifact_ref.path), "utf8"));
+  assert.equal(internalReviewArtifact.status, "PASS");
+  assert.equal(internalReviewArtifact.reviewer_result.summary, "Independent review passed with sanitized evidence.");
+  assert.equal(internalReviewArtifact.packet_review.verdict_artifact_path, verdictPath);
+});
+
+test("local runner sanitizes private fields from independent review verdict artifacts", async () => {
+  const tempDir = await makeTempDir();
+  const registryRoot = path.join(tempDir, "registry");
+  const workspacePath = await createVerificationWorkspace(tempDir, {
+    testFile: "test/runner.test.js",
+    passing: true,
+  });
+  const verdictPath = "artifacts/internal-review/verdict-private-fields.json";
+  const privatePath = path.join(tempDir, "private-review-workspace", "raw-prompt.txt");
+  const runId = await prepareVerificationRun(registryRoot, workspacePath, {
+    runId: "run_runner_internal_review_artifact_private_fields",
+    reviewVerdictArtifactPath: verdictPath,
+  });
+
+  await advanceRunToInternalReview(registryRoot, runId);
+  await writeReviewVerdictArtifact(registryRoot, runId, {
+    status: "PASS",
+    summary: `Independent review passed after checking ${privatePath}.`,
+    artifactPath: verdictPath,
+    findings: [{
+      severity: "low",
+      summary: "Safe finding survives verdict minimization.",
+      prompt: "RAW_PROMPT_SENTINEL",
+      transcript: "RAW_TRANSCRIPT_SENTINEL",
+      stdout: "RAW_STDOUT_SENTINEL",
+      stderr: "RAW_STDERR_SENTINEL",
+      output: "RAW_OUTPUT_SENTINEL",
+      log: "RAW_LOG_SENTINEL",
+      logs: ["RAW_LOGS_SENTINEL"],
+      session: "RAW_SESSION_SENTINEL",
+      nested: {
+        safe_note: "Nested safe context survives.",
+        session_id: "RAW_SESSION_ID_SENTINEL",
+        local_path: privatePath,
+      },
+    }],
+    evidence: [{
+      kind: "focused_review",
+      files: [privatePath],
+      prompt: "EVIDENCE_PROMPT_SENTINEL",
+      transcript: "EVIDENCE_TRANSCRIPT_SENTINEL",
+      stdout: "EVIDENCE_STDOUT_SENTINEL",
+      stderr: "EVIDENCE_STDERR_SENTINEL",
+      output: "EVIDENCE_OUTPUT_SENTINEL",
+      log: "EVIDENCE_LOG_SENTINEL",
+      logs: ["EVIDENCE_LOGS_SENTINEL"],
+      session: "EVIDENCE_SESSION_SENTINEL",
+    }],
+    extraFields: {
+      prompt: "TOP_PROMPT_SENTINEL",
+      transcript: "TOP_TRANSCRIPT_SENTINEL",
+      stdout: "TOP_STDOUT_SENTINEL",
+      stderr: "TOP_STDERR_SENTINEL",
+      output: "TOP_OUTPUT_SENTINEL",
+      log: "TOP_LOG_SENTINEL",
+      logs: ["TOP_LOGS_SENTINEL"],
+      session: "TOP_SESSION_SENTINEL",
+    },
+  });
+
+  const result = await runLocalMission({
+    registryRoot,
+    runId,
+    clock: () => new Date("2026-05-16T13:56:00.000Z"),
+  });
+
+  assert.equal(result.outcome, "completed");
+  assert.equal(result.current_state, "pr_ready");
+  assert.equal(result.internal_review.status, "PASS");
+  assert.equal(result.internal_review.reviewer_result.findings[0].summary, "Safe finding survives verdict minimization.");
+  assert.equal(result.internal_review.reviewer_result.findings[0].nested.safe_note, "Nested safe context survives.");
+
+  const paths = getRunPaths(registryRoot, runId);
+  const artifactText = await fs.readFile(path.join(paths.runDir, result.internal_review.artifact_ref.path), "utf8");
+  const reportText = JSON.stringify(result.internal_review);
+  const combined = `${artifactText}\n${reportText}`;
+  for (const forbidden of [
+    "RAW_PROMPT_SENTINEL",
+    "RAW_TRANSCRIPT_SENTINEL",
+    "RAW_STDOUT_SENTINEL",
+    "RAW_STDERR_SENTINEL",
+    "RAW_OUTPUT_SENTINEL",
+    "RAW_LOG_SENTINEL",
+    "RAW_LOGS_SENTINEL",
+    "RAW_SESSION_SENTINEL",
+    "RAW_SESSION_ID_SENTINEL",
+    "EVIDENCE_PROMPT_SENTINEL",
+    "EVIDENCE_TRANSCRIPT_SENTINEL",
+    "EVIDENCE_STDOUT_SENTINEL",
+    "EVIDENCE_STDERR_SENTINEL",
+    "EVIDENCE_OUTPUT_SENTINEL",
+    "EVIDENCE_LOG_SENTINEL",
+    "EVIDENCE_LOGS_SENTINEL",
+    "EVIDENCE_SESSION_SENTINEL",
+    "TOP_PROMPT_SENTINEL",
+    "TOP_TRANSCRIPT_SENTINEL",
+    "TOP_STDOUT_SENTINEL",
+    "TOP_STDERR_SENTINEL",
+    "TOP_OUTPUT_SENTINEL",
+    "TOP_LOG_SENTINEL",
+    "TOP_LOGS_SENTINEL",
+    "TOP_SESSION_SENTINEL",
+    privatePath,
+  ]) {
+    assert.equal(combined.includes(forbidden), false, `retained private verdict data: ${forbidden}`);
+  }
+  for (const forbiddenKey of ["prompt", "transcript", "stdout", "stderr", "output", "log", "logs", "session", "session_id"]) {
+    assert.doesNotMatch(combined, new RegExp(`"${forbiddenKey}"\\s*:`, "i"));
+  }
+});
+
+test("local runner routes an independent BLOCKED review artifact into blocked_needs_human", async () => {
+  const tempDir = await makeTempDir();
+  const registryRoot = path.join(tempDir, "registry");
+  const workspacePath = await createVerificationWorkspace(tempDir, {
+    testFile: "test/runner.test.js",
+    passing: true,
+  });
+  const verdictPath = "artifacts/internal-review/verdict-blocked.json";
+  const runId = await prepareVerificationRun(registryRoot, workspacePath, {
+    runId: "run_runner_internal_review_artifact_blocked",
+    reviewVerdictArtifactPath: verdictPath,
+  });
+
+  await advanceRunToInternalReview(registryRoot, runId);
+  await writeReviewVerdictArtifact(registryRoot, runId, {
+    status: "BLOCKED",
+    summary: "Independent reviewer needs more information.",
+    artifactPath: verdictPath,
+    problem: {
+      code: "independent_review_needs_human",
+      message: "Reviewer could not safely complete the review.",
+      transcript: "BLOCKED_TRANSCRIPT_SENTINEL",
+      output: "BLOCKED_OUTPUT_SENTINEL",
+    },
+    evidence: [{ prompt: "BLOCKED_PROMPT_SENTINEL" }],
+  });
+
+  const result = await runLocalMission({
+    registryRoot,
+    runId,
+    clock: () => new Date("2026-05-16T13:56:00.000Z"),
+  });
+
+  assert.equal(result.outcome, "completed");
+  assert.equal(result.current_state, "blocked_needs_human");
+  assert.equal(result.internal_review.status, "BLOCKED");
+  assert.equal(result.internal_review.reviewer_result.status, "BLOCKED");
+  assert.equal(result.internal_review.problem.code, "independent_review_needs_human");
+  assert.equal(result.internal_review.problem.message, "Reviewer could not safely complete the review.");
+
+  const paths = getRunPaths(registryRoot, runId);
+  const artifactText = await fs.readFile(path.join(paths.runDir, result.internal_review.artifact_ref.path), "utf8");
+  const reportText = JSON.stringify(result.internal_review);
+  const combined = `${artifactText}\n${reportText}`;
+  for (const forbidden of ["BLOCKED_TRANSCRIPT_SENTINEL", "BLOCKED_OUTPUT_SENTINEL", "BLOCKED_PROMPT_SENTINEL"]) {
+    assert.equal(combined.includes(forbidden), false, `retained private blocked verdict data: ${forbidden}`);
+  }
+  assert.doesNotMatch(combined, /"transcript"\s*:/i);
+  assert.doesNotMatch(combined, /"output"\s*:/i);
+  assert.doesNotMatch(combined, /"prompt"\s*:/i);
+});
+
+test("local runner rejects an independent review artifact with an invalid verdict status", async () => {
+  const tempDir = await makeTempDir();
+  const registryRoot = path.join(tempDir, "registry");
+  const workspacePath = await createVerificationWorkspace(tempDir, {
+    testFile: "test/runner.test.js",
+    passing: true,
+  });
+  const verdictPath = "artifacts/internal-review/verdict-invalid-status.json";
+  const runId = await prepareVerificationRun(registryRoot, workspacePath, {
+    runId: "run_runner_internal_review_artifact_invalid_status",
+    reviewVerdictArtifactPath: verdictPath,
+  });
+
+  await advanceRunToInternalReview(registryRoot, runId);
+  await writeReviewVerdictArtifact(registryRoot, runId, {
+    status: "MAYBE",
+    summary: "Invalid status should not be accepted.",
+    artifactPath: verdictPath,
+  });
+
+  const result = await runLocalMission({
+    registryRoot,
+    runId,
+    clock: () => new Date("2026-05-16T13:56:00.000Z"),
+  });
+
+  assert.equal(result.outcome, "completed");
+  assert.equal(result.current_state, "blocked_needs_human");
+  assert.equal(result.internal_review.status, "BLOCKED");
+  assert.equal(result.internal_review.reviewer_result, null);
+  assert.equal(result.internal_review.problem.code, "review_artifact_invalid");
+  assert.match(result.internal_review.problem.message, /status must be PASS, FAIL, or BLOCKED/i);
+});
+
+test("local runner routes an independent FAIL review artifact into fix_loop", async () => {
+  const tempDir = await makeTempDir();
+  const registryRoot = path.join(tempDir, "registry");
+  const workspacePath = await createVerificationWorkspace(tempDir, {
+    testFile: "test/runner.test.js",
+    passing: true,
+  });
+  const verdictPath = "artifacts/internal-review/verdict-fail.json";
+  const runId = await prepareVerificationRun(registryRoot, workspacePath, {
+    runId: "run_runner_internal_review_artifact_fail",
+    reviewVerdictArtifactPath: verdictPath,
+  });
+
+  await advanceRunToInternalReview(registryRoot, runId);
+  await writeReviewVerdictArtifact(registryRoot, runId, {
+    status: "FAIL",
+    summary: "Independent reviewer found an in-scope issue.",
+    artifactPath: verdictPath,
+    findings: [{ severity: "high", summary: "Fix the adapter contract." }],
+  });
+
+  const result = await runLocalMission({
+    registryRoot,
+    runId,
+    clock: () => new Date("2026-05-16T13:56:00.000Z"),
+  });
+
+  assert.equal(result.outcome, "completed");
+  assert.equal(result.current_state, "fix_loop");
+  assert.equal(result.internal_review.status, "FAIL");
+  assert.equal(result.internal_review.reviewer_result.findings[0].summary, "Fix the adapter contract.");
 });
 
 test("local runner reuses a recorded FAIL internal review result and advances to fix_loop", async () => {
@@ -1599,6 +1942,49 @@ test("local runner reuses a recorded BLOCKED internal review result and advances
   assert.equal(events.filter((event) => event.type === "transition").at(-1)?.evidence.reason, "internal review blocked on unsupported or unsafe surface");
 });
 
+test("local runner blocks a legacy recorded PASS internal review result without independent verdict evidence", async () => {
+  const tempDir = await makeTempDir();
+  const registryRoot = path.join(tempDir, "registry");
+  const workspacePath = await createVerificationWorkspace(tempDir, {
+    testFile: "test/runner.test.js",
+    passing: true,
+  });
+  const runId = await prepareVerificationRun(registryRoot, workspacePath, {
+    runId: "run_runner_internal_review_legacy_pass_without_verdict",
+  });
+
+  await advanceRunToInternalReview(registryRoot, runId);
+  await seedInternalReviewGateResult(registryRoot, runId, {
+    status: "PASS",
+    summary: "Legacy synthetic passing internal review",
+    withReviewerEvidence: false,
+  });
+  const paths = getRunPaths(registryRoot, runId);
+  const eventsBeforeRetry = await readEventsFile(paths.eventsPath);
+
+  const retried = await runLocalMission({
+    registryRoot,
+    runId,
+    clock: () => new Date("2026-05-16T13:57:00.000Z"),
+  });
+  const eventsAfterRetry = await readEventsFile(paths.eventsPath);
+  const snapshot = await readRunSnapshot(paths.runPath);
+
+  assert.equal(retried.outcome, "blocked");
+  assert.equal(retried.current_state, "internal_review");
+  assert.equal(retried.internal_review.status, "PASS");
+  assert.equal(retried.internal_review.resumed_recorded_result, false);
+  assert.equal(retried.internal_review.gate_result_status, "stale_recorded_result");
+  assert.equal(retried.internal_review.problem.code, "internal_review_independent_evidence_missing");
+  assert.match(retried.internal_review.problem.message, /independent reviewer verdict artifact evidence/i);
+  assert.deepEqual(retried.steps_taken.map((step) => [step.action, step.status, step.to_state]), [
+    ["internal_review_resume", "blocked", "internal_review"],
+  ]);
+  assert.equal(snapshot.state, "internal_review");
+  assert.equal(eventsAfterRetry.length, eventsBeforeRetry.length);
+  assert.equal(eventsAfterRetry.filter((event) => event.type === "transition").at(-1)?.state_after, "internal_review");
+});
+
 test("local runner reuses a recorded internal review result without duplicating gate events", async () => {
   const tempDir = await makeTempDir();
   const registryRoot = path.join(tempDir, "registry");
@@ -1647,6 +2033,119 @@ test("local runner reuses a recorded internal review result without duplicating 
   ]);
   assert.equal(eventsAfterRetry.filter((event) => event.type === "gate.result_recorded" && event.evidence.gate_name === "internal_review").length, 1);
   assert.equal(eventsAfterRetry.length, eventsBeforeRetry.length + 1);
+});
+
+test("local runner sanitizes private fields when resuming a recorded internal review result", async () => {
+  const tempDir = await makeTempDir();
+  const registryRoot = path.join(tempDir, "registry");
+  const workspacePath = await createVerificationWorkspace(tempDir, {
+    testFile: "test/runner.test.js",
+    passing: true,
+  });
+  const privatePath = path.join(tempDir, "private-review-workspace", "raw-prompt.txt");
+  const runId = await prepareVerificationRun(registryRoot, workspacePath, {
+    runId: "run_runner_internal_review_resume_private_fields",
+  });
+
+  await advanceRunToInternalReview(registryRoot, runId);
+  await seedInternalReviewGateResult(registryRoot, runId, {
+    status: "PASS",
+    summary: `Seeded passing internal review from ${privatePath}`,
+    reviewerResultExtra: {
+      prompt: "RECORDED_PROMPT_SENTINEL",
+      transcript: "RECORDED_TRANSCRIPT_SENTINEL",
+      stdout: "RECORDED_STDOUT_SENTINEL",
+      stderr: "RECORDED_STDERR_SENTINEL",
+      output: "RECORDED_OUTPUT_SENTINEL",
+      log: "RECORDED_LOG_SENTINEL",
+      logs: ["RECORDED_LOGS_SENTINEL"],
+      session: "RECORDED_SESSION_SENTINEL",
+      findings: [{
+        severity: "low",
+        summary: "Safe recorded finding survives resume sanitization.",
+        prompt: "FINDING_PROMPT_SENTINEL",
+        nested: {
+          safe_note: "Nested safe finding context survives.",
+          session_id: "FINDING_SESSION_ID_SENTINEL",
+          private_path: privatePath,
+        },
+      }],
+      evidence: [{
+        kind: "focused_review",
+        files: [privatePath],
+        transcript: "EVIDENCE_TRANSCRIPT_SENTINEL",
+        stdout: "EVIDENCE_STDOUT_SENTINEL",
+        output: "EVIDENCE_OUTPUT_SENTINEL",
+        logs: ["EVIDENCE_LOGS_SENTINEL"],
+        nested: { safe_note: "Nested safe evidence context survives." },
+      }],
+      problem: {
+        code: "historical_private_problem",
+        message: `Historical problem referenced ${privatePath}`,
+        stderr: "PROBLEM_STDERR_SENTINEL",
+        session_id: "PROBLEM_SESSION_ID_SENTINEL",
+      },
+    },
+    reportExtraFields: {
+      prompt: "REPORT_PROMPT_SENTINEL",
+      transcript: "REPORT_TRANSCRIPT_SENTINEL",
+      stdout: "REPORT_STDOUT_SENTINEL",
+      stderr: "REPORT_STDERR_SENTINEL",
+      output: "REPORT_OUTPUT_SENTINEL",
+      log: "REPORT_LOG_SENTINEL",
+      logs: ["REPORT_LOGS_SENTINEL"],
+      session: "REPORT_SESSION_SENTINEL",
+    },
+  });
+
+  const result = await runLocalMission({
+    registryRoot,
+    runId,
+    clock: () => new Date("2026-05-16T13:57:00.000Z"),
+  });
+
+  assert.equal(result.outcome, "completed");
+  assert.equal(result.current_state, "pr_ready");
+  assert.equal(result.internal_review.status, "PASS");
+  assert.equal(result.internal_review.resumed_recorded_result, true);
+  assert.equal(result.internal_review.reviewer_result.findings[0].summary, "Safe recorded finding survives resume sanitization.");
+  assert.equal(result.internal_review.reviewer_result.findings[0].nested.safe_note, "Nested safe finding context survives.");
+  assert.equal(result.internal_review.reviewer_result.evidence[0].nested.safe_note, "Nested safe evidence context survives.");
+  assert.equal(result.internal_review.reviewer_result.problem.code, "historical_private_problem");
+
+  const reportText = JSON.stringify(result.internal_review);
+  for (const forbidden of [
+    "RECORDED_PROMPT_SENTINEL",
+    "RECORDED_TRANSCRIPT_SENTINEL",
+    "RECORDED_STDOUT_SENTINEL",
+    "RECORDED_STDERR_SENTINEL",
+    "RECORDED_OUTPUT_SENTINEL",
+    "RECORDED_LOG_SENTINEL",
+    "RECORDED_LOGS_SENTINEL",
+    "RECORDED_SESSION_SENTINEL",
+    "FINDING_PROMPT_SENTINEL",
+    "FINDING_SESSION_ID_SENTINEL",
+    "EVIDENCE_TRANSCRIPT_SENTINEL",
+    "EVIDENCE_STDOUT_SENTINEL",
+    "EVIDENCE_OUTPUT_SENTINEL",
+    "EVIDENCE_LOGS_SENTINEL",
+    "PROBLEM_STDERR_SENTINEL",
+    "PROBLEM_SESSION_ID_SENTINEL",
+    "REPORT_PROMPT_SENTINEL",
+    "REPORT_TRANSCRIPT_SENTINEL",
+    "REPORT_STDOUT_SENTINEL",
+    "REPORT_STDERR_SENTINEL",
+    "REPORT_OUTPUT_SENTINEL",
+    "REPORT_LOG_SENTINEL",
+    "REPORT_LOGS_SENTINEL",
+    "REPORT_SESSION_SENTINEL",
+    privatePath,
+  ]) {
+    assert.equal(reportText.includes(forbidden), false, `retained private resumed review data: ${forbidden}`);
+  }
+  for (const forbiddenKey of ["prompt", "transcript", "stdout", "stderr", "output", "log", "logs", "session", "session_id"]) {
+    assert.doesNotMatch(reportText, new RegExp(`"${forbiddenKey}"\\s*:`, "i"));
+  }
 });
 
 test("local runner blocks internal review resume when the recorded artifact is missing", async () => {

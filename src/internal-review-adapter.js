@@ -15,11 +15,14 @@ import path from "node:path";
 
 import { normalizePacket } from "./packet-sufficiency.js";
 import { sanitizePublicReportForOutput } from "./observability.js";
-import { nonEmptyString, sha256Hex } from "./utils.js";
+import { isRecord, nonEmptyString, sha256Hex } from "./utils.js";
 
 const INTERNAL_REVIEW_ADAPTER_ID = "local-internal-review-allowlist.v1";
+const REVIEW_VERDICT_SCHEMA_VERSION = "internal-review-verdict.v1";
 const INTERNAL_REVIEW_ACTOR = "local-internal-review-adapter";
 const PACKET_FENCE_PATTERN = /```json\s*\n([\s\S]*?)\n```/i;
+const REVIEW_VERDICT_STATUSES = new Set(["PASS", "FAIL", "BLOCKED"]);
+const REVIEW_VERDICT_PRIVATE_KEYS = new Set(["prompt", "transcript", "stdout", "stderr", "output", "log", "logs", "session"]);
 
 function packetArtifactPath(runDir, snapshot) {
   const relativePath = snapshot?.artifacts?.packet?.path;
@@ -45,6 +48,113 @@ function sanitizeValue(value, contexts) {
   return sanitizePublicReportForOutput(value, contexts);
 }
 
+function isPrivateReviewVerdictKey(key) {
+  const normalized = String(key)
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .replace(/[^a-z0-9]+/gi, "_")
+    .toLowerCase();
+  const compact = normalized.replace(/_/g, "");
+  if (["prompt", "transcript", "stdout", "stderr", "output", "session"].some((token) => compact.includes(token))) return true;
+  return normalized.split("_").some((part) => REVIEW_VERDICT_PRIVATE_KEYS.has(part) || part.startsWith("log"));
+}
+
+function sanitizeReviewVerdictValue(value, contexts, { depth = 0 } = {}) {
+  if (depth > 8) return "[REDACTED_DEPTH]";
+  if (value === null || value === undefined) return value;
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return sanitizeValue(value, contexts);
+  if (Array.isArray(value)) return value.map((entry) => sanitizeReviewVerdictValue(entry, contexts, { depth: depth + 1 }));
+  if (!isRecord(value)) return sanitizeValue(String(value), contexts);
+
+  const output = {};
+  for (const [key, entry] of Object.entries(value)) {
+    if (isPrivateReviewVerdictKey(key)) continue;
+    output[key] = sanitizeReviewVerdictValue(entry, contexts, { depth: depth + 1 });
+  }
+  return output;
+}
+
+function sanitizeReviewVerdictPayload(parsed, status, schemaVersion, artifactRef, contexts) {
+  return sanitizeReviewVerdictValue({
+    artifact_ref: artifactRef,
+    schema_version: schemaVersion || REVIEW_VERDICT_SCHEMA_VERSION,
+    status,
+    reviewer: nonEmptyString(parsed.reviewer || parsed.actor || "independent-reviewer"),
+    summary: nonEmptyString(parsed.summary),
+    findings: Array.isArray(parsed.findings) ? parsed.findings : [],
+    evidence: Array.isArray(parsed.evidence) ? parsed.evidence : [],
+    problem: isRecord(parsed.problem) ? parsed.problem : null,
+  }, contexts);
+}
+
+export function sanitizeRecordedInternalReviewReport(report, { workspacePath = "" } = {}) {
+  return sanitizeReviewVerdictValue(report, buildPathContexts(workspacePath));
+}
+
+function resolveReviewVerdictPath(runDir, artifactPath) {
+  const input = nonEmptyString(artifactPath);
+  if (!input) return null;
+  if (path.isAbsolute(input)) {
+    const error = new Error("Independent review verdict artifact path must be relative to the run directory.");
+    error.code = "review_artifact_path_invalid";
+    throw error;
+  }
+  const absolutePath = path.resolve(runDir, path.normalize(input));
+  const relativePath = path.relative(runDir, absolutePath);
+  if (!relativePath || relativePath.startsWith("..") || path.isAbsolute(relativePath)) {
+    const error = new Error("Independent review verdict artifact path escapes the run directory.");
+    error.code = "review_artifact_path_invalid";
+    throw error;
+  }
+  if (!(relativePath === "artifacts" || relativePath.startsWith(`artifacts${path.sep}`))) {
+    const error = new Error("Independent review verdict artifact must be stored under artifacts/.");
+    error.code = "review_artifact_path_invalid";
+    throw error;
+  }
+  return { absolutePath, relativePath };
+}
+
+async function loadReviewVerdictArtifact(runDir, artifactPath, contexts) {
+  const resolved = resolveReviewVerdictPath(runDir, artifactPath);
+  if (!resolved) return null;
+  try {
+    const content = await fs.readFile(resolved.absolutePath, "utf8");
+    const parsed = JSON.parse(content);
+    if (!isRecord(parsed)) {
+      const error = new Error("Independent review verdict artifact must contain a JSON object.");
+      error.code = "review_artifact_invalid";
+      throw error;
+    }
+    const status = nonEmptyString(parsed.status).toUpperCase();
+    if (!REVIEW_VERDICT_STATUSES.has(status)) {
+      const error = new Error("Independent review verdict artifact status must be PASS, FAIL, or BLOCKED.");
+      error.code = "review_artifact_invalid";
+      throw error;
+    }
+    const schemaVersion = nonEmptyString(parsed.schema_version || parsed.schemaVersion);
+    if (schemaVersion && schemaVersion !== REVIEW_VERDICT_SCHEMA_VERSION) {
+      const error = new Error(`Independent review verdict artifact schema_version must be ${REVIEW_VERDICT_SCHEMA_VERSION}.`);
+      error.code = "review_artifact_invalid";
+      throw error;
+    }
+    return sanitizeReviewVerdictPayload(parsed, status, schemaVersion, {
+      path: resolved.relativePath,
+      sha256: sha256Hex(content),
+    }, contexts);
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      const missing = new Error("Independent review verdict artifact is missing.");
+      missing.code = "review_artifact_missing";
+      throw missing;
+    }
+    if (error instanceof SyntaxError) {
+      const invalid = new Error("Independent review verdict artifact is not valid JSON.");
+      invalid.code = "review_artifact_invalid";
+      throw invalid;
+    }
+    throw error;
+  }
+}
+
 /**
  * Extracts the internal-review contract from the normalized approved packet.
  *
@@ -56,9 +166,18 @@ function normalizeReviewPacket(packet, snapshot) {
   const normalized = normalizePacket(packet, {
     sourcePath: snapshot?.packet?.source_path || "",
   });
+  const rawReview = isRecord(packet?.review) ? packet.review : {};
   return {
     criteria: Array.isArray(normalized.review?.criteria) ? normalized.review.criteria : [],
     reviewer_plan: normalized.review?.reviewer_plan || "",
+    verdict_artifact_path: nonEmptyString(
+      rawReview.verdict_artifact_path
+        || rawReview.verdictArtifactPath
+        || rawReview.result_artifact_path
+        || rawReview.resultArtifactPath
+        || packet?.review_verdict_artifact_path
+        || packet?.reviewVerdictArtifactPath,
+    ),
   };
 }
 
@@ -90,16 +209,19 @@ function buildArtifactPayload({
     packet_review: {
       criteria: review.criteria,
       reviewer_plan: review.reviewer_plan || "",
+      verdict_artifact_path: review.verdict_artifact_path || "",
     },
+    reviewer_result: review.reviewer_result || null,
     problem,
   }, contexts);
 }
 
-function resultSummary(status, problem = null) {
+function resultSummary(status, problem = null, reviewerResult = null) {
   if (problem?.code) return problem.message;
-  if (status === "PASS") return "Internal review passed.";
-  if (status === "FAIL") return "Internal review failed inside approved scope.";
-  return "Internal review blocked pending manual review evidence.";
+  const summary = nonEmptyString(reviewerResult?.summary);
+  if (status === "PASS") return summary || "Internal review passed from independent reviewer artifact.";
+  if (status === "FAIL") return summary || "Internal review failed inside approved scope from independent reviewer artifact.";
+  return summary || "Internal review blocked from independent reviewer artifact.";
 }
 
 /**
@@ -136,7 +258,7 @@ export async function executeInternalReviewGate({ runDir, snapshot, clock = () =
       executionEpoch,
       gateAttempt,
       workspaceId: snapshot.workspace?.id || "",
-      review: { criteria: [], reviewer_plan: "" },
+      review: { criteria: [], reviewer_plan: "", verdict_artifact_path: "", reviewer_result: null },
       status: "BLOCKED",
       summary: problem.message,
       problem,
@@ -161,19 +283,44 @@ export async function executeInternalReviewGate({ runDir, snapshot, clock = () =
     };
   }
 
-  const blockedProblem = snapshot.workspace?.lease_status !== "acquired"
+  let reviewerResult = null;
+  let blockedProblem = snapshot.workspace?.lease_status !== "acquired"
     ? { code: "workspace_lease_required", message: "Internal review requires an active acquired workspace lease." }
     : review.criteria.length === 0 && !review.reviewer_plan
       ? { code: "unsupported_review_shape", message: "Internal review requires review.criteria or review.reviewer_plan in the approved packet." }
-      : {
-          code: "manual_internal_review_required",
-          message: "Local internal review never derives PASS/FAIL/BLOCKED from packet text. Manual review evidence is required for internal review resolution.",
-        };
+      : !review.verdict_artifact_path
+        ? {
+            code: "independent_internal_review_required",
+            message: "Internal review requires an independent reviewer verdict artifact; packet text cannot self-approve.",
+          }
+        : null;
 
-  const problem = blockedProblem ? sanitizeValue(blockedProblem, contexts) : null;
-  const status = "BLOCKED";
+  if (!blockedProblem) {
+    try {
+      reviewerResult = await loadReviewVerdictArtifact(runDir, review.verdict_artifact_path, contexts);
+    } catch (error) {
+      blockedProblem = {
+        code: error?.code || "review_artifact_invalid",
+        message: nonEmptyString(error?.message) || "Independent review verdict artifact could not be loaded.",
+      };
+    }
+  }
+
+  const status = blockedProblem ? "BLOCKED" : reviewerResult.status;
+  const problem = blockedProblem
+    ? sanitizeValue(blockedProblem, contexts)
+    : status === "BLOCKED"
+      ? sanitizeValue(reviewerResult.problem || {
+          code: "independent_review_blocked",
+          message: reviewerResult.summary || "Independent review artifact returned BLOCKED.",
+        }, contexts)
+      : null;
+  review = {
+    ...review,
+    reviewer_result: reviewerResult,
+  };
   const finishedAt = clock().toISOString();
-  const summary = resultSummary(status, problem);
+  const summary = resultSummary(status, problem, reviewerResult);
   const artifactPayload = buildArtifactPayload({
     runId: snapshot.run_id,
     executionEpoch,
@@ -206,6 +353,8 @@ export async function executeInternalReviewGate({ runDir, snapshot, clock = () =
       adapter: INTERNAL_REVIEW_ADAPTER_ID,
       criteria_count: review.criteria.length,
       reviewer_plan_present: Boolean(review.reviewer_plan),
+      verdict_artifact_present: Boolean(review.verdict_artifact_path),
+      reviewer_result_present: Boolean(reviewerResult),
     },
   };
 }
