@@ -25,6 +25,9 @@ registry/
         implementation-dispatch/
           intent-<hash>.json
           result-<hash>.json
+        fix-loop/
+          intent-<attempt>-<hash>.json
+          result-<hash>.json
         verification.json
         internal-review/
           <hash>.json
@@ -104,7 +107,7 @@ Required fields:
 
 Recovery only accepts documented event types. Current accepted types are `transition`, `artifact.recorded`, `gate.result_recorded`, `lock.lease_acquired`, `lock.lease_released`, `lock.lease_blocked`, `projection.intent_recorded`, `projection.result_recorded`, `recovery.lease_stale_reclaimed`, and `recovery.lease_record_removed`. Unknown event types are quarantined even when they include timestamp/actor/evidence fields.
 
-`artifact.recorded` evidence is typed and must include: safe relative `path`, `sha256`, `bytes`, `gate_name`, `execution_epoch`, `gate_attempt`, `recorded_from_state`, `recorded_at`, `actor`, and `provenance`.
+`artifact.recorded` evidence is typed and must include: safe relative `path`, `sha256`, `bytes`, `gate_name`, `execution_epoch`, `gate_attempt`, `recorded_from_state`, `recorded_at`, `actor`, and `provenance`. Supported artifact stages include `workspace_preparation`, `implementation_dispatch`, `fix_attempt`, `verification`, and `internal_review`; `fix_attempt` artifacts are valid only from `fix_loop` and use current-epoch provenance.
 
 `gate.result_recorded` evidence is typed and must include: `gate_name`, `execution_epoch`, `gate_attempt`, `recorded_from_state`, `status`, `artifact_refs`, `recorded_at`, `actor`, and `idempotency_key`.
 
@@ -140,6 +143,8 @@ Minimum expected artifacts:
 - `implementation-log.md` — compact implementation summary and touched files.
 - `artifacts/implementation-dispatch/intent-<hash>.json` — immutable dispatch intent recorded before adapter execution. It includes `schema_version: implementation-dispatch-intent.v1`, `dispatch_status: dispatch_requested`, the run/task ids, repo/issue/branch summary, workspace id, current execution epoch/state, packet artifact ref, workspace-preparation artifact ref, and `dispatch_intent_id` derived from the canonical intent payload.
 - `artifacts/implementation-dispatch/result-<hash>.json` — immutable sanitized dispatch result recorded after adapter execution or reused on resume. Shape: `schema_version: implementation-dispatch-result.v1`, adapter/run/task ids, `dispatch_intent_id`, intent/packet/workspace-preparation artifact refs, timestamps, `status` (`COMPLETED`, `BLOCKED`, or `FAILED`), generic safe `summary`, `implementation_epoch`, sanitized `evidence`, optional sanitized `problem`, and actor. `COMPLETED` is accepted only when evidence includes changed-file evidence plus a durable implementation/result reference such as `implementation_result_id`, `commit_sha`, `patch_sha`, or implementation artifact ref(s). Raw prompt/stdout/stderr/output/transcript/session/content-like blobs are not valid evidence and must not be persisted through summary/problem/report fields.
+- `artifacts/fix-loop/intent-<attempt>-<hash>.json` — immutable fix-attempt dispatch intent recorded from `fix_loop` before implementation-harness dispatch. It uses `schema_version: fix-attempt-intent.v1` and records run/task ids, `fix_attempt`, `max_fix_attempts`, current state/epoch, packet artifact ref, workspace id, failed verification/internal-review gate heads, `scope_boundary: approved_packet_artifact`, `dispatch_boundary: implementation-harness`, and the gates that must rerun.
+- `artifacts/fix-loop/result-<hash>.json` — immutable sanitized fix-attempt result recorded after implementation-harness dispatch or reused on resume. It uses the same `implementation-dispatch-result.v1` result schema as the running-stage dispatch, but its `dispatch_intent_artifact` points at the fix-loop intent path and its artifact-ledger entry uses `gate_name: fix_attempt`, `recorded_from_state: fix_loop`, and provenance `kind: fix-attempt-result` with the attempt number and intent artifact ref.
 - `verification.json` — verification commands/checks, outcomes, evidence, and the embedded `verification-policy.v1` artifact field.
 - `internal-review/<hash>.json` — immutable local `internal-review-report.v1` findings, sanitized packet review context, sanitized independent reviewer result when supplied, and final review status. The report records `packet_review.verdict_artifact_path` from the approved packet's `review.verdict_artifact_path` and, when a verdict artifact is accepted, `reviewer_result.artifact_ref` with the immutable verdict path and hash.
 - `internal-review/<verdict-name>.json` or another safe path under `artifacts/` referenced by `review.verdict_artifact_path` — independent reviewer verdict input with `schema_version: internal-review-verdict.v1`. The verdict JSON object must contain `status` (`PASS`, `FAIL`, or `BLOCKED`) and may include `reviewer`/`actor`, `summary`, `findings[]`, `evidence[]`, and `problem`. The adapter sanitizes this payload before copying it into the internal-review report; private prompt, transcript, stdout/stderr, output, log, and session-like fields are not retained in public reports or immutable review reports. Absolute paths, paths escaping the run directory, paths outside `artifacts/`, invalid JSON, unsupported statuses, or another `schema_version` block the gate instead of producing a PASS/FAIL.
@@ -147,6 +152,8 @@ Minimum expected artifacts:
 - `pr/projection-result-<hash>.json` — immutable local PR handoff result mirrored into `github.pr` / `projections.github_pr` only after a semantically valid successful projection record.
 
 Implementation-dispatch `problem` uses a small safe shape: `code` plus generic `message`; extra raw adapter fields are intentionally not copied into immutable artifacts or public runner reports. `BLOCKED` keeps the run in `running`; `FAILED` transitions `running -> failed_execution`; only `COMPLETED` with durable evidence transitions to `verification`.
+
+Fix-attempt dispatch uses the same sanitizer and durable-evidence rules, but from `fix_loop`. `COMPLETED` transitions back to `verification`, which creates a fresh execution epoch and resets verification/internal-review gate heads. Non-`COMPLETED` fix-attempt results keep the run in `fix_loop` with a structured blocker. The current local bound is two completed fix attempts; once exhausted, the next fix-loop pass transitions to `blocked_needs_human`.
 
 When implementation dispatch blocks or fails, the public runner report records an explicit blocker/report shape:
 
@@ -179,7 +186,7 @@ Recovery and consumers must treat `policy` as the durable reference for how pack
 
 - Intake: write packet artifact, initialize event journal, append `packet_received`, write `run.json`, commit sufficiency transition, then rebuild indexes.
 - Transition: append the transition event, write the matching snapshot, release terminal lease records when needed, then rebuild indexes for terminal transitions.
-- Artifact record: write artifact content, append `artifact.recorded`, update `run.json` artifact head/`last_sequence`, then return. Implementation-dispatch intent/result artifacts are recorded as `gate_name: implementation_dispatch` with `recorded_from_state: running`; resume reuses a current-epoch result artifact with matching dispatch intent and hash instead of invoking the adapter again.
+- Artifact record: write artifact content, append `artifact.recorded`, update `run.json` artifact head/`last_sequence`, then return. Implementation-dispatch intent/result artifacts are recorded as `gate_name: implementation_dispatch` with `recorded_from_state: running`; resume reuses a current-epoch result artifact with matching dispatch intent and hash instead of invoking the adapter again. Fix-loop intent/result artifacts are recorded as `gate_name: fix_attempt` with `recorded_from_state: fix_loop`; resume reuses a current-epoch result artifact whose hash, attempt number, custom intent path, and dispatch intent match the current fix-attempt intent.
 - Gate result record: append `gate.result_recorded`, update `run.json` gate head/`last_sequence`, then return.
 - Lease acquire/release/recovery: lease record writes/deletes are paired with lock/recovery events and snapshot updates through the store seam before indexes are rebuilt.
 - Index files under `indexes/` are derived from valid run folders and are never authoritative.
@@ -201,7 +208,7 @@ Recovery order:
 1. Load `run.json`.
 2. Replay `events.jsonl` and verify monotonic sequence.
 3. Verify each transition edge against `docs/state-machine.md`.
-4. Semantically replay `artifact.recorded` and `gate.result_recorded` to rebuild gate/artifact heads, including implementation-dispatch intent/result artifacts.
+4. Semantically replay `artifact.recorded` and `gate.result_recorded` to rebuild gate/artifact heads, including implementation-dispatch and fix-attempt intent/result artifacts.
 5. Verify the replayed state/heads/`last_sequence` match the snapshot.
 6. Verify referenced artifact hashes where present.
 7. Rebuild active-run and workspace-lease indexes.

@@ -11,9 +11,10 @@ import { formatBuranReport } from "../src/buran.js";
 import { runBuranCli } from "../src/cli.js";
 import { createGithubPrTransportAdapter } from "../src/github-pr-transport-adapter.js";
 import { acquireWorkspaceLease } from "../src/locks.js";
-import { validateImplementationDispatchResultReport } from "../src/implementation-dispatch.js";
+import { executeImplementationDispatch, validateImplementationDispatchResultReport } from "../src/implementation-dispatch.js";
 import { recoverRegistry } from "../src/recovery.js";
 import { runLocalMission } from "../src/runner.js";
+import { canonicalJson } from "../src/utils.js";
 import { createRunFromPacketReport, getRunPaths, readEventsFile, readRunSnapshot, recordArtifact, recordGateResult, transitionRun, writeRunSnapshot } from "../src/registry-store.js";
 
 /**
@@ -191,6 +192,100 @@ async function prepareVerificationRun(registryRoot, workspacePath, {
     clock: () => new Date("2026-05-16T13:54:00.000Z"),
   });
   return created.run.run_id;
+}
+
+function buildTestFixAttemptIntent(snapshot, { attempt = 1, maxAttempts = 2 } = {}) {
+  const intent = {
+    schema_version: "fix-attempt-intent.v1",
+    run_id: snapshot?.run_id || "",
+    task_id: snapshot?.task_id || "",
+    fix_attempt: attempt,
+    max_fix_attempts: maxAttempts,
+    state: snapshot?.state || "",
+    execution_epoch: snapshot?.execution?.current_epoch || 0,
+    packet_artifact: snapshot?.artifacts?.packet || null,
+    workspace: {
+      id: snapshot?.workspace?.id || "",
+    },
+    failed_gates: {
+      verification: snapshot?.gates?.verification || null,
+      internal_review: snapshot?.gates?.internal_review || null,
+    },
+    scope_boundary: "approved_packet_artifact",
+    dispatch_boundary: "implementation-harness",
+    rerun_required: ["verification", "internal_review"],
+  };
+  const dispatchIntentId = sha256Hex(canonicalJson(intent));
+  return {
+    intent: {
+      ...intent,
+      dispatch_intent_id: dispatchIntentId,
+    },
+    artifactPath: `artifacts/fix-loop/intent-${attempt}-${dispatchIntentId.slice(0, 16)}.json`,
+  };
+}
+
+async function seedRecordedFixAttemptResult(registryRoot, runId, {
+  attempt = 1,
+  adapter = {
+    adapter: "test-seeded-fix-harness",
+    async execute() {
+      return {
+        status: "COMPLETED",
+        adapter: "test-seeded-fix-harness",
+        actor: "test-seeded-fix-harness",
+        evidence: { files_changed: ["test/runner.test.js"], patch_sha: "seeded-fix-patch" },
+      };
+    },
+  },
+  clock = () => new Date("2026-05-16T13:56:00.000Z"),
+} = {}) {
+  const paths = getRunPaths(registryRoot, runId);
+  const snapshot = await readRunSnapshot(paths.runPath);
+  const fixIntent = buildTestFixAttemptIntent(snapshot, { attempt, maxAttempts: 2 });
+  const intentRecorded = await recordArtifact(registryRoot, runId, {
+    artifactPath: fixIntent.artifactPath,
+    content: `${JSON.stringify(fixIntent.intent, null, 2)}
+`,
+    gate_name: "fix_attempt",
+    execution_epoch: snapshot.execution?.current_epoch || 0,
+    gate_attempt: 1,
+    recorded_from_state: "fix_loop",
+    actor: "runner-test-seed-fix",
+    recorded_at: clock().toISOString(),
+    provenance: {
+      kind: "fix-attempt-intent",
+      fix_attempt: attempt,
+      max_fix_attempts: 2,
+      failed_gates: fixIntent.intent.failed_gates,
+    },
+  });
+  const dispatchResult = await executeImplementationDispatch({
+    snapshot: intentRecorded.run,
+    intent: fixIntent.intent,
+    adapter,
+    clock,
+    intentArtifactPath: fixIntent.artifactPath,
+    artifactDirectory: "artifacts/fix-loop",
+  });
+  const resultRecorded = await recordArtifact(registryRoot, runId, {
+    artifactPath: dispatchResult.artifact_path,
+    content: dispatchResult.artifact_content,
+    gate_name: "fix_attempt",
+    execution_epoch: snapshot.execution?.current_epoch || 0,
+    gate_attempt: 1,
+    recorded_from_state: "fix_loop",
+    actor: dispatchResult.actor,
+    recorded_at: dispatchResult.recorded_at,
+    provenance: {
+      kind: "fix-attempt-result",
+      adapter: dispatchResult.adapter,
+      status: dispatchResult.status,
+      fix_attempt: attempt,
+      intent_artifact: intentRecorded.artifact_ref,
+    },
+  });
+  return { fixIntent, intentRecorded, dispatchResult, resultRecorded };
 }
 
 /** Executes the local runner once so a verification-ready run can advance itself. */
@@ -1487,6 +1582,266 @@ test("local runner records FAIL verification results and advances to fix_loop", 
   assert.equal(verificationArtifactText.includes(process.execPath), false);
   assert.equal(verificationArtifactText.includes(`${path.dirname(process.execPath)}${path.sep}`), false);
   assert.equal(JSON.stringify(result.verification).includes(process.execPath), false);
+});
+
+
+test("local runner executes a bounded fix attempt and reruns verification in a fresh epoch", async () => {
+  const tempDir = await makeTempDir();
+  const registryRoot = path.join(tempDir, "registry");
+  const workspacePath = await createVerificationWorkspace(tempDir, {
+    testFile: "test/runner.test.js",
+    passing: false,
+  });
+  const runId = await prepareVerificationRun(registryRoot, workspacePath, {
+    runId: "run_runner_fix_loop_rerun",
+  });
+
+  const failedVerification = await runLocalMission({
+    registryRoot,
+    runId,
+    clock: () => new Date("2026-05-16T13:55:00.000Z"),
+  });
+  assert.equal(failedVerification.current_state, "fix_loop");
+  assert.equal(failedVerification.verification.status, "FAIL");
+
+  const fixed = await runLocalMission({
+    registryRoot,
+    runId,
+    clock: () => new Date("2026-05-16T13:56:00.000Z"),
+    implementationDispatchAdapter: {
+      adapter: "test-fix-harness",
+      async execute({ workspace_path }) {
+        await fs.writeFile(path.join(workspace_path, "test/runner.test.js"), [
+          'import test from "node:test";',
+          'import assert from "node:assert/strict";',
+          'test("fixed verification passes", () => { assert.equal(1, 1); });',
+          "",
+        ].join("\n"), "utf8");
+        return {
+          status: "COMPLETED",
+          adapter: "test-fix-harness",
+          actor: "test-fix-harness",
+          summary: "Fix worker updated the failing verification fixture.",
+          evidence: { files_changed: ["test/runner.test.js"], patch_sha: "fix-loop-test-patch" },
+        };
+      },
+    },
+  });
+
+  assert.equal(fixed.outcome, "completed");
+  assert.equal(fixed.current_state, "verification");
+  assert.equal(fixed.implementation_dispatch.fix_attempt, 1);
+  assert.equal(fixed.implementation_dispatch.status, "COMPLETED");
+  assert.match(fixed.implementation_dispatch.intent_artifact_ref.path, /^artifacts\/fix-loop\/intent-1-[a-f0-9]{16}\.json$/);
+  assert.match(fixed.implementation_dispatch.result_artifact_ref.path, /^artifacts\/fix-loop\/result-[a-f0-9]{16}\.json$/);
+  assert.deepEqual(fixed.steps_taken.map((step) => step.action), ["fix_attempt_intent", "fix_attempt_result", "transition"]);
+
+  const verified = await runLocalMission({
+    registryRoot,
+    runId,
+    clock: () => new Date("2026-05-16T13:57:00.000Z"),
+  });
+  assert.equal(verified.current_state, "internal_review");
+  assert.equal(verified.verification.status, "PASS");
+
+  const paths = getRunPaths(registryRoot, runId);
+  const fixResultArtifact = JSON.parse(await fs.readFile(path.join(paths.runDir, fixed.implementation_dispatch.result_artifact_ref.path), "utf8"));
+  assert.equal(fixResultArtifact.dispatch_intent_artifact.path, fixed.implementation_dispatch.intent_artifact_ref.path);
+  const snapshot = await readRunSnapshot(paths.runPath);
+  assert.equal(snapshot.execution.current_epoch, 2);
+  const fixArtifacts = Object.values(snapshot.artifacts.recorded.by_path).filter((entry) => entry.gate_name === "fix_attempt");
+  assert.equal(fixArtifacts.filter((entry) => entry.provenance.kind === "fix-attempt-result").length, 1);
+});
+
+test("local runner accepts provenance-complete fix-loop dispatch result with a custom intent path after internal_review FAIL", async () => {
+  const tempDir = await makeTempDir();
+  const registryRoot = path.join(tempDir, "registry");
+  const workspacePath = await createVerificationWorkspace(tempDir, {
+    testFile: "test/runner.test.js",
+    passing: true,
+  });
+  const verdictPath = "artifacts/internal-review/verdict-fail-fix-loop-provenance.json";
+  const runId = await prepareVerificationRun(registryRoot, workspacePath, {
+    runId: "run_runner_fix_loop_custom_intent_provenance",
+    reviewVerdictArtifactPath: verdictPath,
+  });
+
+  await advanceRunToInternalReview(registryRoot, runId);
+  await writeReviewVerdictArtifact(registryRoot, runId, {
+    status: "FAIL",
+    summary: "Independent reviewer found an in-scope fix-loop issue.",
+    artifactPath: verdictPath,
+    findings: [{ severity: "high", summary: "Exercise fix-loop implementation dispatch." }],
+  });
+  const failedReview = await runLocalMission({
+    registryRoot,
+    runId,
+    clock: () => new Date("2026-05-16T13:56:00.000Z"),
+  });
+  assert.equal(failedReview.current_state, "fix_loop");
+  assert.equal(failedReview.internal_review.status, "FAIL");
+
+  let adapterCalls = 0;
+  const fixed = await runLocalMission({
+    registryRoot,
+    runId,
+    clock: () => new Date("2026-05-16T13:57:00.000Z"),
+    implementationDispatchAdapter: {
+      adapter: "test-fix-harness-complete-provenance",
+      async execute({ intent }) {
+        adapterCalls += 1;
+        const intentArtifactPath = `artifacts/fix-loop/intent-${intent.fix_attempt}-${intent.dispatch_intent_id.slice(0, 16)}.json`;
+        return {
+          status: "COMPLETED",
+          adapter: "test-fix-harness-complete-provenance",
+          actor: "test-fix-harness-complete-provenance",
+          summary: "Fix worker returned complete custom intent provenance.",
+          run_id: intent.run_id,
+          task_id: intent.task_id,
+          dispatch_intent_id: intent.dispatch_intent_id,
+          dispatch_intent_artifact: {
+            path: intentArtifactPath,
+            sha256: sha256Hex(`${JSON.stringify(intent, null, 2)}
+`),
+          },
+          packet_artifact: intent.packet_artifact,
+          evidence: { files_changed: ["src/runner.js"], patch_sha: "fix-loop-custom-intent-provenance" },
+        };
+      },
+    },
+  });
+
+  assert.equal(adapterCalls, 1);
+  assert.equal(fixed.outcome, "completed");
+  assert.equal(fixed.current_state, "verification");
+  assert.equal(fixed.implementation_dispatch.status, "COMPLETED");
+  assert.equal(fixed.implementation_dispatch.problem, null);
+  assert.equal(fixed.implementation_dispatch.dispatch_intent_artifact.path, fixed.implementation_dispatch.intent_artifact_ref.path);
+
+  const paths = getRunPaths(registryRoot, runId);
+  const resultArtifact = JSON.parse(await fs.readFile(path.join(paths.runDir, fixed.implementation_dispatch.result_artifact_ref.path), "utf8"));
+  assert.equal(resultArtifact.status, "COMPLETED");
+  assert.equal(resultArtifact.dispatch_intent_artifact.path, fixed.implementation_dispatch.intent_artifact_ref.path);
+});
+
+test("local runner resumes a recorded fix-attempt result without dispatching a new attempt", async () => {
+  const tempDir = await makeTempDir();
+  const registryRoot = path.join(tempDir, "registry");
+  const workspacePath = await createVerificationWorkspace(tempDir, {
+    testFile: "test/runner.test.js",
+    passing: false,
+  });
+  const runId = await prepareVerificationRun(registryRoot, workspacePath, {
+    runId: "run_runner_fix_loop_result_resume",
+  });
+
+  const failedVerification = await runLocalMission({
+    registryRoot,
+    runId,
+    clock: () => new Date("2026-05-16T13:55:00.000Z"),
+  });
+  assert.equal(failedVerification.current_state, "fix_loop");
+
+  let seedAdapterCalls = 0;
+  const seeded = await seedRecordedFixAttemptResult(registryRoot, runId, {
+    adapter: {
+      adapter: "test-seeded-fix-harness",
+      async execute({ workspace_path }) {
+        seedAdapterCalls += 1;
+        await fs.writeFile(path.join(workspace_path, "test/runner.test.js"), [
+          'import test from "node:test";',
+          'import assert from "node:assert/strict";',
+          'test("resumed fix verification passes", () => { assert.equal(1, 1); });',
+          "",
+        ].join("\n"), "utf8");
+        return {
+          status: "COMPLETED",
+          adapter: "test-seeded-fix-harness",
+          actor: "test-seeded-fix-harness",
+          summary: "Seeded fix result was recorded before a simulated crash.",
+          evidence: { files_changed: ["test/runner.test.js"], patch_sha: "seeded-resume-fix-patch" },
+        };
+      },
+    },
+  });
+  assert.equal(seedAdapterCalls, 1);
+
+  let adapterCalls = 0;
+  const resumed = await runLocalMission({
+    registryRoot,
+    runId,
+    clock: () => new Date("2026-05-16T13:57:00.000Z"),
+    implementationDispatchAdapter: {
+      adapter: "test-fix-harness-should-not-run",
+      async execute() {
+        adapterCalls += 1;
+        throw new Error("fix-loop resume should not dispatch a second attempt");
+      },
+    },
+  });
+
+  assert.equal(adapterCalls, 0);
+  assert.equal(resumed.outcome, "completed");
+  assert.equal(resumed.current_state, "verification");
+  assert.equal(resumed.implementation_dispatch.resumed_recorded_result, true);
+  assert.equal(resumed.implementation_dispatch.fix_attempt, 1);
+  assert.equal(resumed.implementation_dispatch.result_artifact_ref.path, seeded.resultRecorded.artifact_ref.path);
+  assert.deepEqual(resumed.steps_taken.map((step) => step.action), ["fix_attempt_resume", "transition"]);
+
+  const verified = await runLocalMission({
+    registryRoot,
+    runId,
+    clock: () => new Date("2026-05-16T13:58:00.000Z"),
+  });
+  assert.equal(verified.current_state, "internal_review");
+  assert.equal(verified.verification.status, "PASS");
+
+  const paths = getRunPaths(registryRoot, runId);
+  const snapshot = await readRunSnapshot(paths.runPath);
+  const fixArtifacts = Object.values(snapshot.artifacts.recorded.by_path).filter((entry) => entry.gate_name === "fix_attempt");
+  assert.equal(fixArtifacts.filter((entry) => entry.provenance.kind === "fix-attempt-intent").length, 1);
+  assert.equal(fixArtifacts.filter((entry) => entry.provenance.kind === "fix-attempt-result").length, 1);
+});
+
+test("local runner blocks fix_loop after bounded fix attempts are exhausted", async () => {
+  const tempDir = await makeTempDir();
+  const registryRoot = path.join(tempDir, "registry");
+  const workspacePath = await createVerificationWorkspace(tempDir, {
+    testFile: "test/runner.test.js",
+    passing: false,
+  });
+  const runId = await prepareVerificationRun(registryRoot, workspacePath, {
+    runId: "run_runner_fix_loop_bounds",
+  });
+  const noOpFixAdapter = {
+    adapter: "test-noop-fix-harness",
+    async execute() {
+      return {
+        status: "COMPLETED",
+        adapter: "test-noop-fix-harness",
+        actor: "test-noop-fix-harness",
+        summary: "Fix worker completed but left the failing fixture unchanged.",
+        evidence: { files_changed: ["test/runner.test.js"], patch_sha: "noop-fix-loop-test-patch" },
+      };
+    },
+  };
+
+  await runLocalMission({ registryRoot, runId, clock: () => new Date("2026-05-16T13:55:00.000Z") });
+  await runLocalMission({ registryRoot, runId, clock: () => new Date("2026-05-16T13:56:00.000Z"), implementationDispatchAdapter: noOpFixAdapter });
+  await runLocalMission({ registryRoot, runId, clock: () => new Date("2026-05-16T13:57:00.000Z") });
+  await runLocalMission({ registryRoot, runId, clock: () => new Date("2026-05-16T13:58:00.000Z"), implementationDispatchAdapter: noOpFixAdapter });
+  await runLocalMission({ registryRoot, runId, clock: () => new Date("2026-05-16T13:59:00.000Z") });
+  const bounded = await runLocalMission({ registryRoot, runId, clock: () => new Date("2026-05-16T14:00:00.000Z") });
+
+  assert.equal(bounded.outcome, "blocked");
+  assert.equal(bounded.current_state, "blocked_needs_human");
+  assert.equal(bounded.blockers[0].code, "fix_attempts_exhausted");
+  assert.match(bounded.blockers[0].message, /maximum is 2/);
+
+  const paths = getRunPaths(registryRoot, runId);
+  const snapshot = await readRunSnapshot(paths.runPath);
+  assert.equal(snapshot.state, "blocked_needs_human");
+  assert.equal(snapshot.workspace.lease_status, "released");
 });
 
 test("local runner blocks unsafe package-script verification commands and records BLOCKED gate evidence", async () => {
