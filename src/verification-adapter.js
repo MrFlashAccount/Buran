@@ -29,8 +29,16 @@ const COMMAND_TIMEOUT_MS = 300_000;
 const OUTPUT_LIMIT = 8_000;
 const PACKET_FENCE_PATTERN = /```json\s*\n([\s\S]*?)\n```/i;
 const COMMAND_SPECS = Object.freeze({
-  "node --test test/runner.test.js": Object.freeze({ file: process.execPath, args: ["--test", "test/runner.test.js"] }),
-  "node --test test/gate-ledger.test.js": Object.freeze({ file: process.execPath, args: ["--test", "test/gate-ledger.test.js"] }),
+  "node --test test/runner.test.js": Object.freeze({
+    adapterCommand: "node --test test/runner.test.js",
+    file: process.execPath,
+    args: ["--test", "test/runner.test.js"],
+  }),
+  "node --test test/gate-ledger.test.js": Object.freeze({
+    adapterCommand: "node --test test/gate-ledger.test.js",
+    file: process.execPath,
+    args: ["--test", "test/gate-ledger.test.js"],
+  }),
 });
 const SAFE_ENV_KEYS = Object.freeze([
   "HOME",
@@ -85,6 +93,31 @@ function commandSpec(command) {
   return COMMAND_SPECS[nonEmptyString(command)] || null;
 }
 
+function adapterCommand(spec) {
+  return spec?.adapterCommand || "";
+}
+
+function commandExitCode(error) {
+  if (Number.isInteger(error?.code)) return error.code;
+  if (error?.code === 0) return 0;
+  if (error?.code && /^\d+$/.test(String(error.code))) return Number.parseInt(String(error.code), 10);
+  return error?.exitCode ?? null;
+}
+
+/**
+ * Builds a durable command failure reason without copying child_process raw error messages,
+ * because those messages include the absolute executable path used by execFile.
+ */
+function commandFailureReason(command, error, { missingExecutable = false, timedOut = false } = {}) {
+  if (missingExecutable) return `Verification executable not found for command: ${command}`;
+  if (timedOut) return `Verification command timed out after ${COMMAND_TIMEOUT_MS}ms: ${command}`;
+  const exitCode = commandExitCode(error);
+  if (Number.isInteger(exitCode)) return `Verification command failed with exit code ${exitCode}: ${command}`;
+  const signal = nonEmptyString(error?.signal);
+  if (signal) return `Verification command failed with signal ${signal}: ${command}`;
+  return `Verification command failed: ${command}`;
+}
+
 function commandShapeProblem(command) {
   const normalized = nonEmptyString(command);
   if (/^npm\s+(?:test|run\s+check)$/i.test(normalized)) {
@@ -108,7 +141,7 @@ export function buildVerificationPolicy(commands = []) {
       ? {
           command,
           status: "ALLOWED",
-          adapter_command: [spec.file, ...spec.args].join(" "),
+          adapter_command: adapterCommand(spec),
           execution: "execFile_no_shell",
         }
       : {
@@ -227,7 +260,7 @@ async function executeAllowedCommand(command, workspacePath, contexts) {
     });
     return sanitizeValue({
       command,
-      adapter_command: [spec.file, ...spec.args].join(" "),
+      adapter_command: adapterCommand(spec),
       status: "PASS",
       exit_code: 0,
       signal: "",
@@ -241,16 +274,12 @@ async function executeAllowedCommand(command, workspacePath, contexts) {
     const timedOut = error?.killed || error?.signal === "SIGTERM" || error?.code === "ETIMEDOUT";
     const missingExecutable = error?.code === "ENOENT";
     const status = missingExecutable || timedOut ? "BLOCKED" : "FAIL";
-    const reason = missingExecutable
-      ? `Verification executable not found for command: ${command}`
-      : timedOut
-        ? `Verification command timed out after ${COMMAND_TIMEOUT_MS}ms: ${command}`
-        : nonEmptyString(error?.message) || `Verification command failed: ${command}`;
+    const reason = commandFailureReason(command, error, { missingExecutable, timedOut });
     return sanitizeValue({
       command,
-      adapter_command: [spec.file, ...spec.args].join(" "),
+      adapter_command: adapterCommand(spec),
       status,
-      exit_code: Number.isInteger(error?.code) ? error.code : error?.code === 0 ? 0 : error?.code && /^\d+$/.test(String(error.code)) ? Number.parseInt(String(error.code), 10) : error?.exitCode ?? null,
+      exit_code: commandExitCode(error),
       signal: nonEmptyString(error?.signal),
       duration_ms: durationMs,
       stdout: clipText(error?.stdout || ""),

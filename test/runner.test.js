@@ -1234,6 +1234,14 @@ test("local runner executes allowlisted verification, records the gate ledger, a
   assert.equal(verificationArtifact.policy.deterministic, true);
   assert.equal(verificationArtifact.policy.shell, false);
   assert.deepEqual(verificationArtifact.policy.requested_commands.map((entry) => [entry.command, entry.status]), [["node --test test/runner.test.js", "ALLOWED"]]);
+  const policyCommand = verificationArtifact.policy.requested_commands[0].adapter_command;
+  const [policyExecutable] = policyCommand.split(/\s+/);
+  assert.equal(policyCommand, "node --test test/runner.test.js");
+  assert.equal(policyCommand.includes(process.execPath), false);
+  assert.equal(policyExecutable, "node");
+  assert.equal(path.isAbsolute(policyExecutable), false);
+  assert.equal(verificationArtifact.command_results[0].adapter_command, policyCommand);
+  assert.equal(verificationArtifact.command_results[0].adapter_command.includes(process.execPath), false);
   assert.deepEqual(verificationArtifact.packet_verification.commands, ["node --test test/runner.test.js"]);
 });
 
@@ -1397,6 +1405,17 @@ test("local runner records FAIL verification results and advances to fix_loop", 
   assert.equal(snapshot.gates.verification.status, "FAIL");
   assert.equal(events.filter((event) => event.type === "gate.result_recorded").length, 1);
   assert.equal(events.at(-1).state_after, "fix_loop");
+
+  const verificationArtifactText = await fs.readFile(path.join(paths.runDir, result.verification.artifact_ref.path), "utf8");
+  const verificationArtifact = JSON.parse(verificationArtifactText);
+  const failureResult = verificationArtifact.command_results[0];
+  assert.equal(failureResult.status, "FAIL");
+  assert.equal(failureResult.exit_code, 1);
+  assert.equal(failureResult.reason, "Verification command failed with exit code 1: node --test test/runner.test.js");
+  assert.equal(failureResult.reason.includes(process.execPath), false);
+  assert.equal(verificationArtifactText.includes(process.execPath), false);
+  assert.equal(verificationArtifactText.includes(`${path.dirname(process.execPath)}${path.sep}`), false);
+  assert.equal(JSON.stringify(result.verification).includes(process.execPath), false);
 });
 
 test("local runner blocks unsafe package-script verification commands and records BLOCKED gate evidence", async () => {
