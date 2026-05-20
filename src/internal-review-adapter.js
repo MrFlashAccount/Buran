@@ -22,6 +22,7 @@ const REVIEW_VERDICT_SCHEMA_VERSION = "internal-review-verdict.v1";
 const INTERNAL_REVIEW_ACTOR = "local-internal-review-adapter";
 const PACKET_FENCE_PATTERN = /```json\s*\n([\s\S]*?)\n```/i;
 const REVIEW_VERDICT_STATUSES = new Set(["PASS", "FAIL", "BLOCKED"]);
+const REVIEW_VERDICT_PRIVATE_KEYS = new Set(["prompt", "transcript", "stdout", "stderr", "output", "log", "logs", "session"]);
 
 function packetArtifactPath(runDir, snapshot) {
   const relativePath = snapshot?.artifacts?.packet?.path;
@@ -45,6 +46,44 @@ function buildPathContexts(workspacePath) {
 
 function sanitizeValue(value, contexts) {
   return sanitizePublicReportForOutput(value, contexts);
+}
+
+function isPrivateReviewVerdictKey(key) {
+  const normalized = String(key)
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .replace(/[^a-z0-9]+/gi, "_")
+    .toLowerCase();
+  const compact = normalized.replace(/_/g, "");
+  if (["prompt", "transcript", "stdout", "stderr", "output", "session"].some((token) => compact.includes(token))) return true;
+  return normalized.split("_").some((part) => REVIEW_VERDICT_PRIVATE_KEYS.has(part) || part.startsWith("log"));
+}
+
+function sanitizeReviewVerdictValue(value, contexts, { depth = 0 } = {}) {
+  if (depth > 8) return "[REDACTED_DEPTH]";
+  if (value === null || value === undefined) return value;
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return sanitizeValue(value, contexts);
+  if (Array.isArray(value)) return value.map((entry) => sanitizeReviewVerdictValue(entry, contexts, { depth: depth + 1 }));
+  if (!isRecord(value)) return sanitizeValue(String(value), contexts);
+
+  const output = {};
+  for (const [key, entry] of Object.entries(value)) {
+    if (isPrivateReviewVerdictKey(key)) continue;
+    output[key] = sanitizeReviewVerdictValue(entry, contexts, { depth: depth + 1 });
+  }
+  return output;
+}
+
+function sanitizeReviewVerdictPayload(parsed, status, schemaVersion, artifactRef, contexts) {
+  return sanitizeReviewVerdictValue({
+    artifact_ref: artifactRef,
+    schema_version: schemaVersion || REVIEW_VERDICT_SCHEMA_VERSION,
+    status,
+    reviewer: nonEmptyString(parsed.reviewer || parsed.actor || "independent-reviewer"),
+    summary: nonEmptyString(parsed.summary),
+    findings: Array.isArray(parsed.findings) ? parsed.findings : [],
+    evidence: Array.isArray(parsed.evidence) ? parsed.evidence : [],
+    problem: isRecord(parsed.problem) ? parsed.problem : null,
+  }, contexts);
 }
 
 function resolveReviewVerdictPath(runDir, artifactPath) {
@@ -93,18 +132,9 @@ async function loadReviewVerdictArtifact(runDir, artifactPath, contexts) {
       error.code = "review_artifact_invalid";
       throw error;
     }
-    return sanitizeValue({
-      artifact_ref: {
-        path: resolved.relativePath,
-        sha256: sha256Hex(content),
-      },
-      schema_version: schemaVersion || REVIEW_VERDICT_SCHEMA_VERSION,
-      status,
-      reviewer: nonEmptyString(parsed.reviewer || parsed.actor || "independent-reviewer"),
-      summary: nonEmptyString(parsed.summary),
-      findings: Array.isArray(parsed.findings) ? parsed.findings : [],
-      evidence: Array.isArray(parsed.evidence) ? parsed.evidence : [],
-      problem: isRecord(parsed.problem) ? parsed.problem : null,
+    return sanitizeReviewVerdictPayload(parsed, status, schemaVersion, {
+      path: resolved.relativePath,
+      sha256: sha256Hex(content),
     }, contexts);
   } catch (error) {
     if (error?.code === "ENOENT") {
