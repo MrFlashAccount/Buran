@@ -160,11 +160,15 @@ export function usageText() {
  * @param {string} stateDir - Optional state directory used for runtime storage.
  * @returns {string} Absolute registry root.
  */
-function resolveRegistry(options, pluginConfig, workspaceDir, stateDir) {
+function resolveBuranRuntimeConfig(options, pluginConfig, workspaceDir, stateDir) {
   return normalizeBuranConfig(
     { ...pluginConfig, ...(options.registryRoot ? { registryRoot: options.registryRoot } : {}) },
     { workspaceDir, stateDir },
-  ).registryRoot;
+  );
+}
+
+function resolveRegistry(options, pluginConfig, workspaceDir, stateDir) {
+  return resolveBuranRuntimeConfig(options, pluginConfig, workspaceDir, stateDir).registryRoot;
 }
 
 /**
@@ -350,13 +354,14 @@ export async function runBuranCli(rawArgs, { pluginConfig = {}, workspaceDir = p
           reason: "missing_runner_arguments",
         });
       }
-      const registryRoot = resolveRegistry(options, pluginConfig, workspaceDir, stateDir);
+      const runtimeConfig = resolveBuranRuntimeConfig(options, pluginConfig, workspaceDir, stateDir);
       const report = await runLocalMissionReport({
-        registryRoot,
+        registryRoot: runtimeConfig.registryRoot,
         runId: options.runId,
         workspaceId: options.workspaceId,
         workspacePath: options.workspacePath,
         ttlMs: options.ttlMs,
+        implementationDispatchAdapter: runtimeConfig.implementationDispatchAdapter,
       });
       return finishCliResult({ result: { ok: true, report }, options, observer });
     }

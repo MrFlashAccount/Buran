@@ -5,9 +5,11 @@ const DISPATCH_STATUS = "dispatch_requested";
 const DISPATCH_SCHEMA_VERSION = "implementation-dispatch-intent.v1";
 const DISPATCH_RESULT_SCHEMA_VERSION = "implementation-dispatch-result.v1";
 const IMPLEMENTATION_DISPATCH_ADAPTER = "implementation-harness-dispatch.v1";
-const DEFAULT_UNAVAILABLE_ADAPTER = "implementation-harness-unavailable.v1";
+export const DEFAULT_UNAVAILABLE_ADAPTER = "implementation-harness-unavailable.v1";
 const DISPATCH_EVIDENCE_REQUIRED_CODE = "implementation_dispatch_evidence_required";
 const DISPATCH_EVIDENCE_REQUIRED_MESSAGE = "Implementation harness dispatch must return immutable implementation evidence before verification.";
+const DISPATCH_PROVENANCE_MISMATCH_CODE = "implementation_dispatch_provenance_mismatch";
+const DISPATCH_PROVENANCE_MISMATCH_MESSAGE = "Implementation harness dispatch result provenance does not match the recorded dispatch intent.";
 const DISPATCH_EVIDENCE_MAX_KEYS = 12;
 const DISPATCH_EVIDENCE_MAX_ITEMS = 50;
 const DISPATCH_EVIDENCE_MAX_STRING = 240;
@@ -76,9 +78,12 @@ export function sanitizeImplementationDispatchEvidence(evidence) {
   if (!isRecord(evidence)) return {};
 
   const output = {};
-  for (const [rawKey, value] of Object.entries(evidence).slice(0, DISPATCH_EVIDENCE_MAX_KEYS)) {
-    const key = nonEmptyString(rawKey).toLowerCase();
-    if (!isAllowedDispatchEvidenceKey(key)) continue;
+  const allowedEntries = Object.entries(evidence)
+    .map(([rawKey, value]) => [nonEmptyString(rawKey).toLowerCase(), value])
+    .filter(([key]) => isAllowedDispatchEvidenceKey(key))
+    .slice(0, DISPATCH_EVIDENCE_MAX_KEYS);
+
+  for (const [key, value] of allowedEntries) {
     const sanitizedValue = sanitizeDispatchEvidenceValue(key, value);
     if (sanitizedValue === undefined) continue;
     output[key] = sanitizedValue;
@@ -87,22 +92,30 @@ export function sanitizeImplementationDispatchEvidence(evidence) {
   return output;
 }
 
+function hasImmutableDispatchReference(value) {
+  if (!isRecord(value)) return false;
+  return Boolean(nonEmptyString(value.sha256));
+}
+
+function hasImmutableDispatchReferenceList(value) {
+  return Array.isArray(value) && value.some((entry) => hasImmutableDispatchReference(entry));
+}
+
 export function hasMeaningfulImplementationDispatchCompletionEvidence(evidence) {
   if (!isRecord(evidence)) return false;
   const changedFiles = evidence.files_changed || evidence.changed_files;
   const hasChangedFiles = Array.isArray(changedFiles) && changedFiles.length > 0;
-  const hasDurableResultRef = Boolean(
-    evidence.implementation_result_id
-      || evidence.commit_sha
+  const hasImmutableResultIdentity = Boolean(
+    evidence.commit_sha
       || evidence.patch_sha
-      || evidence.artifact_ref
-      || evidence.result_artifact_ref
-      || evidence.implementation_artifact_ref
-      || (Array.isArray(evidence.artifact_refs) && evidence.artifact_refs.length > 0)
-      || (Array.isArray(evidence.result_artifact_refs) && evidence.result_artifact_refs.length > 0)
-      || (Array.isArray(evidence.implementation_artifact_refs) && evidence.implementation_artifact_refs.length > 0),
+      || hasImmutableDispatchReference(evidence.artifact_ref)
+      || hasImmutableDispatchReference(evidence.result_artifact_ref)
+      || hasImmutableDispatchReference(evidence.implementation_artifact_ref)
+      || hasImmutableDispatchReferenceList(evidence.artifact_refs)
+      || hasImmutableDispatchReferenceList(evidence.result_artifact_refs)
+      || hasImmutableDispatchReferenceList(evidence.implementation_artifact_refs),
   );
-  return hasChangedFiles && hasDurableResultRef;
+  return hasChangedFiles && hasImmutableResultIdentity;
 }
 
 function workspaceContexts(snapshot) {
@@ -130,6 +143,116 @@ function dispatchStatusSummary(status) {
 
 function buildProblem(code, message, extra = {}) {
   return { code, message, ...extra };
+}
+
+function cloneJson(value) {
+  return JSON.parse(JSON.stringify(value ?? null));
+}
+
+function deepFreeze(value) {
+  if (!value || typeof value !== "object" || Object.isFrozen(value)) return value;
+  Object.freeze(value);
+  for (const nested of Object.values(value)) deepFreeze(nested);
+  return value;
+}
+
+function jsonEquivalent(left, right) {
+  return canonicalJson(left ?? null) === canonicalJson(right ?? null);
+}
+
+export function buildImplementationDispatchIntentArtifactRef(intent) {
+  const dispatchIntentId = nonEmptyString(intent?.dispatch_intent_id);
+  return {
+    path: `artifacts/implementation-dispatch/intent-${dispatchIntentId.slice(0, 16)}.json`,
+    sha256: sha256Hex(`${JSON.stringify(intent, null, 2)}\n`),
+  };
+}
+
+function captureImplementationDispatchProvenance(snapshot, intent) {
+  const capturedIntent = cloneJson(intent);
+  return deepFreeze({
+    run_id: nonEmptyString(snapshot?.run_id),
+    task_id: nonEmptyString(snapshot?.task_id),
+    dispatch_intent_id: nonEmptyString(capturedIntent?.dispatch_intent_id),
+    dispatch_intent_artifact: buildImplementationDispatchIntentArtifactRef(capturedIntent),
+    packet_artifact: cloneJson(capturedIntent?.packet_artifact),
+    workspace_preparation_artifact: cloneJson(capturedIntent?.workspace_preparation_artifact),
+  });
+}
+
+function provenanceMismatchProblem(field) {
+  return buildProblem(DISPATCH_PROVENANCE_MISMATCH_CODE, DISPATCH_PROVENANCE_MISMATCH_MESSAGE, { field });
+}
+
+function resultShapeProblem(field) {
+  return buildProblem("implementation_dispatch_result_invalid", "Implementation harness dispatch result does not match the required result shape.", { field });
+}
+
+function validateRequiredStringField(result, captured, field, { requireCompleteProvenance }) {
+  const actual = nonEmptyString(result?.[field]);
+  const expected = nonEmptyString(captured?.[field]);
+  if (requireCompleteProvenance && !actual) return provenanceMismatchProblem(field);
+  if (actual && actual !== expected) return provenanceMismatchProblem(field);
+  return null;
+}
+
+function validateArtifactRefField(result, captured, field, { requireCompleteProvenance }) {
+  const actual = result?.[field];
+  const expected = captured?.[field];
+  if (requireCompleteProvenance && !isRecord(actual)) return provenanceMismatchProblem(field);
+  if (!isRecord(actual)) return null;
+
+  const actualPath = nonEmptyString(actual.path);
+  const actualSha = nonEmptyString(actual.sha256);
+  const expectedPath = nonEmptyString(expected?.path);
+  const expectedSha = nonEmptyString(expected?.sha256);
+  if (requireCompleteProvenance && (!actualPath || !actualSha)) return provenanceMismatchProblem(field);
+  if ((actualPath && actualPath !== expectedPath) || (actualSha && actualSha !== expectedSha)) {
+    return provenanceMismatchProblem(field);
+  }
+  return null;
+}
+
+function validateJsonArtifactField(result, captured, field, { requireCompleteProvenance }) {
+  const actual = result?.[field];
+  const expected = captured?.[field];
+  if (requireCompleteProvenance && !isRecord(actual)) return provenanceMismatchProblem(field);
+  if (isRecord(actual) && !jsonEquivalent(actual, expected)) return provenanceMismatchProblem(field);
+  return null;
+}
+
+export function validateImplementationDispatchResultProvenance(result, intent, { requireCompleteProvenance = false } = {}) {
+  if (!isRecord(result)) return null;
+  const captured = captureImplementationDispatchProvenance({ run_id: intent?.run_id, task_id: intent?.task_id }, intent);
+  const stringProblem = validateRequiredStringField(result, captured, "run_id", { requireCompleteProvenance })
+    || validateRequiredStringField(result, captured, "task_id", { requireCompleteProvenance })
+    || validateRequiredStringField(result, captured, "dispatch_intent_id", { requireCompleteProvenance });
+  if (stringProblem) return stringProblem;
+  const artifactProblem = validateArtifactRefField(result, captured, "dispatch_intent_artifact", { requireCompleteProvenance })
+    || validateJsonArtifactField(result, captured, "packet_artifact", { requireCompleteProvenance })
+    || validateJsonArtifactField(result, captured, "workspace_preparation_artifact", { requireCompleteProvenance });
+  if (artifactProblem) return artifactProblem;
+  return null;
+}
+
+export function validateImplementationDispatchResultReport(result, intent, { requireCompleteProvenance = true } = {}) {
+  if (!isRecord(result)) return resultShapeProblem("result");
+  if (result.schema_version !== DISPATCH_RESULT_SCHEMA_VERSION) return resultShapeProblem("schema_version");
+  const status = nonEmptyString(result.status).toUpperCase();
+  if (!["COMPLETED", "BLOCKED", "FAILED"].includes(status)) return resultShapeProblem("status");
+  const provenanceProblem = validateImplementationDispatchResultProvenance(result, intent, { requireCompleteProvenance });
+  if (provenanceProblem) return provenanceProblem;
+  if (status === "COMPLETED" && !hasMeaningfulImplementationDispatchCompletionEvidence(result.evidence)) {
+    return buildProblem(DISPATCH_EVIDENCE_REQUIRED_CODE, DISPATCH_EVIDENCE_REQUIRED_MESSAGE, { field: "evidence" });
+  }
+  return null;
+}
+
+export function isUnavailableImplementationDispatchResult(result) {
+  if (!isRecord(result)) return false;
+  return nonEmptyString(result.adapter) === DEFAULT_UNAVAILABLE_ADAPTER
+    || nonEmptyString(result.actor) === DEFAULT_UNAVAILABLE_ADAPTER
+    || nonEmptyString(result.problem?.code) === "implementation_dispatch_unavailable";
 }
 
 function sanitizeProblemCode(value, fallback) {
@@ -242,6 +365,10 @@ export function createUnavailableImplementationDispatchAdapter({ reason = "Imple
 export async function executeImplementationDispatch({ snapshot, intent, adapter = createUnavailableImplementationDispatchAdapter(), clock = () => new Date() } = {}) {
   if (!snapshot?.run_id) throw new Error("run snapshot is required for implementation dispatch execution");
   if (!intent?.dispatch_intent_id) throw new Error("implementation dispatch intent is required");
+  const capturedProvenance = captureImplementationDispatchProvenance(snapshot, intent);
+  const adapterSnapshot = cloneJson(snapshot);
+  const adapterIntent = cloneJson(intent);
+  const adapterPacketArtifact = cloneJson(capturedProvenance.packet_artifact);
   let startedAt = "";
   let finishedAt = "";
   let normalized;
@@ -255,14 +382,19 @@ export async function executeImplementationDispatch({ snapshot, intent, adapter 
       }, snapshot);
     } else {
       const rawResult = await adapter.execute({
-        snapshot,
-        intent,
+        snapshot: adapterSnapshot,
+        intent: adapterIntent,
         workspace_path: snapshot.workspace?.path || "",
-        packet_artifact: intent.packet_artifact,
+        packet_artifact: adapterPacketArtifact,
       });
       startedAt = nonEmptyString(rawResult?.started_at);
       finishedAt = nonEmptyString(rawResult?.finished_at);
-      normalized = normalizeResult(rawResult, snapshot);
+      const provenanceProblem = validateImplementationDispatchResultProvenance(rawResult, intent);
+      normalized = normalizeResult(provenanceProblem ? {
+        ...rawResult,
+        status: "BLOCKED",
+        problem: provenanceProblem,
+      } : rawResult, snapshot);
     }
   } catch (error) {
     normalized = normalizeResult({
@@ -277,15 +409,12 @@ export async function executeImplementationDispatch({ snapshot, intent, adapter 
   const artifactPayload = sanitizeValue({
     schema_version: DISPATCH_RESULT_SCHEMA_VERSION,
     adapter: normalized.adapter,
-    run_id: snapshot.run_id,
-    task_id: snapshot.task_id,
-    dispatch_intent_id: intent.dispatch_intent_id,
-    dispatch_intent_artifact: {
-      path: `artifacts/implementation-dispatch/intent-${intent.dispatch_intent_id.slice(0, 16)}.json`,
-      sha256: sha256Hex(`${JSON.stringify(intent, null, 2)}\n`),
-    },
-    packet_artifact: intent.packet_artifact,
-    workspace_preparation_artifact: intent.workspace_preparation_artifact,
+    run_id: capturedProvenance.run_id,
+    task_id: capturedProvenance.task_id,
+    dispatch_intent_id: capturedProvenance.dispatch_intent_id,
+    dispatch_intent_artifact: capturedProvenance.dispatch_intent_artifact,
+    packet_artifact: capturedProvenance.packet_artifact,
+    workspace_preparation_artifact: capturedProvenance.workspace_preparation_artifact,
     started_at: startedAt,
     finished_at: finishedAt,
     status: normalized.status,
@@ -303,15 +432,15 @@ export async function executeImplementationDispatch({ snapshot, intent, adapter 
     actor: normalized.actor,
     status: normalized.status,
     recorded_at: recordedAt,
-    idempotency_key: `${snapshot.run_id}:implementation_dispatch:${intent.dispatch_intent_id}:${artifactHash.slice(0, 16)}`,
+    idempotency_key: `${capturedProvenance.run_id}:implementation_dispatch:${capturedProvenance.dispatch_intent_id}:${artifactHash.slice(0, 16)}`,
     artifact_path: `artifacts/implementation-dispatch/result-${artifactHash.slice(0, 16)}.json`,
     artifact_content: artifactContent,
     public_report: artifactPayload,
     provenance: {
       kind: "implementation-dispatch-result",
       adapter: normalized.adapter,
-      dispatch_intent_id: intent.dispatch_intent_id,
-      packet_artifact: intent.packet_artifact,
+      dispatch_intent_id: capturedProvenance.dispatch_intent_id,
+      packet_artifact: capturedProvenance.packet_artifact,
       status: normalized.status,
     },
   };

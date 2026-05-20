@@ -9,6 +9,20 @@ import { formatRecoveryReport, recoverRegistry } from "./recovery.js";
 import { runLocalMission } from "./runner.js";
 import { nonEmptyString, resolveMaybeRelative } from "./utils.js";
 
+function configuredImplementationDispatchAdapter(config) {
+  const candidates = [
+    config.implementationDispatchAdapter,
+    config.implementation_dispatch_adapter,
+    config.implementationDispatch?.adapter,
+    config.implementation_dispatch?.adapter,
+    config.devHarness?.implementationDispatchAdapter,
+    config.devHarness?.dispatchAdapter,
+    config.dev_harness?.implementation_dispatch_adapter,
+    config.dev_harness?.dispatch_adapter,
+  ];
+  return candidates.find((candidate) => candidate && typeof candidate.execute === "function") || null;
+}
+
 export function normalizeBuranConfig(raw = {}, { workspaceDir = process.cwd(), stateDir = "" } = {}) {
   const config = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
   const configuredRoot = nonEmptyString(config.registryRoot);
@@ -17,6 +31,7 @@ export function normalizeBuranConfig(raw = {}, { workspaceDir = process.cwd(), s
     : path.join(workspaceDir, ".openclaw-runtime", "plugins", PLUGIN_ID, "registry");
   return {
     registryRoot: configuredRoot ? resolveMaybeRelative(workspaceDir, configuredRoot) : defaultRoot,
+    implementationDispatchAdapter: configuredImplementationDispatchAdapter(config),
   };
 }
 
@@ -134,8 +149,8 @@ export async function releaseLeaseReport({ registryRoot, runId, clock = () => ne
   };
 }
 
-export async function runLocalMissionReport({ registryRoot, runId, workspaceId = "", workspacePath = "", ttlMs = "", clock = () => new Date() } = {}) {
-  return runLocalMission({ registryRoot, runId, workspaceId, workspacePath, ttlMs, clock });
+export async function runLocalMissionReport({ registryRoot, runId, workspaceId = "", workspacePath = "", ttlMs = "", clock = () => new Date(), implementationDispatchAdapter = null } = {}) {
+  return runLocalMission({ registryRoot, runId, workspaceId, workspacePath, ttlMs, clock, ...(implementationDispatchAdapter ? { implementationDispatchAdapter } : {}) });
 }
 
 export function formatBuranReport(report) {
