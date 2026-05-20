@@ -140,7 +140,7 @@ Minimum expected artifacts:
 - `implementation-log.md` — compact implementation summary and touched files.
 - `artifacts/implementation-dispatch/intent-<hash>.json` — immutable dispatch intent recorded before adapter execution. It includes `schema_version: implementation-dispatch-intent.v1`, `dispatch_status: dispatch_requested`, the run/task ids, repo/issue/branch summary, workspace id, current execution epoch/state, packet artifact ref, workspace-preparation artifact ref, and `dispatch_intent_id` derived from the canonical intent payload.
 - `artifacts/implementation-dispatch/result-<hash>.json` — immutable sanitized dispatch result recorded after adapter execution or reused on resume. Shape: `schema_version: implementation-dispatch-result.v1`, adapter/run/task ids, `dispatch_intent_id`, intent/packet/workspace-preparation artifact refs, timestamps, `status` (`COMPLETED`, `BLOCKED`, or `FAILED`), generic safe `summary`, `implementation_epoch`, sanitized `evidence`, optional sanitized `problem`, and actor. `COMPLETED` is accepted only when evidence includes changed-file evidence plus a durable implementation/result reference such as `implementation_result_id`, `commit_sha`, `patch_sha`, or implementation artifact ref(s). Raw prompt/stdout/stderr/output/transcript/session/content-like blobs are not valid evidence and must not be persisted through summary/problem/report fields.
-- `verification.json` — verification commands/checks, outcomes, and evidence.
+- `verification.json` — verification commands/checks, outcomes, evidence, and the embedded `verification-policy.v1` artifact field.
 - `internal-review/<hash>.json` — immutable local internal-review findings, sanitized packet review context, and final review status.
 - `pr/projection-intent-<hash>.json` — immutable local PR handoff intent derived from the approved local contract.
 - `pr/projection-result-<hash>.json` — immutable local PR handoff result mirrored into `github.pr` / `projections.github_pr` only after a semantically valid successful projection record.
@@ -156,6 +156,17 @@ When implementation dispatch blocks or fails, the public runner report records a
 - `blockers[]` entry — `code: implementation_dispatch_blocked` for `BLOCKED` or `code: implementation_dispatch_failed` for `FAILED`, plus `dispatch_status`, nested `problem`, `intent_artifact_ref`, and `result_artifact_ref` mirroring the implementation-dispatch report.
 
 Verification and review command records describe allowed adapters/gates from the approved packet and Buran policy. They must not become a general-purpose arbitrary script execution surface.
+
+Verification report artifacts (`schema_version: verification-report.v1`) include a durable `policy` object with `schema_version: verification-policy.v1`. The policy records the verification adapter contract used for the run:
+
+- `adapter` — verification adapter id that interpreted the approved packet commands.
+- `deterministic` — `true`; command selection and policy reporting must be deterministic for replay/recovery.
+- `shell` — `false`; supported commands are executed through the adapter without shell expansion.
+- `pass_requires_at_least_one_allowed_command` — `true`; a passing verification requires at least one requested command accepted by the adapter allowlist.
+- `allowed_commands` — sorted adapter allowlist of command strings that may be requested by the packet.
+- `requested_commands[]` — one entry per packet command after normalization. Allowed entries include `command`, `status: ALLOWED`, `adapter_command`, and `execution: execFile_no_shell`. Unsupported entries include `command`, `status: UNSUPPORTED`, and a sanitized `problem` object.
+
+Recovery and consumers must treat `policy` as the durable reference for how packet verification commands were interpreted, not as authority to execute arbitrary commands outside the adapter allowlist.
 
 ## Registry store ordering
 
