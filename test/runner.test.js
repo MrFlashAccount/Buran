@@ -237,6 +237,8 @@ async function seedInternalReviewGateResult(registryRoot, runId, {
   recordedAt = "2026-05-16T13:56:00.000Z",
   withReviewerEvidence = true,
   verdictArtifactPath = `artifacts/internal-review/seed-verdict-${status.toLowerCase()}-${runId}.json`,
+  reviewerResultExtra = {},
+  reportExtraFields = {},
 } = {}) {
   const paths = getRunPaths(registryRoot, runId);
   const snapshot = await readRunSnapshot(paths.runPath);
@@ -270,6 +272,7 @@ async function seedInternalReviewGateResult(registryRoot, runId, {
       findings: [],
       evidence: [],
       problem,
+      ...reviewerResultExtra,
     };
   }
 
@@ -281,6 +284,7 @@ async function seedInternalReviewGateResult(registryRoot, runId, {
       summary,
       reviewer_result: reviewerResult,
       problem,
+      ...reportExtraFields,
     }, null, 2)}
 `,
     gate_name: "internal_review",
@@ -2029,6 +2033,119 @@ test("local runner reuses a recorded internal review result without duplicating 
   ]);
   assert.equal(eventsAfterRetry.filter((event) => event.type === "gate.result_recorded" && event.evidence.gate_name === "internal_review").length, 1);
   assert.equal(eventsAfterRetry.length, eventsBeforeRetry.length + 1);
+});
+
+test("local runner sanitizes private fields when resuming a recorded internal review result", async () => {
+  const tempDir = await makeTempDir();
+  const registryRoot = path.join(tempDir, "registry");
+  const workspacePath = await createVerificationWorkspace(tempDir, {
+    testFile: "test/runner.test.js",
+    passing: true,
+  });
+  const privatePath = path.join(tempDir, "private-review-workspace", "raw-prompt.txt");
+  const runId = await prepareVerificationRun(registryRoot, workspacePath, {
+    runId: "run_runner_internal_review_resume_private_fields",
+  });
+
+  await advanceRunToInternalReview(registryRoot, runId);
+  await seedInternalReviewGateResult(registryRoot, runId, {
+    status: "PASS",
+    summary: `Seeded passing internal review from ${privatePath}`,
+    reviewerResultExtra: {
+      prompt: "RECORDED_PROMPT_SENTINEL",
+      transcript: "RECORDED_TRANSCRIPT_SENTINEL",
+      stdout: "RECORDED_STDOUT_SENTINEL",
+      stderr: "RECORDED_STDERR_SENTINEL",
+      output: "RECORDED_OUTPUT_SENTINEL",
+      log: "RECORDED_LOG_SENTINEL",
+      logs: ["RECORDED_LOGS_SENTINEL"],
+      session: "RECORDED_SESSION_SENTINEL",
+      findings: [{
+        severity: "low",
+        summary: "Safe recorded finding survives resume sanitization.",
+        prompt: "FINDING_PROMPT_SENTINEL",
+        nested: {
+          safe_note: "Nested safe finding context survives.",
+          session_id: "FINDING_SESSION_ID_SENTINEL",
+          private_path: privatePath,
+        },
+      }],
+      evidence: [{
+        kind: "focused_review",
+        files: [privatePath],
+        transcript: "EVIDENCE_TRANSCRIPT_SENTINEL",
+        stdout: "EVIDENCE_STDOUT_SENTINEL",
+        output: "EVIDENCE_OUTPUT_SENTINEL",
+        logs: ["EVIDENCE_LOGS_SENTINEL"],
+        nested: { safe_note: "Nested safe evidence context survives." },
+      }],
+      problem: {
+        code: "historical_private_problem",
+        message: `Historical problem referenced ${privatePath}`,
+        stderr: "PROBLEM_STDERR_SENTINEL",
+        session_id: "PROBLEM_SESSION_ID_SENTINEL",
+      },
+    },
+    reportExtraFields: {
+      prompt: "REPORT_PROMPT_SENTINEL",
+      transcript: "REPORT_TRANSCRIPT_SENTINEL",
+      stdout: "REPORT_STDOUT_SENTINEL",
+      stderr: "REPORT_STDERR_SENTINEL",
+      output: "REPORT_OUTPUT_SENTINEL",
+      log: "REPORT_LOG_SENTINEL",
+      logs: ["REPORT_LOGS_SENTINEL"],
+      session: "REPORT_SESSION_SENTINEL",
+    },
+  });
+
+  const result = await runLocalMission({
+    registryRoot,
+    runId,
+    clock: () => new Date("2026-05-16T13:57:00.000Z"),
+  });
+
+  assert.equal(result.outcome, "completed");
+  assert.equal(result.current_state, "pr_ready");
+  assert.equal(result.internal_review.status, "PASS");
+  assert.equal(result.internal_review.resumed_recorded_result, true);
+  assert.equal(result.internal_review.reviewer_result.findings[0].summary, "Safe recorded finding survives resume sanitization.");
+  assert.equal(result.internal_review.reviewer_result.findings[0].nested.safe_note, "Nested safe finding context survives.");
+  assert.equal(result.internal_review.reviewer_result.evidence[0].nested.safe_note, "Nested safe evidence context survives.");
+  assert.equal(result.internal_review.reviewer_result.problem.code, "historical_private_problem");
+
+  const reportText = JSON.stringify(result.internal_review);
+  for (const forbidden of [
+    "RECORDED_PROMPT_SENTINEL",
+    "RECORDED_TRANSCRIPT_SENTINEL",
+    "RECORDED_STDOUT_SENTINEL",
+    "RECORDED_STDERR_SENTINEL",
+    "RECORDED_OUTPUT_SENTINEL",
+    "RECORDED_LOG_SENTINEL",
+    "RECORDED_LOGS_SENTINEL",
+    "RECORDED_SESSION_SENTINEL",
+    "FINDING_PROMPT_SENTINEL",
+    "FINDING_SESSION_ID_SENTINEL",
+    "EVIDENCE_TRANSCRIPT_SENTINEL",
+    "EVIDENCE_STDOUT_SENTINEL",
+    "EVIDENCE_OUTPUT_SENTINEL",
+    "EVIDENCE_LOGS_SENTINEL",
+    "PROBLEM_STDERR_SENTINEL",
+    "PROBLEM_SESSION_ID_SENTINEL",
+    "REPORT_PROMPT_SENTINEL",
+    "REPORT_TRANSCRIPT_SENTINEL",
+    "REPORT_STDOUT_SENTINEL",
+    "REPORT_STDERR_SENTINEL",
+    "REPORT_OUTPUT_SENTINEL",
+    "REPORT_LOG_SENTINEL",
+    "REPORT_LOGS_SENTINEL",
+    "REPORT_SESSION_SENTINEL",
+    privatePath,
+  ]) {
+    assert.equal(reportText.includes(forbidden), false, `retained private resumed review data: ${forbidden}`);
+  }
+  for (const forbiddenKey of ["prompt", "transcript", "stdout", "stderr", "output", "log", "logs", "session", "session_id"]) {
+    assert.doesNotMatch(reportText, new RegExp(`"${forbiddenKey}"\\s*:`, "i"));
+  }
 });
 
 test("local runner blocks internal review resume when the recorded artifact is missing", async () => {

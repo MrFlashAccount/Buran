@@ -21,7 +21,7 @@ import path from "node:path";
 
 import { SCHEMA_VERSION, TERMINAL_STATES } from "./constants.js";
 import { IMPLEMENTATION_DISPATCH_ADAPTER, buildImplementationDispatchIntent, createUnavailableImplementationDispatchAdapter, executeImplementationDispatch, implementationDispatchStatusSummary, isUnavailableImplementationDispatchResult, sanitizeImplementationDispatchEvidence, validateImplementationDispatchResultReport } from "./implementation-dispatch.js";
-import { executeInternalReviewGate } from "./internal-review-adapter.js";
+import { executeInternalReviewGate, sanitizeRecordedInternalReviewReport } from "./internal-review-adapter.js";
 import { acquireWorkspaceLease } from "./locks.js";
 import { sanitizePublicReportForOutput } from "./observability.js";
 import { buildRecordedPrProjection, createLocalPrProjectionAdapter } from "./pr-projection-adapter.js";
@@ -313,10 +313,11 @@ function resolveRecordedArtifactPath(runDir, artifactPath) {
   return { absolutePath, relativePath };
 }
 
-async function inspectRecordedInternalReviewEvidence(runDir, gateStatus, reportArtifactRef) {
+async function inspectRecordedInternalReviewEvidence(runDir, gateStatus, reportArtifactRef, { workspacePath = "" } = {}) {
   const reportArtifactPath = nonEmptyString(reportArtifactRef?.path);
-  const report = await readRecordedArtifactJson(runDir, reportArtifactRef);
-  if (!isRecord(report)) {
+  const rawReport = await readRecordedArtifactJson(runDir, reportArtifactRef);
+  const report = sanitizeRecordedInternalReviewReport(rawReport, { workspacePath });
+  if (!isRecord(rawReport)) {
     return {
       ok: false,
       problem: internalReviewResumeProblem(
@@ -327,8 +328,8 @@ async function inspectRecordedInternalReviewEvidence(runDir, gateStatus, reportA
     };
   }
 
-  const reportStatus = nonEmptyString(report.status).toUpperCase();
-  if (report.schema_version !== "internal-review-report.v1" || reportStatus !== gateStatus) {
+  const reportStatus = nonEmptyString(rawReport.status).toUpperCase();
+  if (rawReport.schema_version !== "internal-review-report.v1" || reportStatus !== gateStatus) {
     return {
       ok: false,
       problem: internalReviewResumeProblem(
@@ -339,8 +340,10 @@ async function inspectRecordedInternalReviewEvidence(runDir, gateStatus, reportA
     };
   }
 
-  const reviewerResult = report.reviewer_result;
+  const reviewerResult = rawReport.reviewer_result;
+  const publicReviewerResult = isRecord(report?.reviewer_result) ? report.reviewer_result : null;
   const verdictRef = reviewerResult?.artifact_ref;
+  const publicVerdictRef = publicReviewerResult?.artifact_ref;
   const verdictPath = nonEmptyString(verdictRef?.path);
   const expectedVerdictSha256 = nonEmptyString(verdictRef?.sha256);
   if (!isRecord(reviewerResult) || !verdictPath || !expectedVerdictSha256) {
@@ -363,7 +366,7 @@ async function inspectRecordedInternalReviewEvidence(runDir, gateStatus, reportA
       problem: internalReviewResumeProblem(
         "independent_evidence_invalid",
         "Recorded internal review result cannot be resumed because independent reviewer verdict status does not match the recorded gate status.",
-        verdictRef,
+        publicVerdictRef,
       ),
     };
   }
@@ -376,7 +379,7 @@ async function inspectRecordedInternalReviewEvidence(runDir, gateStatus, reportA
       problem: internalReviewResumeProblem(
         "independent_evidence_invalid",
         "Recorded internal review result cannot be resumed because the independent reviewer verdict artifact path is invalid.",
-        verdictRef,
+        publicVerdictRef,
       ),
     };
   }
@@ -392,7 +395,7 @@ async function inspectRecordedInternalReviewEvidence(runDir, gateStatus, reportA
         problem: internalReviewResumeProblem(
           "independent_evidence_missing",
           `Recorded internal review result cannot be resumed because independent reviewer verdict artifact ${resolvedVerdict.relativePath} is missing on disk.`,
-          verdictRef,
+          publicVerdictRef,
         ),
       };
     }
@@ -406,7 +409,7 @@ async function inspectRecordedInternalReviewEvidence(runDir, gateStatus, reportA
       problem: internalReviewResumeProblem(
         "independent_evidence_corrupt",
         `Recorded internal review result cannot be resumed because independent reviewer verdict artifact ${resolvedVerdict.relativePath} no longer matches its recorded hash.`,
-        verdictRef,
+        publicVerdictRef,
       ),
     };
   }
@@ -421,7 +424,7 @@ async function inspectRecordedInternalReviewEvidence(runDir, gateStatus, reportA
       problem: internalReviewResumeProblem(
         "independent_evidence_invalid",
         `Recorded internal review result cannot be resumed because independent reviewer verdict artifact ${resolvedVerdict.relativePath} is not valid JSON.`,
-        verdictRef,
+        publicVerdictRef,
       ),
     };
   }
@@ -435,12 +438,12 @@ async function inspectRecordedInternalReviewEvidence(runDir, gateStatus, reportA
       problem: internalReviewResumeProblem(
         "independent_evidence_invalid",
         `Recorded internal review result cannot be resumed because independent reviewer verdict artifact ${resolvedVerdict.relativePath} does not match the expected schema and status.`,
-        verdictRef,
+        publicVerdictRef,
       ),
     };
   }
 
-  return { ok: true, report, verdict_ref: verdictRef };
+  return { ok: true, report, verdict_ref: publicVerdictRef };
 }
 
 async function inspectRecordedGateArtifacts(runDir, snapshot, gateName) {
@@ -803,6 +806,7 @@ async function runInternalReviewStage({ registryRoot, runId, current, previousSt
       paths.runDir,
       current.gates.internal_review.status,
       artifactIntegrity.artifact_refs[0] || null,
+      { workspacePath: current.workspace?.path || current.locks?.workspace_path || "" },
     );
     if (!evidenceIntegrity.ok) {
       internalReview = {

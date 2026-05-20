@@ -86,6 +86,10 @@ function sanitizeReviewVerdictPayload(parsed, status, schemaVersion, artifactRef
   }, contexts);
 }
 
+export function sanitizeRecordedInternalReviewReport(report, { workspacePath = "" } = {}) {
+  return sanitizeReviewVerdictValue(report, buildPathContexts(workspacePath));
+}
+
 function resolveReviewVerdictPath(runDir, artifactPath) {
   const input = nonEmptyString(artifactPath);
   if (!input) return null;
