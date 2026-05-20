@@ -70,4 +70,4 @@ Buran does **not** discover work on its own, draft plans, or upgrade weak packet
 - lifecycle rules: `docs/state-machine.md`
 - registry contract: `docs/execution-run-schema.md`
 - projection semantics: `docs/github-projection-contract.md`
-- runtime orchestration entrypoint: `src/runner.js`
+- runtime orchestration entrypoint: `src/application/run-local-mission.js`

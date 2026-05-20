@@ -1,6 +1,6 @@
 # Module Map
 
-This file is the quick source-tree guide for maintainers. It maps the current code layout to responsibilities already implemented on this branch.
+This file is the quick source-tree guide for maintainers. It maps the context-first source layout to implemented responsibilities.
 
 ## Top-level entrypoints
 
@@ -8,48 +8,48 @@ This file is the quick source-tree guide for maintainers. It maps the current co
 | --- | --- |
 | `index.js` | OpenClaw plugin export surface. |
 | `bin/buran.js` | CLI wrapper for local command execution. |
-| `src/cli.js` | argument parsing and command dispatch for `validate`, `intake`, `run`, `lease`, and `recover`. |
-| `src/buran.js` | packet-list validation and intake orchestration. |
+| `src/entrypoints/cli.js` | argument parsing and command dispatch for `validate`, `intake`, `run`, `lease`, and `recover`. |
+| `src/application/commands.js` | packet-list validation, intake orchestration, and CLI report assembly. |
 
-## Core runtime modules
-
-| Path | Responsibility |
-| --- | --- |
-| `src/constants.js` | schema version, state names, transition constants, artifact-stage names, and shared limits. |
-| `src/state-machine.js` | allowed transition validation and terminal-state enforcement. |
-| `src/packet-sufficiency.js` | approved-packet normalization and PASS/FAIL sufficiency decisions. |
-| `src/runner.js` | local mission runner orchestration across `queued`, `waiting_for_lock`, `running`, `verification`, `internal_review`, bounded `fix_loop`, and `pr_ready`. |
-| `src/locks.js` | workspace lease acquisition, conflict detection, TTL handling, and lease release. |
-| `src/workspace-preparation.js` | local git workspace inspection and immutable preparation artifact content. |
-| `src/implementation-dispatch.js` | implementation-dispatch and fix-attempt intent/result artifact builder, result sanitizer, custom intent-artifact provenance support, and durable completion-evidence contract. |
-
-## Registry and persistence
+## Core contexts
 
 | Path | Responsibility |
 | --- | --- |
-| `src/execution-run-schema.js` | `execution-run.v2` builders and validators for runs, batches, leases, and typed event payloads. |
-| `src/registry-store.js` | canonical multi-file mutation ordering for snapshots, events, artifacts, leases, and indexes. |
-| `src/registry.js` | compatibility export surface around registry operations. |
-| `src/fs-atomic.js` | atomic write helpers used by registry persistence. |
-| `src/recovery.js` | replay, validation, quarantine, stale-lease reclamation, and index rebuild flow. |
+| `src/approved-packets/sufficiency.js` | approved-packet normalization and PASS/FAIL sufficiency decisions. |
+| `src/execution-runs/constants.js` | schema version, state names, transition constants, artifact-stage names, and shared limits. |
+| `src/execution-runs/schema/` | `execution-run.v2` builders and validators for runs, batches, leases, and typed event payloads. |
+| `src/execution-runs/state-machine.js` | allowed transition validation and terminal-state enforcement. |
+| `src/execution-runs/registry/index.js` | compatibility export surface around registry operations. |
+| `src/execution-runs/recovery/` | replay, validation, quarantine, stale-lease reclamation, index rebuild flow, and recovery report formatting. |
+| `src/workspace-leases/contract.js` | provider-neutral lease request/status/path semantics. |
+| `src/gates/verification-adapter.js` | allowlisted verification command execution and verification report generation. |
+| `src/gates/internal-review-adapter.js` | local internal-review report generation that treats packet review text as context only. |
+| `src/stack-workflow/review-ready-policy.js` | review-ready stack progression policy. |
+| `src/workflow-boundary/pr-scm-projection/` | generic PR/SCM projection contract and local journal projection adapter. |
+| `src/observability/` | redaction, public report sanitization, summaries, and observability path helpers. |
+| `src/shared/primitives.js` | generic helpers such as hashing, string normalization, and utility checks. |
 
-## Gate and projection adapters
-
-| Path | Responsibility |
-| --- | --- |
-| `src/verification-adapter.js` | allowlisted verification command execution and verification report generation. |
-| `src/internal-review-adapter.js` | local internal-review report generation that treats packet review text as context only. |
-| `src/pr-projection-adapter.js` | local fake PR projection planning, artifact generation, and projection replay helpers. |
-| `src/github-pr-transport-adapter.js` | injectable transport-backed PR projection seam plus disabled-by-default GitHub CLI stacked-PR create/update hook with repo allowlisting, local-first intent, sanitization, and result validation. |
-| `src/workflow-policy.js` | review-ready stack progression policy; exposes prerequisite gates and refuses next-slice starts until local evidence is complete. |
-| `src/projection-contract.js` | projection payload normalization and contract checks shared by projection code. |
-| `src/observability.js` | redaction, public report sanitization, and observability path helpers. |
-
-## Shared helpers
+## Application orchestration
 
 | Path | Responsibility |
 | --- | --- |
-| `src/utils.js` | generic helpers such as hashing, string normalization, and utility checks. |
+| `src/application/run-local-mission.js` | thin state dispatcher for local mission runs. |
+| `src/application/mission-context.js` | runner constants and mission context helpers. |
+| `src/application/mission-phase-runner.js` | workspace-preparation and implementation-dispatch stage coordination. |
+| `src/application/gate-pipeline.js` | verification and internal-review sequencing. |
+| `src/application/fix-review-loop.js` | bounded fix-loop retry coordination. |
+| `src/application/scm-handoff.js` | provider-neutral PR/SCM handoff coordination. |
+| `src/application/final-report.js` | runner report and step/problem formatting. |
+
+## External integrations
+
+| Path | Responsibility |
+| --- | --- |
+| `src/integrations/storage/json-registry/` | JSON registry store, path layout, event journal, and atomic file writes. |
+| `src/integrations/worktree/filesystem/locks.js` | filesystem-backed workspace lease acquisition/release and conflict detection. |
+| `src/integrations/worktree/filesystem/workspace-preparation.js` | local git workspace inspection and immutable preparation artifact content. |
+| `src/integrations/implementation/codex/dispatch-adapter.js` | implementation-dispatch and fix-attempt intent/result artifact contract. |
+| `src/integrations/scm/github/pr-transport-adapter.js` | optional GitHub CLI stacked-PR transport adapter. |
 
 ## Test map
 

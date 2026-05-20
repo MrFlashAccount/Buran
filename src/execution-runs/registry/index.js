@@ -1,0 +1,21 @@
+export { appendJsonLine, writeJsonAtomic, writeTextAtomic } from "../../integrations/storage/json-registry/fs-atomic.js";
+export {
+  appendRunEvent,
+  commitRunTransition,
+  createBatchFromPacketReports,
+  createRunFromPacketReport,
+  getRegistryPaths,
+  getRunPaths,
+  hashRunSnapshot,
+  readEventsFile,
+  readRunSnapshot,
+  recordArtifact,
+  recordGateResult,
+  recordProjectionIntent,
+  recordProjectionResult,
+  rebuildIndexes,
+  removeLeaseRecordsForRun,
+  transitionRun,
+  writeRegistryReport,
+  writeRunSnapshot,
+} from "../../integrations/storage/json-registry/store.js";

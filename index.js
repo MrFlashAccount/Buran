@@ -18,8 +18,8 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { PLUGIN_COMMAND_NAME, PLUGIN_ID } from "./src/constants.js";
-import { runBuranCli } from "./src/cli.js";
+import { PLUGIN_COMMAND_NAME, PLUGIN_ID } from "./src/execution-runs/constants.js";
+import { runBuranCli } from "./src/entrypoints/cli.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const manifest = JSON.parse(readFileSync(path.join(__dirname, "openclaw.plugin.json"), "utf8"));
@@ -84,15 +84,15 @@ export default defineLocalPluginEntry({
   },
 });
 
-export { parseBuranArgs, runBuranCli, usageText } from "./src/cli.js";
-export { acquireLeaseReport, formatBuranReport, intakePacketListFile, normalizeBuranConfig, recoverRegistryReport, releaseLeaseReport, runLocalMissionReport, validatePacketListFile } from "./src/buran.js";
-export { acquireWorkspaceLease, releaseWorkspaceLease } from "./src/locks.js";
-export { normalizePacket, normalizePacketList, summarizePacketReports } from "./src/packet-sufficiency.js";
-export { createInvocationObserver, normalizeObservabilityConfig, sanitizeError, sanitizeForObservability } from "./src/observability.js";
-export { recoverRegistry } from "./src/recovery.js";
-export { createGithubCliPrProjectionAdapter, createGithubCliProjectPr, createGithubPrTransportAdapter } from "./src/github-pr-transport-adapter.js";
-export { buildLocalPrProjection, buildRecordedPrProjection, buildPrProjectionPlan, buildPrProjectionResult, createLocalPrProjectionAdapter } from "./src/pr-projection-adapter.js";
-export { runLocalMission } from "./src/runner.js";
-export { assertNextSliceAllowed, evaluateReviewReadyPolicy } from "./src/workflow-policy.js";
-export { appendRunEvent, createBatchFromPacketReports, createRunFromPacketReport, getRegistryPaths, rebuildIndexes, transitionRun, writeJsonAtomic } from "./src/registry.js";
-export { assertTransitionAllowed, getAllowedTransitions, isTerminalState, validateTransition } from "./src/state-machine.js";
+export { parseBuranArgs, runBuranCli, usageText } from "./src/entrypoints/cli.js";
+export { acquireLeaseReport, formatBuranReport, intakePacketListFile, normalizeBuranConfig, recoverRegistryReport, releaseLeaseReport, runLocalMissionReport, validatePacketListFile } from "./src/application/commands.js";
+export { acquireWorkspaceLease, releaseWorkspaceLease } from "./src/integrations/worktree/filesystem/locks.js";
+export { normalizePacket, normalizePacketList, summarizePacketReports } from "./src/approved-packets/sufficiency.js";
+export { createInvocationObserver, normalizeObservabilityConfig, sanitizeError, sanitizeForObservability } from "./src/observability/index.js";
+export { recoverRegistry } from "./src/execution-runs/recovery/index.js";
+export { createGithubCliPrProjectionAdapter, createGithubCliProjectPr, createGithubPrTransportAdapter } from "./src/integrations/scm/github/pr-transport-adapter.js";
+export { buildLocalPrProjection, buildRecordedPrProjection, buildPrProjectionPlan, buildPrProjectionResult, createLocalPrProjectionAdapter } from "./src/workflow-boundary/pr-scm-projection/local-journal-adapter.js";
+export { runLocalMission } from "./src/application/run-local-mission.js";
+export { assertNextSliceAllowed, evaluateReviewReadyPolicy } from "./src/stack-workflow/review-ready-policy.js";
+export { appendRunEvent, createBatchFromPacketReports, createRunFromPacketReport, getRegistryPaths, rebuildIndexes, transitionRun, writeJsonAtomic } from "./src/execution-runs/registry/index.js";
+export { assertTransitionAllowed, getAllowedTransitions, isTerminalState, validateTransition } from "./src/execution-runs/state-machine.js";

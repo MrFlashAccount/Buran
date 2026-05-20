@@ -14,6 +14,6 @@
   },
   "scripts": {
     "test": "node --test test/*.test.js",
-    "check": "node -e \"import('./index.js')\" && git check-ignore -q registry/runs/example/run.json && git check-ignore -q .openclaw-runtime/plugins/buran/registry/runs/example/run.json && node --check index.js && find src bin test -name '*.js' -print0 | xargs -0 -n1 node --check"
+    "check": "node -e \"import('./index.js')\" && git check-ignore -q registry/runs/example/run.json && git check-ignore -q .openclaw-runtime/plugins/buran/registry/runs/example/run.json && node --check index.js && find src bin test scripts -name '*.js' -print0 | xargs -0 -n1 node --check && node scripts/boundary-check.js"
   }
 }

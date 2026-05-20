@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { buildPrProjectionPlan } from "../src/pr-projection-adapter.js";
+import { buildPrProjectionPlan } from "../src/workflow-boundary/pr-scm-projection/local-journal-adapter.js";
 
 function projectionSnapshot(baseBranch) {
   return {

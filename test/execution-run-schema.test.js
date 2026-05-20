@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { SCHEMA_VERSION } from "../src/constants.js";
+import { SCHEMA_VERSION } from "../src/execution-runs/constants.js";
 import {
   buildInitialRunSnapshot,
   buildLeaseRecord,
@@ -10,7 +10,7 @@ import {
   validateGateResultPayload,
   validateLeaseRecord,
   validateRunSnapshot,
-} from "../src/execution-run-schema.js";
+} from "../src/execution-runs/schema/index.js";
 
 /**
  * Schema-contract tests for run snapshots and ledger payloads. Helpers below keep

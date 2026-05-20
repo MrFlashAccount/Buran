@@ -4,10 +4,10 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { SCHEMA_VERSION } from "../src/constants.js";
-import { buildLocalPrProjection } from "../src/pr-projection-adapter.js";
-import { acquireWorkspaceLease } from "../src/locks.js";
-import { recoverRegistry } from "../src/recovery.js";
+import { SCHEMA_VERSION } from "../src/execution-runs/constants.js";
+import { buildLocalPrProjection } from "../src/workflow-boundary/pr-scm-projection/local-journal-adapter.js";
+import { acquireWorkspaceLease } from "../src/integrations/worktree/filesystem/locks.js";
+import { recoverRegistry } from "../src/execution-runs/recovery/index.js";
 import {
   createRunFromPacketReport,
   getRunPaths,
@@ -18,7 +18,7 @@ import {
   recordProjectionIntent,
   recordProjectionResult,
   transitionRun,
-} from "../src/registry-store.js";
+} from "../src/integrations/storage/json-registry/store.js";
 
 /**
  * Ledger-focused tests for artifact, gate, and projection recording. The helpers

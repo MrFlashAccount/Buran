@@ -5,16 +5,16 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { runBuranCli } from "../src/cli.js";
-import { SCHEMA_VERSION } from "../src/constants.js";
-import { intakePacketListFile, validatePacketListFile } from "../src/buran.js";
-import { validateRunSnapshot } from "../src/execution-run-schema.js";
-import { acquireWorkspaceLease, getLeaseRecordPath } from "../src/locks.js";
-import { normalizeObservabilityConfig, sanitizeForObservability, sanitizePathForOutput, sanitizePublicReportForOutput } from "../src/observability.js";
-import { buildLocalPrProjection } from "../src/pr-projection-adapter.js";
-import { recoverRegistry } from "../src/recovery.js";
-import { transitionRun, writeJsonAtomic } from "../src/registry.js";
-import { validateTransition } from "../src/state-machine.js";
+import { runBuranCli } from "../src/entrypoints/cli.js";
+import { SCHEMA_VERSION } from "../src/execution-runs/constants.js";
+import { intakePacketListFile, validatePacketListFile } from "../src/application/commands.js";
+import { validateRunSnapshot } from "../src/execution-runs/schema/index.js";
+import { acquireWorkspaceLease, getLeaseRecordPath } from "../src/integrations/worktree/filesystem/locks.js";
+import { normalizeObservabilityConfig, sanitizeForObservability, sanitizePathForOutput, sanitizePublicReportForOutput } from "../src/observability/index.js";
+import { buildLocalPrProjection } from "../src/workflow-boundary/pr-scm-projection/local-journal-adapter.js";
+import { recoverRegistry } from "../src/execution-runs/recovery/index.js";
+import { transitionRun, writeJsonAtomic } from "../src/execution-runs/registry/index.js";
+import { validateTransition } from "../src/execution-runs/state-machine.js";
 
 /**
  * End-to-end coverage for packet intake, CLI orchestration, locks, redaction,

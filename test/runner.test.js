@@ -7,17 +7,17 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
-import { formatBuranReport, runLocalMissionReport } from "../src/buran.js";
-import { runBuranCli } from "../src/cli.js";
-import { createGithubCliProjectPr, createGithubPrTransportAdapter } from "../src/github-pr-transport-adapter.js";
-import { acquireWorkspaceLease } from "../src/locks.js";
-import { executeImplementationDispatch, validateImplementationDispatchResultReport } from "../src/implementation-dispatch.js";
-import { recoverRegistry } from "../src/recovery.js";
-import { runLocalMission } from "../src/runner.js";
-import { canonicalJson } from "../src/utils.js";
-import { evaluateReviewReadyPolicy } from "../src/workflow-policy.js";
+import { formatBuranReport, runLocalMissionReport } from "../src/application/commands.js";
+import { runBuranCli } from "../src/entrypoints/cli.js";
+import { createGithubCliProjectPr, createGithubPrTransportAdapter } from "../src/integrations/scm/github/pr-transport-adapter.js";
+import { acquireWorkspaceLease } from "../src/integrations/worktree/filesystem/locks.js";
+import { executeImplementationDispatch, validateImplementationDispatchResultReport } from "../src/gates/implementation-contract.js";
+import { recoverRegistry } from "../src/execution-runs/recovery/index.js";
+import { runLocalMission } from "../src/application/run-local-mission.js";
+import { canonicalJson } from "../src/shared/primitives.js";
+import { evaluateReviewReadyPolicy } from "../src/stack-workflow/review-ready-policy.js";
 import { reviewReadyPolicySnapshot } from "./helpers/workflow-policy-fixture.js";
-import { createRunFromPacketReport, getRunPaths, readEventsFile, readRunSnapshot, recordArtifact, recordGateResult, transitionRun, writeRunSnapshot } from "../src/registry-store.js";
+import { createRunFromPacketReport, getRunPaths, readEventsFile, readRunSnapshot, recordArtifact, recordGateResult, transitionRun, writeRunSnapshot } from "../src/integrations/storage/json-registry/store.js";
 
 /**
  * Runner mission tests covering queueing, verification execution, review handoff,

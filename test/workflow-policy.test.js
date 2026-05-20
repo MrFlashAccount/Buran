@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { assertNextSliceAllowed, evaluateReviewReadyPolicy } from "../src/workflow-policy.js";
+import { assertNextSliceAllowed, evaluateReviewReadyPolicy } from "../src/stack-workflow/review-ready-policy.js";
 import { reviewReadyPolicySnapshot } from "./helpers/workflow-policy-fixture.js";
 
 test("workflow policy exposes review-ready gates and allows the next stacked slice only after PR readiness", () => {

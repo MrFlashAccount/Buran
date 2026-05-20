@@ -4,9 +4,9 @@ The local registry is the canonical state owner. Remote systems are projections 
 
 Implementation ownership is explicit:
 
-- `src/execution-run-schema.js` owns current `execution-run.v2` snapshot, batch, lease-record builders/validators, typed artifact/gate event validators, artifact-ref traversal, and version rejection policy.
-- `src/registry-store.js` owns registry domain write ordering for run snapshots, events, artifacts, indexes, and run lease snapshot/event updates.
-- `src/registry.js` remains a compatibility export surface for existing callers; new domain mutations should route through the store seam.
+- `src/execution-runs/schema/index.js` owns current `execution-run.v2` snapshot, batch, lease-record builders/validators, typed artifact/gate event validators, artifact-ref traversal, and version rejection policy.
+- `src/integrations/storage/json-registry/store.js` owns registry domain write ordering for run snapshots, events, artifacts, indexes, and run lease snapshot/event updates.
+- `src/execution-runs/registry/index.js` remains a compatibility export surface for existing callers; new domain mutations should route through the store seam.
 
 ## Layout
 
@@ -182,7 +182,7 @@ Recovery and consumers must treat `policy` as the durable reference for how pack
 
 ## Registry store ordering
 
-`src/registry-store.js` centralizes multi-file mutation order. Current `execution-run.v2` ordering is:
+`src/integrations/storage/json-registry/store.js` centralizes multi-file mutation order. Current `execution-run.v2` ordering is:
 
 - Intake: write packet artifact, initialize event journal, append `packet_received`, write `run.json`, commit sufficiency transition, then rebuild indexes.
 - Transition: append the transition event, write the matching snapshot, release terminal lease records when needed, then rebuild indexes for terminal transitions.
@@ -235,7 +235,7 @@ The local recovery command writes `indexes/recovery-report.json`, rebuilds index
 
 - Current version is exactly `execution-run.v2`.
 - Readers reject unsupported schema versions explicitly.
-- Persisted shape changes require synchronized updates to `src/execution-run-schema.js`, this document, and focused tests.
+- Persisted shape changes require synchronized updates to `src/execution-runs/schema/index.js`, this document, and focused tests.
 - Every schema change increments `schema_version`.
 - Migrations must be explicit, idempotent, and recorded as recovery/migration events.
 - No implementation may rely on undocumented fields.

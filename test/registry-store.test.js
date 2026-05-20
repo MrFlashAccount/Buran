@@ -4,9 +4,9 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { SCHEMA_VERSION } from "../src/constants.js";
-import { recoverRegistry } from "../src/recovery.js";
-import { createRunFromPacketReport, getRunPaths, readEventsFile, readRunSnapshot, rebuildIndexes, transitionRun } from "../src/registry-store.js";
+import { SCHEMA_VERSION } from "../src/execution-runs/constants.js";
+import { recoverRegistry } from "../src/execution-runs/recovery/index.js";
+import { createRunFromPacketReport, getRunPaths, readEventsFile, readRunSnapshot, rebuildIndexes, transitionRun } from "../src/integrations/storage/json-registry/store.js";
 
 /**
  * Persistence and recovery tests for the registry store. Helpers keep packet and
