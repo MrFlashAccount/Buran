@@ -327,6 +327,20 @@ function buildProjectionProblem(code, message, extra = {}) {
   return buildIssue(projectionProblemCode(code), sanitizeRunnerReportMessage(message), extra);
 }
 
+function projectionProblemFromError(error) {
+  const message = sanitizeRunnerReportMessage(error?.message || String(error));
+  const code = nonEmptyString(error?.code);
+  if (code === "projection_missing_base_branch") return buildProjectionProblem("missing_base_branch", message);
+  if (code === "projection_invalid_transport_status" || code === "projection_invalid_transport_result" || code === "projection_invalid_github_pr") {
+    return buildProjectionProblem("invalid_transport_result", message);
+  }
+  if (code.startsWith("projection_github_")) return buildProjectionProblem(code.slice("projection_".length), message);
+  if (/different hash/i.test(message)) {
+    return buildProjectionProblem("artifact_corrupt", `Recorded PR projection cannot be resumed because its local artifact is corrupt: ${message}`);
+  }
+  return buildProjectionProblem("record_failed", `PR projection handoff could not be recorded locally: ${message}`);
+}
+
 function dispatchResultArtifactSummary(snapshot, dispatchIntentId) {
   const currentEpoch = snapshot?.execution?.current_epoch;
   if (!Number.isSafeInteger(currentEpoch)) return null;
@@ -1286,14 +1300,7 @@ async function runPrReadyStage({ registryRoot, runId, current, previousState, st
       artifactSha256: resultRecorded.artifact_ref.sha256,
     }));
   } catch (error) {
-    const message = sanitizeRunnerReportMessage(error?.message || String(error));
-    const problem = error?.code === "projection_missing_base_branch"
-      ? buildProjectionProblem("missing_base_branch", message)
-      : error?.code === "projection_invalid_transport_status" || error?.code === "projection_invalid_transport_result" || error?.code === "projection_invalid_github_pr"
-      ? buildProjectionProblem("invalid_transport_result", message)
-      : /different hash/i.test(message)
-      ? buildProjectionProblem("artifact_corrupt", `Recorded PR projection cannot be resumed because its local artifact is corrupt: ${message}`)
-      : buildProjectionProblem("record_failed", `PR projection handoff could not be recorded locally: ${message}`);
+    const problem = projectionProblemFromError(error);
     projection = {
       ...(plannedProjection?.publicReport || {
         status: "blocked",

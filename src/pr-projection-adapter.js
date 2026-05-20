@@ -48,6 +48,7 @@ function projectionBaseKey(snapshot) {
     snapshot?.github?.repo || "",
     snapshot?.github?.issue_number ?? "",
     snapshot?.github?.intended_branch || "",
+    snapshot?.github?.base_branch || "",
   ].join(":");
 }
 
