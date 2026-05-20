@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
-import { formatBuranReport } from "../src/buran.js";
+import { formatBuranReport, runLocalMissionReport } from "../src/buran.js";
 import { runBuranCli } from "../src/cli.js";
 import { createGithubCliProjectPr, createGithubPrTransportAdapter } from "../src/github-pr-transport-adapter.js";
 import { acquireWorkspaceLease } from "../src/locks.js";
@@ -15,6 +15,8 @@ import { executeImplementationDispatch, validateImplementationDispatchResultRepo
 import { recoverRegistry } from "../src/recovery.js";
 import { runLocalMission } from "../src/runner.js";
 import { canonicalJson } from "../src/utils.js";
+import { evaluateReviewReadyPolicy } from "../src/workflow-policy.js";
+import { reviewReadyPolicySnapshot } from "./helpers/workflow-policy-fixture.js";
 import { createRunFromPacketReport, getRunPaths, readEventsFile, readRunSnapshot, recordArtifact, recordGateResult, transitionRun, writeRunSnapshot } from "../src/registry-store.js";
 
 /**
@@ -441,6 +443,116 @@ async function preparePrReadyRun(registryRoot, tempDir, {
   assert.equal(reviewResult.current_state, "pr_ready");
   return preparedRunId;
 }
+
+
+
+test("local runner refuses next-slice work when the prerequisite slice is not review-ready", async () => {
+  const tempDir = await makeTempDir();
+  const registryRoot = path.join(tempDir, "registry");
+  const nextRun = await createRunFromPacketReport(packetReport("run_policy_next_slice"), {
+    registryRoot,
+    clock: () => new Date("2026-05-16T13:52:00.000Z"),
+  });
+  const prerequisite = reviewReadyPolicySnapshot({ runId: "run_policy_previous_slice", state: "pr_ready" });
+
+  const result = await runLocalMission({
+    registryRoot,
+    runId: nextRun.run.run_id,
+    stackPrerequisite: {
+      snapshot: prerequisite,
+      currentSlice: "slice 5",
+      nextSlice: "slice 6",
+    },
+    clock: () => new Date("2026-05-16T13:53:00.000Z"),
+  });
+  const paths = getRunPaths(registryRoot, nextRun.run.run_id);
+  const snapshot = await readRunSnapshot(paths.runPath);
+
+  assert.equal(result.outcome, "blocked");
+  assert.equal(result.current_state, "queued");
+  assert.equal(result.blockers[0].code, "stack_prerequisite_not_review_ready");
+  assert.equal(result.workflow_policy.allowed_to_start_next_slice, false);
+  assert.ok(result.workflow_policy.gates.some((gate) => gate.name === "review_ready_terminal_state" && gate.status === "BLOCKED"));
+  assert.equal(snapshot.state, "queued");
+});
+
+test("local runner reports passing stack prerequisite policy before continuing", async () => {
+  const tempDir = await makeTempDir();
+  const registryRoot = path.join(tempDir, "registry");
+  const nextRun = await createRunFromPacketReport(packetReport("run_policy_pass_next_slice"), {
+    registryRoot,
+    clock: () => new Date("2026-05-16T13:52:00.000Z"),
+  });
+
+  const result = await runLocalMission({
+    registryRoot,
+    runId: nextRun.run.run_id,
+    stackPrerequisite: {
+      snapshot: reviewReadyPolicySnapshot({ runId: "run_policy_pass_previous_slice" }),
+      currentSlice: "slice 5",
+      nextSlice: "slice 6",
+    },
+    clock: () => new Date("2026-05-16T13:53:00.000Z"),
+  });
+
+  assert.equal(result.outcome, "blocked");
+  assert.equal(result.blockers[0].code, "lease_required");
+  assert.equal(result.workflow_policy.allowed_to_start_next_slice, true);
+});
+
+
+test("run local report wrapper forwards stack prerequisites and formats side-effect status", async () => {
+  const tempDir = await makeTempDir();
+  const registryRoot = path.join(tempDir, "registry");
+  const nextRun = await createRunFromPacketReport(packetReport("run_policy_report_next_slice"), {
+    registryRoot,
+    clock: () => new Date("2026-05-16T13:52:00.000Z"),
+  });
+
+  const result = await runLocalMissionReport({
+    registryRoot,
+    runId: nextRun.run.run_id,
+    stackPrerequisite: {
+      snapshot: reviewReadyPolicySnapshot({ runId: "run_policy_report_previous_slice", state: "pr_ready" }),
+      currentSlice: "slice 5",
+      nextSlice: "slice 6",
+    },
+    clock: () => new Date("2026-05-16T13:53:00.000Z"),
+  });
+
+  assert.equal(result.outcome, "blocked");
+  assert.equal(result.workflow_policy.allowed_to_start_next_slice, false);
+  assert.equal(result.blockers[0].code, "stack_prerequisite_not_review_ready");
+  assert.match(formatBuranReport({
+    ...result,
+    mode: "run_local",
+    external_side_effects: true,
+  }), /External side effects: yes/);
+});
+
+test("workflow policy remains blocked after recovery when durable gates are incomplete", async () => {
+  const tempDir = await makeTempDir();
+  const registryRoot = path.join(tempDir, "registry");
+  await createRunFromPacketReport(packetReport("run_policy_recovery_guard"), {
+    registryRoot,
+    clock: () => new Date("2026-05-16T13:52:00.000Z"),
+  });
+
+  const recovery = await recoverRegistry(registryRoot, {
+    clock: () => new Date("2026-05-16T13:53:00.000Z"),
+  });
+  assert.equal(recovery.summary.quarantined_runs, 0);
+  assert.equal(recovery.runs.length, 1);
+
+  const policy = evaluateReviewReadyPolicy(recovery.runs[0], {
+    currentSlice: "slice 5",
+    nextSlice: "slice 6",
+  });
+  assert.equal(policy.status, "blocked");
+  assert.equal(policy.allowed_to_start_next_slice, false);
+  assert.ok(policy.blockers.some((blocker) => blocker.gate === "implementation_handoff"));
+  assert.ok(policy.blockers.some((blocker) => blocker.gate === "pr_projection"));
+});
 
 test("local runner stages queued run into waiting_for_lock and reruns idempotently without a lease", async () => {
   const tempDir = await makeTempDir();
@@ -2678,6 +2790,16 @@ test("transport-backed PR projection reuses a sanitized recorded result without 
 });
 
 
+function passedProjectionWorkflowContext(executionEpoch = 1) {
+  return {
+    execution_epoch: executionEpoch,
+    intent_idempotency_key: `github.pr:test:intent:${executionEpoch}`,
+    result_idempotency_key: `github.pr:test:result:${executionEpoch}`,
+    verification_gate: { status: "PASS", current_epoch: executionEpoch, current_attempt: 1, artifact_refs: [{ path: "artifacts/verification/pass.json", sha256: "sha-verification" }] },
+    internal_review_gate: { status: "PASS", current_epoch: executionEpoch, current_attempt: 1, artifact_refs: [{ path: "artifacts/internal-review/pass.json", sha256: "sha-review" }] },
+  };
+}
+
 test("github cli PR transport is disabled by default and requires an allowlisted repo", async () => {
   const disabledProjectPr = createGithubCliProjectPr({
     allowedRepos: ["example-owner/example-repo"],
@@ -2799,6 +2921,7 @@ test("github cli PR transport builds a minimal noninteractive env by default", a
     head_branch: "feature/minimal-env",
     base_branch: "main",
     title: "Buran handoff",
+    ...passedProjectionWorkflowContext(),
   });
 
   assert.ok(calls.length >= 3);
@@ -2815,6 +2938,32 @@ test("github cli PR transport builds a minimal noninteractive env by default", a
     assert.equal(call.options.windowsHide, true);
     assert.equal(Object.hasOwn(call.options.env, "API_SECRET_SHOULD_NOT_LEAK"), false);
   }
+});
+
+
+test("github cli PR transport requires recorded master workflow context before gh writes", async () => {
+  const projectPr = createGithubCliProjectPr({
+    enabled: true,
+    allowedRepos: ["example-owner/example-repo"],
+    execFileImpl: async () => {
+      throw new Error("gh should not run without master workflow gate evidence");
+    },
+  });
+
+  await assert.rejects(
+    () => projectPr({ repo: "example-owner/example-repo", head_branch: "feature/one", base_branch: "main" }),
+    /local master workflow/i,
+  );
+  await assert.rejects(
+    () => projectPr({
+      repo: "example-owner/example-repo",
+      head_branch: "feature/one",
+      base_branch: "main",
+      ...passedProjectionWorkflowContext(2),
+      internal_review_gate: { status: "FAIL", current_epoch: 2, current_attempt: 1, artifact_refs: [] },
+    }),
+    /verification PASS and internal-review PASS/i,
+  );
 });
 
 
@@ -2841,6 +2990,7 @@ test("github cli PR transport creates draft stacked PRs with explicit base and h
     head_branch: "buran/slice-05-github-stacked-pr-transport",
     base_branch: "buran/slice-04-fix-rereview-loop",
     title: "Buran handoff",
+    ...passedProjectionWorkflowContext(),
   });
 
   assert.equal(result.status, "created");
@@ -2899,6 +3049,7 @@ test("github cli PR transport sanitizes caller-provided title and body before gh
     head_branch: "feature/custom-body",
     base_branch: "main",
     title: "Title github_pat_abcdefghijklmnopqrstuvwxyz123456",
+    ...passedProjectionWorkflowContext(),
   });
 
   const createCall = calls.find((call) => call.args[0] === "pr" && call.args[1] === "create");
@@ -2936,6 +3087,7 @@ test("github cli PR transport updates an existing stacked PR instead of creating
     head_branch: "feature/existing",
     base_branch: "buran/slice-04-fix-rereview-loop",
     title: "New",
+    ...passedProjectionWorkflowContext(),
   });
 
   assert.equal(result.status, "updated");
@@ -2969,6 +3121,7 @@ test("github cli PR transport rejects mismatched existing PR metadata before edi
       head_branch: "feature/existing",
       base_branch: "buran/slice-04-fix-rereview-loop",
       title: "New",
+      ...passedProjectionWorkflowContext(),
     }),
     /explicit stacked head\/base branches/i,
   );
@@ -3006,6 +3159,7 @@ test("github cli PR transport rejects malformed existing PR list payloads before
         head_branch: "feature/existing",
         base_branch: "buran/slice-04-fix-rereview-loop",
         title: "New",
+        ...passedProjectionWorkflowContext(),
       }),
       /valid existing PR number|array of open stacked PRs|multiple open PRs/i,
     );
@@ -3039,6 +3193,7 @@ test("github cli PR transport rejects remote PR responses with mismatched or inc
         head_branch: "buran/slice-05-github-stacked-pr-transport",
         base_branch: "buran/slice-04-fix-rereview-loop",
         title: "Buran handoff",
+        ...passedProjectionWorkflowContext(),
       }),
       /explicit stacked head\/base branches|open PR/i,
     );
@@ -3065,10 +3220,48 @@ test("github cli PR transport rejects incomplete view payloads instead of defaul
       head_branch: "feature/missing-draft",
       base_branch: "main",
       title: "Buran handoff",
+      ...passedProjectionWorkflowContext(),
     }),
     /isDraft as a boolean/i,
   );
 });
+
+
+test("transport-backed PR projection blocks live transport without artifact-backed workflow gates", async () => {
+  let transportCalls = 0;
+  const snapshot = {
+    run_id: "run_transport_missing_gate_artifacts",
+    task_id: "task-transport-missing-gate-artifacts",
+    state: "pr_ready",
+    execution: { current_epoch: 1 },
+    gates: {
+      verification: { status: "PASS", current_epoch: 1, current_attempt: 1, artifact_refs: [] },
+      internal_review: { status: "PASS", current_epoch: 1, current_attempt: 1, artifact_refs: [] },
+    },
+    github: {
+      repo: "example-owner/example-repo",
+      issue_number: 17,
+      intended_branch: "feature/missing-gate-artifacts",
+      base_branch: "main",
+    },
+    projections: {},
+  };
+  const prProjectionAdapter = createGithubPrTransportAdapter({
+    externalSideEffects: true,
+    projectPr() {
+      transportCalls += 1;
+      return { status: "created", number: 99, url: "https://github.com/example-owner/example-repo/pull/99", draft: true };
+    },
+  });
+  const plan = prProjectionAdapter.plan(snapshot, { clock: () => new Date("2026-05-19T00:00:00.000Z"), actor: "test" });
+
+  await assert.rejects(
+    () => prProjectionAdapter.execute(snapshot, plan),
+    /verification PASS and internal-review PASS/i,
+  );
+  assert.equal(transportCalls, 0);
+});
+
 
 test("transport-backed PR projection preserves contract-valid repo and branch values until durable sanitization", async () => {
   const snapshot = {

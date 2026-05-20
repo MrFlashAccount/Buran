@@ -131,6 +131,7 @@ function normalizeTransportProjectionResult(raw, plan, { githubHost = DEFAULT_GI
  * @param {string} [options.adapter=GITHUB_PR_TRANSPORT_ADAPTER] Adapter identifier recorded in durable artifacts.
  * @param {string} [options.mode=GITHUB_PR_TRANSPORT_MODE] Projection mode label recorded in durable artifacts.
  * @param {boolean} [options.externalSideEffects=true] Whether transport execution performs remote writes.
+ * @param {string} [options.githubHost=DEFAULT_GITHUB_HOST] GitHub host used to validate transport PR URLs.
  * @returns {{adapter: string, mode: string, externalSideEffects: boolean, plan(snapshot: object, options?: object): object, execute(snapshot: object, plan: object): Promise<object>}}
  * Adapter that preserves the local projection contract while delegating transport I/O.
  * @throws {Error} When `projectPr` is not a function.
@@ -159,7 +160,7 @@ export function createGithubPrTransportAdapter({
       });
     },
     async execute(snapshot, plan) {
-      const transportResult = await projectPr({
+      const transportContext = {
         run_id: snapshot?.run_id || "",
         task_id: snapshot?.task_id || "",
         repo: plan.repo,
@@ -173,7 +174,9 @@ export function createGithubPrTransportAdapter({
         verification_gate: plan.verificationGate,
         internal_review_gate: plan.internalReviewGate,
         existing_github_pr: snapshot?.github?.pr || null,
-      });
+      };
+      if (externalSideEffects) assertMasterWorkflowContext(transportContext);
+      const transportResult = await projectPr(transportContext);
       const normalized = normalizeTransportProjectionResult(transportResult, plan, { githubHost });
       return buildPrProjectionResult(snapshot, plan, {
         status: normalized.status,
@@ -191,6 +194,34 @@ function normalizeAllowedRepos(allowedRepos = []) {
 
 function githubTransportError(code, message) {
   return projectionContractError(code, message);
+}
+
+function artifactRefsPresent(refs) {
+  return Array.isArray(refs)
+    && refs.length > 0
+    && refs.every((ref) => nonEmptyString(ref?.path) && nonEmptyString(ref?.sha256));
+}
+
+function gatePassedForEpoch(gate, executionEpoch) {
+  return isRecord(gate)
+    && gate.status === "PASS"
+    && gate.current_epoch === executionEpoch
+    && Number.isSafeInteger(gate.current_attempt)
+    && gate.current_attempt >= 1
+    && artifactRefsPresent(gate.artifact_refs);
+}
+
+function assertMasterWorkflowContext(context) {
+  const executionEpoch = context.execution_epoch;
+  if (!Number.isSafeInteger(executionEpoch) || executionEpoch < 1) {
+    throw githubTransportError("projection_github_workflow_context_missing", "GitHub PR transport requires a current local execution epoch from the recorded local master workflow.");
+  }
+  if (!nonEmptyString(context.intent_idempotency_key) || !nonEmptyString(context.result_idempotency_key)) {
+    throw githubTransportError("projection_github_workflow_context_missing", "GitHub PR transport requires recorded projection idempotency keys before any remote write.");
+  }
+  if (!gatePassedForEpoch(context.verification_gate, executionEpoch) || !gatePassedForEpoch(context.internal_review_gate, executionEpoch)) {
+    throw githubTransportError("projection_github_workflow_gates_not_passed", "GitHub PR transport requires current-epoch verification PASS and internal-review PASS from the local master workflow.");
+  }
 }
 
 function safeBodyField(value, fallback = "<unknown>") {
@@ -391,6 +422,7 @@ export function createGithubCliProjectPr({
     if (!headBranch || !baseBranch) {
       throw githubTransportError("projection_github_stack_incomplete", "GitHub PR transport requires explicit stacked head and base branches.");
     }
+    assertMasterWorkflowContext(context);
 
     const rawTitle = nonEmptyString(context.title) || `Buran handoff for ${context.task_id || context.run_id || "run"}`;
     const title = safeBodyField(rawTitle, "Buran handoff for run");

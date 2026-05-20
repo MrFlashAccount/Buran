@@ -129,15 +129,31 @@ These scenarios summarize the behavior the current branch already proves through
 - When a `pr_ready` run tries to project remotely
 - Then Buran blocks in `pr_ready` without calling `gh`
 - Given transport is enabled for an allowlisted repo
-- When the exact head/base pair has no open PR
+- When recorded projection idempotency keys and current-epoch verification/internal-review `PASS` evidence are present
+- And the exact head/base pair has no open PR
 - Then Buran creates a draft PR for that stack pair
 - And when the pair already has an open PR, Buran updates it instead of creating a duplicate
+- But if the local master workflow context or current `PASS` gate evidence is missing, Buran blocks before calling `gh`
 
 ### Scenario: invalid projection results do not advance the run
 - Given an injected PR transport adapter that returns an invalid or corrupt result
 - When projection recording is attempted
 - Then Buran blocks in `pr_ready`
 - And reports a structured projection problem instead of pretending handoff succeeded
+
+## 6. Stack workflow enforcement
+
+### Scenario: next slice waits for review-ready evidence
+- Given a prerequisite slice run is not terminal in `ready_for_manual_review`
+- Or its completed implementation dispatch/fix result, verification PASS, independent review PASS, or PR projection evidence is missing
+- When a next stacked slice tries to start with that prerequisite
+- Then Buran blocks before mutating the next run
+- And the runner report lists every prerequisite gate as `PASS` or `BLOCKED`
+
+### Scenario: recovery cannot skip workflow gates
+- Given recovery rebuilds a valid but incomplete prerequisite run
+- When stack progression policy is evaluated after recovery
+- Then the next slice remains blocked until durable local evidence satisfies all review-ready gates
 
 ## 7. Recovery and ledger integrity
 
@@ -162,4 +178,4 @@ Primary coverage lives in:
 - `test/registry-store.test.js`
 - `test/runner.test.js`
 
-These scenarios are documentation of the tested slice, not a promise of unimplemented worker execution or autonomous GitHub automation.
+These scenarios are documentation of the tested slice, not a promise of unimplemented worker execution, default live GitHub writes, auto-merge, or Done automation.

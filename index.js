@@ -93,5 +93,6 @@ export { recoverRegistry } from "./src/recovery.js";
 export { createGithubCliPrProjectionAdapter, createGithubCliProjectPr, createGithubPrTransportAdapter } from "./src/github-pr-transport-adapter.js";
 export { buildLocalPrProjection, buildRecordedPrProjection, buildPrProjectionPlan, buildPrProjectionResult, createLocalPrProjectionAdapter } from "./src/pr-projection-adapter.js";
 export { runLocalMission } from "./src/runner.js";
+export { assertNextSliceAllowed, evaluateReviewReadyPolicy } from "./src/workflow-policy.js";
 export { appendRunEvent, createBatchFromPacketReports, createRunFromPacketReport, getRegistryPaths, rebuildIndexes, transitionRun, writeJsonAtomic } from "./src/registry.js";
 export { assertTransitionAllowed, getAllowedTransitions, isTerminalState, validateTransition } from "./src/state-machine.js";

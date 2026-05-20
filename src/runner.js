@@ -26,6 +26,7 @@ import { acquireWorkspaceLease } from "./locks.js";
 import { sanitizePublicReportForOutput } from "./observability.js";
 import { buildRecordedPrProjection, createLocalPrProjectionAdapter } from "./pr-projection-adapter.js";
 import { executeVerificationGate } from "./verification-adapter.js";
+import { evaluateReviewReadyPolicy } from "./workflow-policy.js";
 import { getRunPaths, readRunSnapshot, recordArtifact, recordGateResult, recordProjectionIntent, recordProjectionResult, transitionRun } from "./registry-store.js";
 import { canonicalJson, isRecord, nonEmptyString, sha256Hex } from "./utils.js";
 import { inspectWorkspacePreparation } from "./workspace-preparation.js";
@@ -76,6 +77,7 @@ function buildRunnerReport({
   fixLoop = null,
   projection = null,
   externalSideEffects = false,
+  workflowPolicy = null,
 } = {}) {
   return {
     schema_version: SCHEMA_VERSION,
@@ -96,6 +98,7 @@ function buildRunnerReport({
     fix_loop: fixLoop,
     projection,
     external_side_effects: Boolean(externalSideEffects),
+    workflow_policy: workflowPolicy,
   };
 }
 
@@ -2053,7 +2056,7 @@ async function runFixLoopStage({ registryRoot, runId, current, previousState, st
  * @returns {Promise<object>} Sanitized public runner report describing completed work, blockers, and current state.
  * @throws {Error} When required identifiers are missing or an unexpected storage/adapter error occurs.
  */
-export async function runLocalMission({ registryRoot, runId, workspaceId = "", workspacePath = "", ttlMs = "", clock = () => new Date(), actor = RUNNER_ACTOR, implementationDispatchAdapter = createUnavailableImplementationDispatchAdapter(), prProjectionAdapter = createLocalPrProjectionAdapter() } = {}) {
+export async function runLocalMission({ registryRoot, runId, workspaceId = "", workspacePath = "", ttlMs = "", clock = () => new Date(), actor = RUNNER_ACTOR, implementationDispatchAdapter = createUnavailableImplementationDispatchAdapter(), prProjectionAdapter = createLocalPrProjectionAdapter(), stackPrerequisite = null } = {}) {
   if (!registryRoot) throw new Error("registryRoot is required for local mission runner");
   if (!runId) throw new Error("runId is required for local mission runner");
 
@@ -2084,9 +2087,49 @@ export async function runLocalMission({ registryRoot, runId, workspaceId = "", w
   let verification = null;
   let internalReview = null;
   let fixLoop = null;
+  let workflowPolicy = null;
+  const withWorkflowPolicy = (report) => (workflowPolicy ? { ...report, workflow_policy: workflowPolicy } : report);
+  if (stackPrerequisite) {
+    const prerequisiteSnapshot = stackPrerequisite.snapshot || stackPrerequisite;
+    workflowPolicy = evaluateReviewReadyPolicy(prerequisiteSnapshot, {
+      currentSlice: stackPrerequisite.currentSlice || "",
+      nextSlice: stackPrerequisite.nextSlice || "",
+    });
+    if (!workflowPolicy.allowed_to_start_next_slice) {
+      const problem = buildIssue(
+        "stack_prerequisite_not_review_ready",
+        `Next slice cannot start until prerequisite run ${workflowPolicy.prerequisite_run_id || "<unknown>"} is review-ready.`,
+        { workflow_policy: workflowPolicy },
+      );
+      blockers.push(problem);
+      stepsTaken.push(buildStep({
+        action: "stack_progression_guard",
+        status: "blocked",
+        fromState: current.state,
+        toState: current.state,
+        detail: problem.message,
+      }));
+      return buildRunnerReport({
+        registryRoot,
+        runId,
+        previousState,
+        currentState: current.state,
+        outcome: "blocked",
+        stepsTaken,
+        blockers,
+        warnings,
+        workspacePreparation,
+        implementationDispatch,
+        verification,
+        internalReview,
+        fixLoop,
+        workflowPolicy,
+      });
+    }
+  }
 
   if (TERMINAL_STATES.has(current.state)) {
-    return buildRunnerReport({
+    return withWorkflowPolicy(buildRunnerReport({
       registryRoot,
       runId,
       previousState,
@@ -2097,11 +2140,11 @@ export async function runLocalMission({ registryRoot, runId, workspaceId = "", w
       verification,
       internalReview,
       blockers: [buildIssue("terminal_state", `Run ${runId} is already terminal in state ${current.state}.`)],
-    });
+    }));
   }
 
   if (current.state === "packet_received") {
-    return buildRunnerReport({
+    return withWorkflowPolicy(buildRunnerReport({
       registryRoot,
       runId,
       previousState,
@@ -2112,7 +2155,7 @@ export async function runLocalMission({ registryRoot, runId, workspaceId = "", w
       verification,
       internalReview,
       blockers: [buildIssue("run_not_intaken", `Run ${runId} is still in packet_received and is not ready for local runner staging.`)],
-    });
+    }));
   }
 
   if (current.state === "queued") {
@@ -2136,7 +2179,7 @@ export async function runLocalMission({ registryRoot, runId, workspaceId = "", w
   if (current.state === "waiting_for_lock") {
     if (!nonEmptyString(workspaceId)) {
       blockers.push(buildIssue("lease_required", leaseRequiredMessage(runId)));
-      return buildRunnerReport({
+      return withWorkflowPolicy(buildRunnerReport({
         registryRoot,
         runId,
         previousState,
@@ -2149,7 +2192,7 @@ export async function runLocalMission({ registryRoot, runId, workspaceId = "", w
         implementationDispatch,
         verification,
         internalReview,
-      });
+      }));
     }
 
     const acquired = await acquireWorkspaceLease(registryRoot, runId, {
@@ -2185,7 +2228,7 @@ export async function runLocalMission({ registryRoot, runId, workspaceId = "", w
       blockers.push(buildIssue("blocked_lock_conflict", "Local lease acquisition detected an unsafe overlap.", {
         conflicts: acquired.conflicts || [],
       }));
-      return buildRunnerReport({
+      return withWorkflowPolicy(buildRunnerReport({
         registryRoot,
         runId,
         previousState,
@@ -2198,7 +2241,7 @@ export async function runLocalMission({ registryRoot, runId, workspaceId = "", w
         implementationDispatch,
         verification,
         internalReview,
-      });
+      }));
     }
   }
 
@@ -2208,18 +2251,18 @@ export async function runLocalMission({ registryRoot, runId, workspaceId = "", w
       reportState: { stepsTaken, blockers, warnings, workspacePreparation, implementationDispatch },
       services: { clock, actor, implementationDispatchAdapter },
     });
-    return buildRunnerReport({
+    return withWorkflowPolicy(buildRunnerReport({
       registryRoot,
       runId,
       previousState,
       ...stageResult.reportInput,
       verification,
       internalReview,
-    });
+    }));
   }
 
   if (current.state === "verification") {
-    return runVerificationStage({
+    return withWorkflowPolicy(await runVerificationStage({
       registryRoot,
       runId,
       current,
@@ -2232,11 +2275,11 @@ export async function runLocalMission({ registryRoot, runId, workspaceId = "", w
       clock,
       actor,
       paths,
-    });
+    }));
   }
 
   if (current.state === "internal_review") {
-    return runInternalReviewStage({
+    return withWorkflowPolicy(await runInternalReviewStage({
       registryRoot,
       runId,
       current,
@@ -2250,11 +2293,11 @@ export async function runLocalMission({ registryRoot, runId, workspaceId = "", w
       clock,
       actor,
       paths,
-    });
+    }));
   }
 
   if (current.state === "pr_ready") {
-    return runPrReadyStage({
+    return withWorkflowPolicy(await runPrReadyStage({
       registryRoot,
       runId,
       current,
@@ -2269,11 +2312,11 @@ export async function runLocalMission({ registryRoot, runId, workspaceId = "", w
       clock,
       actor,
       prProjectionAdapter,
-    });
+    }));
   }
 
   if (current.state === "fix_loop") {
-    return runFixLoopStage({
+    return withWorkflowPolicy(await runFixLoopStage({
       registryRoot,
       runId,
       current,
@@ -2288,11 +2331,11 @@ export async function runLocalMission({ registryRoot, runId, workspaceId = "", w
       clock,
       actor,
       implementationDispatchAdapter,
-    });
+    }));
   }
 
   blockers.push(buildIssue("unsupported_state", `Run ${runId} is in unsupported state ${current.state}.`));
-  return buildRunnerReport({
+  return withWorkflowPolicy(buildRunnerReport({
     registryRoot,
     runId,
     previousState,
@@ -2305,5 +2348,5 @@ export async function runLocalMission({ registryRoot, runId, workspaceId = "", w
     implementationDispatch,
     verification,
     internalReview,
-  });
+  }));
 }
