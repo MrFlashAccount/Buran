@@ -22,6 +22,7 @@ This file is the quick source-tree guide for maintainers. It maps the context-fi
 | `src/execution-runs/registry/index.js` | compatibility export surface around registry operations. |
 | `src/execution-runs/recovery/` | replay, validation, quarantine, stale-lease reclamation, index rebuild flow, and recovery report formatting. |
 | `src/workspace-leases/contract.js` | provider-neutral lease request/status/path semantics. |
+| `src/gates/implementation-contract.js` | provider-neutral implementation-dispatch and fix-attempt intent/result artifact contract and evidence validation. |
 | `src/gates/verification-adapter.js` | allowlisted verification command execution and verification report generation. |
 | `src/gates/internal-review-adapter.js` | local internal-review report generation that treats packet review text as context only. |
 | `src/stack-workflow/review-ready-policy.js` | review-ready stack progression policy. |
@@ -48,7 +49,7 @@ This file is the quick source-tree guide for maintainers. It maps the context-fi
 | `src/integrations/storage/json-registry/` | JSON registry store, path layout, event journal, and atomic file writes. |
 | `src/integrations/worktree/filesystem/locks.js` | filesystem-backed workspace lease acquisition/release and conflict detection. |
 | `src/integrations/worktree/filesystem/workspace-preparation.js` | local git workspace inspection and immutable preparation artifact content. |
-| `src/integrations/implementation/codex/dispatch-adapter.js` | implementation-dispatch and fix-attempt intent/result artifact contract. |
+| `src/integrations/implementation/codex/CONTEXT.md` | reserved Codex/runtime integration note; no concrete Codex adapter is implemented in this slice. |
 | `src/integrations/scm/github/pr-transport-adapter.js` | optional GitHub CLI stacked-PR transport adapter. |
 
 ## Test map
