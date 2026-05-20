@@ -66,6 +66,19 @@ These scenarios summarize the behavior the current branch already proves through
 - Then those strings are treated as context only
 - And Buran records `BLOCKED` manual-review-required evidence instead of trusting packet text
 
+### Scenario: independent verdict artifact can complete internal review
+- Given a run in `internal_review` with an approved packet that sets `review.verdict_artifact_path`
+- And that path points under the run's `artifacts/` directory to a valid `internal-review-verdict.v1` JSON artifact
+- When internal review runs
+- Then Buran records an `internal-review-report.v1` artifact that includes the sanitized reviewer result and verdict artifact reference
+- And routes `PASS` verdicts to `pr_ready`, `FAIL` verdicts to `fix_loop`, and `BLOCKED` verdicts to `blocked_needs_human`
+
+### Scenario: missing or invalid independent verdict evidence stays blocked
+- Given a run in `internal_review` whose packet omits `review.verdict_artifact_path`, points outside `artifacts/`, or references a missing/invalid verdict artifact
+- When internal review runs
+- Then Buran records a `BLOCKED` internal-review result with a structured problem
+- And packet prose or reviewer-plan text is not treated as approval evidence
+
 ### Scenario: recorded internal-review result can resume safely
 - Given a current-epoch internal-review gate result with intact immutable artifacts
 - When the run is retried from `internal_review`
