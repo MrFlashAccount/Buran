@@ -15,7 +15,8 @@ import { executeImplementationDispatch, validateImplementationDispatchResultRepo
 import { recoverRegistry } from "../src/recovery.js";
 import { runLocalMission } from "../src/runner.js";
 import { canonicalJson } from "../src/utils.js";
-import { assertNextSliceAllowed, evaluateReviewReadyPolicy } from "../src/workflow-policy.js";
+import { evaluateReviewReadyPolicy } from "../src/workflow-policy.js";
+import { reviewReadyPolicySnapshot } from "./helpers/workflow-policy-fixture.js";
 import { createRunFromPacketReport, getRunPaths, readEventsFile, readRunSnapshot, recordArtifact, recordGateResult, transitionRun, writeRunSnapshot } from "../src/registry-store.js";
 
 /**
@@ -444,157 +445,6 @@ async function preparePrReadyRun(registryRoot, tempDir, {
 }
 
 
-function reviewReadyPolicySnapshot({ runId = "run_policy_ready", state = "ready_for_manual_review" } = {}) {
-  const verificationRef = { path: "artifacts/verification/pass.json", sha256: "sha-verification" };
-  const reviewRef = { path: "artifacts/internal-review/pass.json", sha256: "sha-review" };
-  const projectionRef = { path: "artifacts/pr/projection-result.json", sha256: "sha-projection" };
-  return {
-    run_id: runId,
-    task_id: "policy-ready-task",
-    state,
-    execution: { current_epoch: 1 },
-    artifacts: {
-      packet: { path: "artifacts/packet.json", sha256: "sha-packet" },
-      recorded: {
-        by_path: {
-          "artifacts/implementation-dispatch/result.json": {
-            path: "artifacts/implementation-dispatch/result.json",
-            sha256: "sha-implementation",
-            bytes: 12,
-            gate_name: "implementation_dispatch",
-            execution_epoch: 0,
-            gate_attempt: 1,
-            recorded_from_state: "running",
-            recorded_at: "2026-05-16T13:54:00.000Z",
-            actor: "implementation-harness",
-            provenance: { kind: "implementation-dispatch-result", status: "COMPLETED" },
-          },
-          [verificationRef.path]: {
-            path: verificationRef.path,
-            sha256: verificationRef.sha256,
-            bytes: 12,
-            gate_name: "verification",
-            execution_epoch: 1,
-            gate_attempt: 1,
-            recorded_from_state: "verification",
-            recorded_at: "2026-05-16T13:55:00.000Z",
-            actor: "verification-adapter",
-            provenance: { kind: "verification-report" },
-          },
-          [reviewRef.path]: {
-            path: reviewRef.path,
-            sha256: reviewRef.sha256,
-            bytes: 12,
-            gate_name: "internal_review",
-            execution_epoch: 1,
-            gate_attempt: 1,
-            recorded_from_state: "internal_review",
-            recorded_at: "2026-05-16T13:56:00.000Z",
-            actor: "independent-reviewer",
-            provenance: { kind: "internal-review-verdict" },
-          },
-        },
-      },
-    },
-    gates: {
-      verification: {
-        status: "PASS",
-        current_epoch: 1,
-        current_attempt: 1,
-        recorded_from_state: "verification",
-        artifact_refs: [verificationRef],
-      },
-      internal_review: {
-        status: "PASS",
-        current_epoch: 1,
-        current_attempt: 1,
-        recorded_from_state: "internal_review",
-        artifact_refs: [reviewRef],
-      },
-    },
-    github: {
-      repo: "example-owner/example-repo",
-      issue_number: 42,
-      intended_branch: "buran/slice-current",
-      base_branch: "buran/slice-previous",
-      pr: {
-        number: 99,
-        url: "https://github.com/example-owner/example-repo/pull/99",
-        repo: "example-owner/example-repo",
-        issue_number: 42,
-        head_branch: "buran/slice-current",
-        base_branch: "buran/slice-previous",
-        state: "open",
-        draft: true,
-        title: "Buran handoff",
-        projection_mode: "github_transport",
-        projected_at: "2026-05-16T13:57:00.000Z",
-        actor: "github-pr-transport-adapter",
-      },
-    },
-    projections: {
-      github_pr: {
-        adapter: "github-pr-transport-adapter",
-        mode: "github_transport",
-        execution_epoch: 1,
-        last_result: {
-          status: "created",
-          execution_epoch: 1,
-          recorded_from_state: "pr_ready",
-          artifact_ref: projectionRef,
-          idempotency_key: "github.pr:policy:result",
-          github_pr: {
-            number: 99,
-            url: "https://github.com/example-owner/example-repo/pull/99",
-          },
-        },
-      },
-    },
-  };
-}
-
-test("workflow policy exposes review-ready gates and allows the next stacked slice only after PR readiness", () => {
-  const readyPolicy = evaluateReviewReadyPolicy(reviewReadyPolicySnapshot(), {
-    currentSlice: "slice 5",
-    nextSlice: "slice 6",
-  });
-
-  assert.equal(readyPolicy.status, "review_ready");
-  assert.equal(readyPolicy.allowed_to_start_next_slice, true);
-  assert.deepEqual(readyPolicy.gates.map((gate) => [gate.name, gate.status]), [
-    ["architect_contract", "PASS"],
-    ["implementation_handoff", "PASS"],
-    ["verification", "PASS"],
-    ["independent_review", "PASS"],
-    ["pr_projection", "PASS"],
-    ["review_ready_terminal_state", "PASS"],
-  ]);
-  assert.doesNotThrow(() => assertNextSliceAllowed(reviewReadyPolicySnapshot()));
-
-  const notReady = evaluateReviewReadyPolicy(reviewReadyPolicySnapshot({ state: "pr_ready" }), {
-    currentSlice: "slice 5",
-    nextSlice: "slice 6",
-  });
-  assert.equal(notReady.status, "blocked");
-  assert.equal(notReady.allowed_to_start_next_slice, false);
-  assert.ok(notReady.blockers.some((blocker) => blocker.gate === "review_ready_terminal_state"));
-  assert.throws(() => assertNextSliceAllowed(reviewReadyPolicySnapshot({ state: "pr_ready" })), /ready_for_manual_review/);
-
-  const intentOnly = structuredClone(reviewReadyPolicySnapshot());
-  intentOnly.artifacts.recorded.by_path["artifacts/implementation-dispatch/result.json"].provenance = {
-    kind: "implementation-dispatch-intent",
-    status: "COMPLETED",
-  };
-  const blockedIntentOnly = evaluateReviewReadyPolicy(intentOnly);
-  assert.equal(blockedIntentOnly.allowed_to_start_next_slice, false);
-  assert.ok(blockedIntentOnly.blockers.some((blocker) => blocker.gate === "implementation_handoff"));
-
-  const blockedDispatch = structuredClone(reviewReadyPolicySnapshot());
-  blockedDispatch.artifacts.recorded.by_path["artifacts/implementation-dispatch/result.json"].provenance.status = "BLOCKED";
-  const blockedImplementation = evaluateReviewReadyPolicy(blockedDispatch);
-  assert.equal(blockedImplementation.allowed_to_start_next_slice, false);
-  assert.ok(blockedImplementation.blockers.some((blocker) => blocker.gate === "implementation_handoff"));
-});
 
 test("local runner refuses next-slice work when the prerequisite slice is not review-ready", async () => {
   const tempDir = await makeTempDir();
@@ -624,6 +474,30 @@ test("local runner refuses next-slice work when the prerequisite slice is not re
   assert.equal(result.workflow_policy.allowed_to_start_next_slice, false);
   assert.ok(result.workflow_policy.gates.some((gate) => gate.name === "review_ready_terminal_state" && gate.status === "BLOCKED"));
   assert.equal(snapshot.state, "queued");
+});
+
+test("local runner reports passing stack prerequisite policy before continuing", async () => {
+  const tempDir = await makeTempDir();
+  const registryRoot = path.join(tempDir, "registry");
+  const nextRun = await createRunFromPacketReport(packetReport("run_policy_pass_next_slice"), {
+    registryRoot,
+    clock: () => new Date("2026-05-16T13:52:00.000Z"),
+  });
+
+  const result = await runLocalMission({
+    registryRoot,
+    runId: nextRun.run.run_id,
+    stackPrerequisite: {
+      snapshot: reviewReadyPolicySnapshot({ runId: "run_policy_pass_previous_slice" }),
+      currentSlice: "slice 5",
+      nextSlice: "slice 6",
+    },
+    clock: () => new Date("2026-05-16T13:53:00.000Z"),
+  });
+
+  assert.equal(result.outcome, "blocked");
+  assert.equal(result.blockers[0].code, "lease_required");
+  assert.equal(result.workflow_policy.allowed_to_start_next_slice, true);
 });
 
 

@@ -11,7 +11,12 @@
  * - no recovery mutation; recovery callers re-evaluate this policy from replayed snapshots.
  */
 import { GATE_STATUS } from "./constants.js";
-import { isSuccessfulProjectionResultStatus } from "./projection-contract.js";
+import {
+  appendGithubPrContractErrors,
+  appendGithubPrValidationErrors,
+  appendProjectedPrParityErrors,
+  isSuccessfulProjectionResultStatus,
+} from "./projection-contract.js";
 import { sanitizePublicReportForOutput } from "./observability.js";
 import { isRecord, nonEmptyString } from "./utils.js";
 
@@ -66,24 +71,115 @@ function freshGatePassed(snapshot, gateName) {
     && gateHead.artifact_refs.every(artifactRefOk);
 }
 
-function successfulProjection(snapshot) {
+function decodedPathParts(pathname) {
+  return pathname.split("/").filter(Boolean).map((part) => {
+    try {
+      return decodeURIComponent(part);
+    } catch {
+      return part;
+    }
+  });
+}
+
+function appendGithubPrUrlBindingErrors(githubPr, errors, fieldPath) {
+  const repo = nonEmptyString(githubPr?.repo);
+  const url = nonEmptyString(githubPr?.url);
+  const number = Number.isSafeInteger(githubPr?.number) && githubPr.number >= 1 ? githubPr.number : null;
+  if (!repo || !url || number === null) return;
+
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return;
+  }
+
+  const expectedNumber = String(number);
+  const parts = decodedPathParts(parsed.pathname);
+  if (parsed.protocol === "local:") {
+    const matches = parsed.hostname === "github-pr"
+      && !parsed.search
+      && !parsed.hash
+      && parts.length === 3
+      && parts[0] === repo
+      && parts[1] === "pull"
+      && parts[2] === expectedNumber;
+    if (!matches) errors.push(`${fieldPath}.url must bind to local github-pr repo and PR number`);
+    return;
+  }
+
+  const repoParts = repo.split("/").filter(Boolean);
+  const matches = parsed.protocol === "https:"
+    && parsed.host.toLowerCase() === "github.com"
+    && !parsed.search
+    && !parsed.hash
+    && repoParts.length === 2
+    && parts.length === 4
+    && parts[0] === repoParts[0]
+    && parts[1] === repoParts[1]
+    && parts[2] === "pull"
+    && parts[3] === expectedNumber;
+  if (!matches) errors.push(`${fieldPath}.url must bind to https://github.com repo and PR number`);
+}
+
+function appendProjectionGithubPrErrors(snapshot, githubPr, errors, fieldPath) {
+  appendGithubPrValidationErrors(githubPr, errors, fieldPath);
+  if (!isRecord(githubPr)) return;
+  appendGithubPrContractErrors(snapshot, githubPr, errors, fieldPath);
+  appendGithubPrUrlBindingErrors(githubPr, errors, fieldPath);
+}
+
+function projectionParityErrors(pr, resultPr) {
+  const errors = [];
+  if (!isRecord(resultPr)) {
+    errors.push("projections.github_pr.last_result.github_pr must be present.");
+    return errors;
+  }
+  appendProjectedPrParityErrors(pr, resultPr, errors);
+  return errors;
+}
+
+function projectionReadiness(snapshot) {
   const projection = snapshot?.projections?.github_pr;
   const result = projection?.last_result;
   const pr = snapshot?.github?.pr;
   const epoch = currentEpoch(snapshot);
-  return isRecord(projection)
-    && isRecord(result)
-    && result.execution_epoch === epoch
-    && result.recorded_from_state === "pr_ready"
-    && isSuccessfulProjectionResultStatus(result.status)
-    && artifactRefOk(result.artifact_ref)
-    && nonEmptyString(result.idempotency_key)
-    && isRecord(pr)
-    && Number.isSafeInteger(pr.number)
-    && pr.number > 0
-    && nonEmptyString(pr.url)
-    && nonEmptyString(pr.head_branch)
-    && nonEmptyString(pr.base_branch);
+  const errors = [];
+
+  if (!isRecord(projection)) errors.push("projections.github_pr must be present.");
+  if (isRecord(projection) && projection.execution_epoch !== epoch) errors.push("projections.github_pr.execution_epoch must match the current epoch.");
+  if (!isRecord(result)) errors.push("projections.github_pr.last_result must be present.");
+  if (isRecord(result) && result.execution_epoch !== epoch) errors.push("projections.github_pr.last_result.execution_epoch must match the current epoch.");
+  if (isRecord(result) && result.recorded_from_state !== "pr_ready") errors.push("projections.github_pr.last_result.recorded_from_state must be pr_ready.");
+  if (isRecord(result) && !isSuccessfulProjectionResultStatus(result.status)) errors.push("projections.github_pr.last_result.status must be successful.");
+  if (isRecord(result) && !artifactRefOk(result.artifact_ref)) errors.push("projections.github_pr.last_result.artifact_ref must be recorded.");
+  if (isRecord(result) && !nonEmptyString(result.idempotency_key)) errors.push("projections.github_pr.last_result.idempotency_key must be recorded.");
+  const intent = projection?.last_intent;
+  if (isRecord(intent)) {
+    if (intent.execution_epoch !== epoch) errors.push("projections.github_pr.last_intent.execution_epoch must match the current epoch.");
+    if (intent.recorded_from_state !== "pr_ready") errors.push("projections.github_pr.last_intent.recorded_from_state must be pr_ready.");
+    if (!artifactRefOk(intent.artifact_ref)) errors.push("projections.github_pr.last_intent.artifact_ref must be recorded.");
+    if (!nonEmptyString(intent.idempotency_key)) errors.push("projections.github_pr.last_intent.idempotency_key must be recorded.");
+    if (isRecord(result) && nonEmptyString(result.intent_idempotency_key) && result.intent_idempotency_key !== intent.idempotency_key) {
+      errors.push("projections.github_pr.last_result.intent_idempotency_key must match projections.github_pr.last_intent.idempotency_key.");
+    }
+  }
+
+  if (!isRecord(pr)) {
+    errors.push("github.pr must be present.");
+  } else {
+    appendProjectionGithubPrErrors(snapshot, pr, errors, "github.pr");
+  }
+
+  if (isRecord(result?.github_pr)) {
+    appendProjectionGithubPrErrors(snapshot, result.github_pr, errors, "projections.github_pr.last_result.github_pr");
+  }
+  if (isRecord(pr) && isRecord(result)) errors.push(...projectionParityErrors(pr, result.github_pr));
+  return { ready: errors.length === 0, errors };
+}
+
+function successfulProjection(snapshot) {
+  return projectionReadiness(snapshot).ready;
 }
 
 function gateBlocker(gateStatus) {
@@ -118,6 +214,7 @@ export function evaluateReviewReadyPolicy(snapshot, { currentSlice = "", nextSli
   );
   const verificationReady = freshGatePassed(snapshot, "verification");
   const reviewReady = freshGatePassed(snapshot, "internal_review");
+  const projectionReadinessResult = projectionReadiness(snapshot);
   const projectionReady = successfulProjection(snapshot);
   const terminalReady = snapshot?.state === "ready_for_manual_review";
 
@@ -144,9 +241,10 @@ export function evaluateReviewReadyPolicy(snapshot, { currentSlice = "", nextSli
       }),
     gate("pr_projection", projectionReady, projectionReady
       ? "PR projection result is recorded and mirrored into github.pr."
-      : "A successful current-epoch PR projection result is required before starting the next slice.", {
+      : "A successful current-epoch PR projection result that matches github.pr is required before starting the next slice.", {
         projection: snapshot?.projections?.github_pr || null,
         github_pr: snapshot?.github?.pr || null,
+        parity_errors: projectionReadinessResult.errors,
       }),
     gate("review_ready_terminal_state", terminalReady, terminalReady
       ? "Run is terminal in ready_for_manual_review."
