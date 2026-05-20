@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -10,6 +11,7 @@ import { formatBuranReport } from "../src/buran.js";
 import { runBuranCli } from "../src/cli.js";
 import { createGithubPrTransportAdapter } from "../src/github-pr-transport-adapter.js";
 import { acquireWorkspaceLease } from "../src/locks.js";
+import { validateImplementationDispatchResultReport } from "../src/implementation-dispatch.js";
 import { recoverRegistry } from "../src/recovery.js";
 import { runLocalMission } from "../src/runner.js";
 import { createRunFromPacketReport, getRunPaths, readEventsFile, readRunSnapshot, recordArtifact, recordGateResult, transitionRun, writeRunSnapshot } from "../src/registry-store.js";
@@ -28,6 +30,10 @@ async function makeTempDir() {
 
 async function readJson(filePath) {
   return JSON.parse(await fs.readFile(filePath, "utf8"));
+}
+
+function sha256Hex(content) {
+  return createHash("sha256").update(content).digest("hex");
 }
 
 /**
@@ -423,6 +429,65 @@ test("local runner can acquire a local lease and blocks when implementation harn
   assert.equal(recovery.summary.quarantined_runs, 1);
 });
 
+test("run CLI forwards configured implementation dispatch adapter and does not reuse unavailable BLOCKED results", async () => {
+  const tempDir = await makeTempDir();
+  const registryRoot = path.join(tempDir, "registry");
+  const intendedBranch = "user/run_runner_cli_dispatch_config";
+  const workspacePath = await createLocalGitWorkspace(tempDir, intendedBranch);
+  const created = await createRunFromPacketReport(packetReport("run_runner_cli_dispatch_config", { intendedBranch }), {
+    registryRoot,
+    clock: () => new Date("2026-05-16T13:52:00.000Z"),
+  });
+
+  const unavailable = await runBuranCli([
+    "run",
+    "--run", created.run.run_id,
+    "--workspace-id", "ws-runner-cli-dispatch-config",
+    "--workspace-path", workspacePath,
+    "--registry", registryRoot,
+    "--json",
+  ]);
+
+  assert.equal(unavailable.ok, true);
+  assert.equal(unavailable.report.current_state, "running");
+  assert.equal(unavailable.report.implementation_dispatch.status, "BLOCKED");
+  assert.equal(unavailable.report.implementation_dispatch.problem.code, "implementation_dispatch_unavailable");
+  const unavailableResultRef = unavailable.report.implementation_dispatch.result_artifact_ref;
+  let adapterCalls = 0;
+
+  const completed = await runBuranCli([
+    "run",
+    "--run", created.run.run_id,
+    "--registry", registryRoot,
+    "--json",
+  ], {
+    pluginConfig: {
+      implementationDispatchAdapter: {
+        adapter: "test-implementation-harness",
+        async execute({ intent }) {
+          adapterCalls += 1;
+          return {
+            status: "COMPLETED",
+            adapter: "test-implementation-harness",
+            actor: "test-implementation-harness",
+            evidence: {
+              implementation_result_id: `impl-${intent.dispatch_intent_id.slice(0, 8)}`,
+              files_changed: ["src/cli-dispatch-config.js"],
+              result_artifact_ref: { path: "artifacts/implementation/cli-result.json", sha256: "1".repeat(64) },
+            },
+          };
+        },
+      },
+    },
+  });
+
+  assert.equal(adapterCalls, 1);
+  assert.equal(completed.ok, true);
+  assert.equal(completed.report.current_state, "verification");
+  assert.equal(completed.report.implementation_dispatch.status, "COMPLETED");
+  assert.equal(completed.report.implementation_dispatch.resumed_recorded_result, false);
+  assert.notDeepEqual(completed.report.implementation_dispatch.result_artifact_ref, unavailableResultRef);
+});
 
 test("local runner blocks completed implementation dispatch results that omit immutable evidence", async () => {
   const scenarios = [
@@ -431,6 +496,9 @@ test("local runner blocks completed implementation dispatch results that omit im
     ["non-object", "worker stdout blob", {}],
     ["weak-arbitrary-object", { looks_plausible: true }, {}],
     ["weak-result-id-only", { implementation_result_id: "impl-weak" }, { implementation_result_id: "impl-weak" }],
+    ["weak-result-id-with-files", { implementation_result_id: "impl-weak", files_changed: ["src/example.js"] }, { implementation_result_id: "impl-weak", files_changed: ["src/example.js"] }],
+    ["weak-path-artifact-ref-with-files", { artifact_ref: { path: "artifacts/implementation/result.json" }, files_changed: ["src/example.js"] }, { artifact_ref: { path: "artifacts/implementation/result.json" }, files_changed: ["src/example.js"] }],
+    ["weak-path-artifact-ref-list-with-files", { artifact_refs: [{ path: "artifacts/implementation/result.json" }], files_changed: ["src/example.js"] }, { artifact_refs: [{ path: "artifacts/implementation/result.json" }], files_changed: ["src/example.js"] }],
     ["weak-files-only", { files_changed: ["src/example.js"] }, { files_changed: ["src/example.js"] }],
   ];
 
@@ -561,15 +629,26 @@ test("local runner advances to verification only after sanitized immutable imple
           actor: "test-implementation-harness",
           summary: "Implementation worker completed within the approved packet scope.",
           evidence: {
-            implementation_result_id: `impl-${intent.dispatch_intent_id.slice(0, 8)}`,
-            files_changed: ["src/example.js"],
-            commit_sha: "abc123def456",
-            worker_session_id: "worker-session-42",
             prompt: "Do not retain this worker prompt.",
             stdout: "line\n".repeat(200),
             stderr: "Do not retain this stderr blob.",
             output: { raw: "Do not retain this output blob." },
             transcript: "Do not retain this transcript blob.",
+            raw: "Do not retain this raw blob.",
+            content: "Do not retain this content blob.",
+            body: "Do not retain this body blob.",
+            markdown: "Do not retain this markdown blob.",
+            log: "Do not retain this log blob.",
+            logs: "Do not retain this logs blob.",
+            session: "Do not retain this session blob.",
+            raw_output: "Do not retain this raw output blob.",
+            implementation_result_id: `impl-${intent.dispatch_intent_id.slice(0, 8)}`,
+            files_changed: ["src/example.js"],
+            result_artifact_ref: {
+              path: "artifacts/implementation/result.json",
+              sha256: "0".repeat(64),
+            },
+            worker_session_id: "worker-session-42",
           },
         };
       },
@@ -584,7 +663,10 @@ test("local runner advances to verification only after sanitized immutable imple
   assert.deepEqual(result.implementation_dispatch.evidence, {
     implementation_result_id: result.implementation_dispatch.evidence.implementation_result_id,
     files_changed: ["src/example.js"],
-    commit_sha: "abc123def456",
+    result_artifact_ref: {
+      path: "artifacts/implementation/result.json",
+      sha256: "0".repeat(64),
+    },
   });
   assert.equal(result.implementation_dispatch.result_record_status, "recorded");
   assert.match(result.implementation_dispatch.result_artifact_ref.path, /^artifacts\/implementation-dispatch\/result-[a-f0-9]{16}\.json$/);
@@ -612,6 +694,112 @@ test("local runner advances to verification only after sanitized immutable imple
   assert.equal("stderr" in dispatchResultArtifact.evidence, false);
   assert.equal("output" in dispatchResultArtifact.evidence, false);
   assert.equal("transcript" in dispatchResultArtifact.evidence, false);
+  assert.equal("raw" in dispatchResultArtifact.evidence, false);
+  assert.equal("content" in dispatchResultArtifact.evidence, false);
+  assert.equal("body" in dispatchResultArtifact.evidence, false);
+  assert.equal("markdown" in dispatchResultArtifact.evidence, false);
+  assert.equal("log" in dispatchResultArtifact.evidence, false);
+  assert.equal("logs" in dispatchResultArtifact.evidence, false);
+  assert.equal("session" in dispatchResultArtifact.evidence, false);
+  assert.equal("raw_output" in dispatchResultArtifact.evidence, false);
+});
+
+test("local runner preserves recorded dispatch provenance when adapters mutate their input objects", async () => {
+  const tempDir = await makeTempDir();
+  const registryRoot = path.join(tempDir, "registry");
+  const intendedBranch = "user/run_runner_dispatch_mutates_input";
+  const workspacePath = await createLocalGitWorkspace(tempDir, intendedBranch);
+  const created = await createRunFromPacketReport(packetReport("run_runner_dispatch_mutates_input", { intendedBranch }), {
+    registryRoot,
+    clock: () => new Date("2026-05-16T13:52:00.000Z"),
+  });
+
+  const result = await runLocalMission({
+    registryRoot,
+    runId: created.run.run_id,
+    workspaceId: "ws-runner-dispatch-mutates-input",
+    workspacePath,
+    clock: () => new Date("2026-05-16T13:53:00.000Z"),
+    implementationDispatchAdapter: {
+      adapter: "test-implementation-harness",
+      async execute({ snapshot, intent }) {
+        const originalDispatchIntentId = intent.dispatch_intent_id;
+        snapshot.run_id = "mutated-run-id";
+        intent.dispatch_intent_id = "mutated-dispatch-intent-id";
+        intent.packet_artifact.sha256 = "mutated-packet-hash";
+        return {
+          status: "COMPLETED",
+          adapter: "test-implementation-harness",
+          actor: "test-implementation-harness",
+          evidence: {
+            implementation_result_id: `impl-${originalDispatchIntentId.slice(0, 8)}`,
+            files_changed: ["src/mutated-input.js"],
+            result_artifact_ref: { path: "artifacts/implementation/mutated-result.json", sha256: "2".repeat(64) },
+          },
+        };
+      },
+    },
+  });
+
+  assert.equal(result.outcome, "completed");
+  assert.equal(result.current_state, "verification");
+  const paths = getRunPaths(registryRoot, created.run.run_id);
+  const intentArtifact = JSON.parse(await fs.readFile(path.join(paths.runDir, result.implementation_dispatch.intent_artifact_ref.path), "utf8"));
+  const resultArtifact = JSON.parse(await fs.readFile(path.join(paths.runDir, result.implementation_dispatch.result_artifact_ref.path), "utf8"));
+  assert.equal(resultArtifact.run_id, created.run.run_id);
+  assert.equal(resultArtifact.dispatch_intent_id, intentArtifact.dispatch_intent_id);
+  assert.equal(resultArtifact.dispatch_intent_artifact.path, result.implementation_dispatch.intent_artifact_ref.path);
+  assert.equal(resultArtifact.dispatch_intent_artifact.sha256, result.implementation_dispatch.intent_artifact_ref.sha256);
+  assert.equal(resultArtifact.packet_artifact.sha256, intentArtifact.packet_artifact.sha256);
+  assert.notEqual(resultArtifact.dispatch_intent_id, "mutated-dispatch-intent-id");
+  assert.notEqual(resultArtifact.packet_artifact.sha256, "mutated-packet-hash");
+});
+
+test("local runner blocks completed dispatch results that explicitly report mismatched provenance", async () => {
+  const tempDir = await makeTempDir();
+  const registryRoot = path.join(tempDir, "registry");
+  const intendedBranch = "user/run_runner_dispatch_mismatched_provenance";
+  const workspacePath = await createLocalGitWorkspace(tempDir, intendedBranch);
+  const created = await createRunFromPacketReport(packetReport("run_runner_dispatch_mismatched_provenance", { intendedBranch }), {
+    registryRoot,
+    clock: () => new Date("2026-05-16T13:52:00.000Z"),
+  });
+
+  const result = await runLocalMission({
+    registryRoot,
+    runId: created.run.run_id,
+    workspaceId: "ws-runner-dispatch-mismatched-provenance",
+    workspacePath,
+    clock: () => new Date("2026-05-16T13:53:00.000Z"),
+    implementationDispatchAdapter: {
+      adapter: "test-implementation-harness",
+      async execute() {
+        return {
+          status: "COMPLETED",
+          adapter: "test-implementation-harness",
+          actor: "test-implementation-harness",
+          dispatch_intent_id: "explicitly-wrong-dispatch-intent-id",
+          evidence: {
+            implementation_result_id: "impl-mismatched-provenance",
+            files_changed: ["src/mismatch.js"],
+          },
+        };
+      },
+    },
+  });
+
+  assert.equal(result.outcome, "blocked");
+  assert.equal(result.current_state, "running");
+  assert.equal(result.implementation_dispatch.status, "BLOCKED");
+  assert.equal(result.implementation_dispatch.problem.code, "implementation_dispatch_provenance_mismatch");
+  assert.equal(result.blockers[0].code, "implementation_dispatch_blocked");
+  const paths = getRunPaths(registryRoot, created.run.run_id);
+  const snapshot = await readRunSnapshot(paths.runPath);
+  assert.equal(snapshot.state, "running");
+  const resultArtifact = JSON.parse(await fs.readFile(path.join(paths.runDir, result.implementation_dispatch.result_artifact_ref.path), "utf8"));
+  assert.equal(resultArtifact.status, "BLOCKED");
+  assert.equal(resultArtifact.problem.code, "implementation_dispatch_provenance_mismatch");
+  assert.notEqual(resultArtifact.dispatch_intent_id, "explicitly-wrong-dispatch-intent-id");
 });
 
 test("local runner reuses an existing dispatch result artifact without invoking the adapter again", async () => {
@@ -734,6 +922,82 @@ test("local runner blocks dispatch resume when the recorded result artifact is m
   assert.equal(second.implementation_dispatch.resumed_recorded_result, false);
   assert.equal(second.implementation_dispatch.result_record_status, "stale_recorded_result");
   assert.equal(second.implementation_dispatch.problem.code, "implementation_dispatch_result_artifact_missing");
+  assert.equal(eventsAfterSecond.length, eventsAfterFirst.length);
+});
+
+test("local runner blocks dispatch resume when result provenance artifacts are missing", async () => {
+  const tempDir = await makeTempDir();
+  const registryRoot = path.join(tempDir, "registry");
+  const intendedBranch = "user/run_runner_dispatch_resume_missing_provenance";
+  const workspacePath = await createLocalGitWorkspace(tempDir, intendedBranch);
+  const created = await createRunFromPacketReport(packetReport("run_runner_dispatch_resume_missing_provenance", { intendedBranch }), {
+    registryRoot,
+    clock: () => new Date("2026-05-16T13:52:00.000Z"),
+  });
+  let adapterCalls = 0;
+
+  const first = await runLocalMission({
+    registryRoot,
+    runId: created.run.run_id,
+    workspaceId: "ws-runner-dispatch-resume-missing-provenance",
+    workspacePath,
+    clock: () => new Date("2026-05-16T13:53:00.000Z"),
+    implementationDispatchAdapter: {
+      adapter: "test-implementation-harness",
+      async execute() {
+        adapterCalls += 1;
+        return {
+          status: "BLOCKED",
+          adapter: "test-implementation-harness",
+          actor: "test-implementation-harness",
+          problem: { code: "waiting_for_worker", message: "Worker has not finished yet." },
+        };
+      },
+    },
+  });
+
+  const paths = getRunPaths(registryRoot, created.run.run_id);
+  const resultPath = path.join(paths.runDir, first.implementation_dispatch.result_artifact_ref.path);
+  const resultArtifact = await readJson(resultPath);
+  const intentArtifact = await readJson(path.join(paths.runDir, first.implementation_dispatch.intent_artifact_ref.path));
+  delete resultArtifact.dispatch_intent_artifact;
+  delete resultArtifact.packet_artifact;
+  delete resultArtifact.workspace_preparation_artifact;
+
+  const validationProblem = validateImplementationDispatchResultReport(resultArtifact, intentArtifact);
+  assert.equal(validationProblem.code, "implementation_dispatch_provenance_mismatch");
+  assert.equal(validationProblem.field, "dispatch_intent_artifact");
+
+  const updatedResultContent = `${JSON.stringify(resultArtifact, null, 2)}\n`;
+  const updatedResultSha = sha256Hex(updatedResultContent);
+  await fs.writeFile(resultPath, updatedResultContent, "utf8");
+  const snapshot = await readRunSnapshot(paths.runPath);
+  const recordedSummary = snapshot.artifacts.recorded.by_path[first.implementation_dispatch.result_artifact_ref.path];
+  recordedSummary.sha256 = updatedResultSha;
+  recordedSummary.size_bytes = Buffer.byteLength(updatedResultContent);
+  await writeRunSnapshot(registryRoot, snapshot);
+
+  const eventsAfterFirst = await readEventsFile(paths.eventsPath);
+  const second = await runLocalMission({
+    registryRoot,
+    runId: created.run.run_id,
+    clock: () => new Date("2026-05-16T13:54:00.000Z"),
+    implementationDispatchAdapter: {
+      adapter: "test-implementation-harness",
+      async execute() {
+        adapterCalls += 1;
+        throw new Error("adapter must not be called when a recorded result has invalid provenance");
+      },
+    },
+  });
+  const eventsAfterSecond = await readEventsFile(paths.eventsPath);
+
+  assert.equal(adapterCalls, 1);
+  assert.equal(second.outcome, "blocked");
+  assert.equal(second.current_state, "running");
+  assert.equal(second.implementation_dispatch.resumed_recorded_result, false);
+  assert.equal(second.implementation_dispatch.result_record_status, "stale_recorded_result");
+  assert.equal(second.implementation_dispatch.problem.code, "implementation_dispatch_result_artifact_invalid");
   assert.equal(eventsAfterSecond.length, eventsAfterFirst.length);
 });
 
