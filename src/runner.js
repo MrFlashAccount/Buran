@@ -20,7 +20,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 
 import { SCHEMA_VERSION, TERMINAL_STATES } from "./constants.js";
-import { buildImplementationDispatchIntent, createUnavailableImplementationDispatchAdapter, executeImplementationDispatch, isUnavailableImplementationDispatchResult, sanitizeImplementationDispatchEvidence, validateImplementationDispatchResultReport } from "./implementation-dispatch.js";
+import { IMPLEMENTATION_DISPATCH_ADAPTER, buildImplementationDispatchIntent, createUnavailableImplementationDispatchAdapter, executeImplementationDispatch, implementationDispatchStatusSummary, isUnavailableImplementationDispatchResult, sanitizeImplementationDispatchEvidence, validateImplementationDispatchResultReport } from "./implementation-dispatch.js";
 import { executeInternalReviewGate } from "./internal-review-adapter.js";
 import { acquireWorkspaceLease } from "./locks.js";
 import { sanitizePublicReportForOutput } from "./observability.js";
@@ -105,11 +105,6 @@ function implementationBoundaryMessage() {
   return "Local mission runner recorded an implementation dispatch handoff but the implementation-harness adapter did not return completed implementation evidence.";
 }
 
-function implementationDispatchStatusSummary(status) {
-  if (status === "COMPLETED") return "Implementation harness dispatch completed and returned durable implementation evidence.";
-  if (status === "FAILED") return "Implementation harness dispatch failed inside the approved envelope.";
-  return "Implementation harness dispatch is blocked.";
-}
 
 function sanitizeImplementationDispatchProblem(status, problem) {
   if (status === "COMPLETED") return null;
@@ -265,11 +260,11 @@ async function readReusableImplementationDispatchResult(runDir, snapshot, intent
       workspace_preparation_artifact: artifactReport.workspace_preparation_artifact,
       evidence,
       problem: sanitizeImplementationDispatchProblem(artifactReport.status, artifactReport.problem),
-      adapter: nonEmptyString(artifactReport.adapter) || "implementation-harness-dispatch.v1",
-      actor: nonEmptyString(artifactReport.actor) || "implementation-harness-dispatch.v1",
+      adapter: nonEmptyString(artifactReport.adapter) || IMPLEMENTATION_DISPATCH_ADAPTER,
+      actor: nonEmptyString(artifactReport.actor) || IMPLEMENTATION_DISPATCH_ADAPTER,
     },
-    adapter: nonEmptyString(artifactReport.adapter) || "implementation-harness-dispatch.v1",
-    actor: nonEmptyString(artifactReport.actor) || "implementation-harness-dispatch.v1",
+    adapter: nonEmptyString(artifactReport.adapter) || IMPLEMENTATION_DISPATCH_ADAPTER,
+    actor: nonEmptyString(artifactReport.actor) || IMPLEMENTATION_DISPATCH_ADAPTER,
     status: artifactReport.status,
   };
 }
@@ -1240,7 +1235,7 @@ async function runImplementationDispatchStage({ runContext = {}, reportState = {
 
       warnings.push(...inspected.warnings);
       const dispatchStatus = implementationDispatch?.status;
-      const dispatchAdapter = dispatchResult?.adapter || implementationDispatch?.adapter || "implementation-harness-dispatch.v1";
+      const dispatchAdapter = dispatchResult?.adapter || implementationDispatch?.adapter || IMPLEMENTATION_DISPATCH_ADAPTER;
       if (dispatchStatus === "COMPLETED") {
         const transitioned = await transitionRun(registryRoot, runId, {
           toState: "verification",

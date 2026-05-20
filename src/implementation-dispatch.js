@@ -4,7 +4,7 @@ import { canonicalJson, isRecord, nonEmptyString, sha256Hex } from "./utils.js";
 const DISPATCH_STATUS = "dispatch_requested";
 const DISPATCH_SCHEMA_VERSION = "implementation-dispatch-intent.v1";
 const DISPATCH_RESULT_SCHEMA_VERSION = "implementation-dispatch-result.v1";
-const IMPLEMENTATION_DISPATCH_ADAPTER = "implementation-harness-dispatch.v1";
+export const IMPLEMENTATION_DISPATCH_ADAPTER = "implementation-harness-dispatch.v1";
 export const DEFAULT_UNAVAILABLE_ADAPTER = "implementation-harness-unavailable.v1";
 const DISPATCH_EVIDENCE_REQUIRED_CODE = "implementation_dispatch_evidence_required";
 const DISPATCH_EVIDENCE_REQUIRED_MESSAGE = "Implementation harness dispatch must return immutable implementation evidence before verification.";
@@ -135,7 +135,7 @@ function normalizeDispatchStatus(status) {
   return "BLOCKED";
 }
 
-function dispatchStatusSummary(status) {
+export function implementationDispatchStatusSummary(status) {
   if (status === "COMPLETED") return "Implementation harness dispatch completed and returned durable implementation evidence.";
   if (status === "FAILED") return "Implementation harness dispatch failed inside the approved envelope.";
   return "Implementation harness dispatch is blocked.";
@@ -269,7 +269,7 @@ function buildDispatchProblem(status, result, evidenceRequired) {
       : "implementation_dispatch_blocked";
   return buildProblem(
     sanitizeProblemCode(result?.problem?.code, fallbackCode),
-    evidenceRequired ? DISPATCH_EVIDENCE_REQUIRED_MESSAGE : dispatchStatusSummary(status),
+    evidenceRequired ? DISPATCH_EVIDENCE_REQUIRED_MESSAGE : implementationDispatchStatusSummary(status),
   );
 }
 
@@ -285,7 +285,7 @@ function normalizeResult(rawResult, snapshot) {
 
   return sanitizeValue({
     status,
-    summary: evidenceRequired ? DISPATCH_EVIDENCE_REQUIRED_MESSAGE : dispatchStatusSummary(status),
+    summary: evidenceRequired ? DISPATCH_EVIDENCE_REQUIRED_MESSAGE : implementationDispatchStatusSummary(status),
     implementation_epoch: Number.isSafeInteger(result.implementation_epoch) ? result.implementation_epoch : 1,
     evidence,
     problem,
