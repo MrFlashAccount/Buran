@@ -15,13 +15,13 @@ This file is the quick source-tree guide for maintainers. It maps the current co
 
 | Path | Responsibility |
 | --- | --- |
-| `src/constants.js` | schema version, state names, transition constants, and shared limits. |
+| `src/constants.js` | schema version, state names, transition constants, artifact-stage names, and shared limits. |
 | `src/state-machine.js` | allowed transition validation and terminal-state enforcement. |
 | `src/packet-sufficiency.js` | approved-packet normalization and PASS/FAIL sufficiency decisions. |
-| `src/runner.js` | local mission runner orchestration across `queued`, `waiting_for_lock`, `running`, `verification`, `internal_review`, and `pr_ready`. |
+| `src/runner.js` | local mission runner orchestration across `queued`, `waiting_for_lock`, `running`, `verification`, `internal_review`, bounded `fix_loop`, and `pr_ready`. |
 | `src/locks.js` | workspace lease acquisition, conflict detection, TTL handling, and lease release. |
 | `src/workspace-preparation.js` | local git workspace inspection and immutable preparation artifact content. |
-| `src/implementation-dispatch.js` | implementation-dispatch intent/result artifact builder, result sanitizer, and durable completion-evidence contract. |
+| `src/implementation-dispatch.js` | implementation-dispatch and fix-attempt intent/result artifact builder, result sanitizer, custom intent-artifact provenance support, and durable completion-evidence contract. |
 
 ## Registry and persistence
 
@@ -72,6 +72,10 @@ implementation_dispatch BLOCKED -> stay running with blocker
 implementation_dispatch FAILED -> failed_execution
 verification -> verification artifact + gate -> internal_review | fix_loop | blocked_needs_human
 internal_review -> internal-review artifact + gate -> pr_ready | fix_loop | blocked_needs_human
+fix_loop -> fix_attempt intent artifact -> implementation-harness adapter call or reusable result -> sanitized fix_attempt result artifact
+fix_attempt COMPLETED + durable evidence -> verification with fresh gate epoch
+fix_attempt BLOCKED/FAILED -> stay fix_loop with blocker
+bounded completed fix attempts exhausted -> blocked_needs_human
 pr_ready -> projection intent/result artifacts -> ready_for_manual_review
 recover -> replay + rebuild + quarantine when state is ambiguous
 ```
@@ -79,7 +83,6 @@ recover -> replay + rebuild + quarantine when state is ambiguous
 ## What is intentionally absent
 
 - no autonomous task discovery
-- no direct implementation worker execution inside the runner; worker execution is behind the injected implementation-dispatch adapter
-- no fix-loop worker implementation yet
+- no direct implementation or fix worker execution inside the runner; worker execution is behind the injected implementation-dispatch adapter
 - no default remote GitHub write path in the CLI/runtime slice
 - no dashboard or backlog management surface

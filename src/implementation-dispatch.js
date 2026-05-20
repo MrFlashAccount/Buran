@@ -160,21 +160,22 @@ function jsonEquivalent(left, right) {
   return canonicalJson(left ?? null) === canonicalJson(right ?? null);
 }
 
-export function buildImplementationDispatchIntentArtifactRef(intent) {
+export function buildImplementationDispatchIntentArtifactRef(intent, { intentArtifactPath = "" } = {}) {
   const dispatchIntentId = nonEmptyString(intent?.dispatch_intent_id);
+  const artifactPath = nonEmptyString(intentArtifactPath) || `artifacts/implementation-dispatch/intent-${dispatchIntentId.slice(0, 16)}.json`;
   return {
-    path: `artifacts/implementation-dispatch/intent-${dispatchIntentId.slice(0, 16)}.json`,
+    path: artifactPath,
     sha256: sha256Hex(`${JSON.stringify(intent, null, 2)}\n`),
   };
 }
 
-function captureImplementationDispatchProvenance(snapshot, intent) {
+function captureImplementationDispatchProvenance(snapshot, intent, { intentArtifactPath = "" } = {}) {
   const capturedIntent = cloneJson(intent);
   return deepFreeze({
     run_id: nonEmptyString(snapshot?.run_id),
     task_id: nonEmptyString(snapshot?.task_id),
     dispatch_intent_id: nonEmptyString(capturedIntent?.dispatch_intent_id),
-    dispatch_intent_artifact: buildImplementationDispatchIntentArtifactRef(capturedIntent),
+    dispatch_intent_artifact: buildImplementationDispatchIntentArtifactRef(capturedIntent, { intentArtifactPath }),
     packet_artifact: cloneJson(capturedIntent?.packet_artifact),
     workspace_preparation_artifact: cloneJson(capturedIntent?.workspace_preparation_artifact),
   });
@@ -221,9 +222,9 @@ function validateJsonArtifactField(result, captured, field, { requireCompletePro
   return null;
 }
 
-export function validateImplementationDispatchResultProvenance(result, intent, { requireCompleteProvenance = false } = {}) {
+export function validateImplementationDispatchResultProvenance(result, intent, { requireCompleteProvenance = false, intentArtifactPath = "" } = {}) {
   if (!isRecord(result)) return null;
-  const captured = captureImplementationDispatchProvenance({ run_id: intent?.run_id, task_id: intent?.task_id }, intent);
+  const captured = captureImplementationDispatchProvenance({ run_id: intent?.run_id, task_id: intent?.task_id }, intent, { intentArtifactPath });
   const stringProblem = validateRequiredStringField(result, captured, "run_id", { requireCompleteProvenance })
     || validateRequiredStringField(result, captured, "task_id", { requireCompleteProvenance })
     || validateRequiredStringField(result, captured, "dispatch_intent_id", { requireCompleteProvenance });
@@ -235,12 +236,12 @@ export function validateImplementationDispatchResultProvenance(result, intent, {
   return null;
 }
 
-export function validateImplementationDispatchResultReport(result, intent, { requireCompleteProvenance = true } = {}) {
+export function validateImplementationDispatchResultReport(result, intent, { requireCompleteProvenance = true, intentArtifactPath = "" } = {}) {
   if (!isRecord(result)) return resultShapeProblem("result");
   if (result.schema_version !== DISPATCH_RESULT_SCHEMA_VERSION) return resultShapeProblem("schema_version");
   const status = nonEmptyString(result.status).toUpperCase();
   if (!["COMPLETED", "BLOCKED", "FAILED"].includes(status)) return resultShapeProblem("status");
-  const provenanceProblem = validateImplementationDispatchResultProvenance(result, intent, { requireCompleteProvenance });
+  const provenanceProblem = validateImplementationDispatchResultProvenance(result, intent, { requireCompleteProvenance, intentArtifactPath });
   if (provenanceProblem) return provenanceProblem;
   if (status === "COMPLETED" && !hasMeaningfulImplementationDispatchCompletionEvidence(result.evidence)) {
     return buildProblem(DISPATCH_EVIDENCE_REQUIRED_CODE, DISPATCH_EVIDENCE_REQUIRED_MESSAGE, { field: "evidence" });
@@ -367,11 +368,8 @@ export async function executeImplementationDispatch({ snapshot, intent, adapter 
   if (!intent?.dispatch_intent_id) throw new Error("implementation dispatch intent is required");
   const dispatchArtifactDirectory = nonEmptyString(artifactDirectory) || "artifacts/implementation-dispatch";
   const dispatchIntentArtifactPath = nonEmptyString(intentArtifactPath) || `${dispatchArtifactDirectory}/intent-${intent.dispatch_intent_id.slice(0, 16)}.json`;
-  const capturedProvenance = captureImplementationDispatchProvenance(snapshot, intent);
-  const capturedDispatchIntentArtifact = {
-    ...capturedProvenance.dispatch_intent_artifact,
-    path: dispatchIntentArtifactPath,
-  };
+  const capturedProvenance = captureImplementationDispatchProvenance(snapshot, intent, { intentArtifactPath: dispatchIntentArtifactPath });
+  const capturedDispatchIntentArtifact = capturedProvenance.dispatch_intent_artifact;
   const adapterSnapshot = cloneJson(snapshot);
   const adapterIntent = cloneJson(intent);
   const adapterPacketArtifact = cloneJson(capturedProvenance.packet_artifact);
@@ -395,7 +393,7 @@ export async function executeImplementationDispatch({ snapshot, intent, adapter 
       });
       startedAt = nonEmptyString(rawResult?.started_at);
       finishedAt = nonEmptyString(rawResult?.finished_at);
-      const provenanceProblem = validateImplementationDispatchResultProvenance(rawResult, intent);
+      const provenanceProblem = validateImplementationDispatchResultProvenance(rawResult, intent, { intentArtifactPath: dispatchIntentArtifactPath });
       normalized = normalizeResult(provenanceProblem ? {
         ...rawResult,
         status: "BLOCKED",

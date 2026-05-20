@@ -195,6 +195,129 @@ function buildFixAttemptIntent(snapshot, { attempt, maxAttempts } = {}) {
   };
 }
 
+function fixAttemptResultArtifactSummary(snapshot) {
+  const currentEpoch = snapshot?.execution?.current_epoch;
+  if (!Number.isSafeInteger(currentEpoch)) return null;
+  return recordedFixAttemptArtifacts(snapshot)
+    .filter((summary) => summary?.recorded_from_state === "fix_loop"
+      && summary?.execution_epoch === currentEpoch
+      && summary?.provenance?.kind === "fix-attempt-result"
+      && Number.isSafeInteger(summary?.provenance?.fix_attempt)
+      && nonEmptyString(summary?.path)
+      && nonEmptyString(summary?.sha256))
+    .sort((left, right) => (right.provenance.fix_attempt - left.provenance.fix_attempt)
+      || nonEmptyString(right.recorded_at).localeCompare(nonEmptyString(left.recorded_at))
+      || nonEmptyString(right.path).localeCompare(nonEmptyString(left.path)))[0] || null;
+}
+
+function fixAttemptResultArtifactProblem(code, message, artifactRef = null) {
+  return buildIssue(`fix_attempt_result_${code}`, message, artifactRef ? { result_artifact_ref: artifactRef } : {});
+}
+
+async function readReusableFixAttemptResult(runDir, snapshot) {
+  const summary = fixAttemptResultArtifactSummary(snapshot);
+  if (!summary) return null;
+
+  const artifactRef = { path: summary.path, sha256: summary.sha256 };
+  const attempt = summary.provenance.fix_attempt;
+  const fixIntent = buildFixAttemptIntent(snapshot, {
+    attempt,
+    maxAttempts: MAX_FIX_ATTEMPTS,
+  });
+
+  let artifactContent;
+  try {
+    artifactContent = await fs.readFile(path.join(runDir, summary.path));
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return {
+        reusable: false,
+        artifact_ref: artifactRef,
+        problem: fixAttemptResultArtifactProblem(
+          "artifact_missing",
+          `Recorded fix-attempt result cannot be resumed because artifact ${summary.path} is missing.`,
+          artifactRef,
+        ),
+      };
+    }
+    throw error;
+  }
+
+  if (sha256Hex(artifactContent) !== summary.sha256) {
+    return {
+      reusable: false,
+      artifact_ref: artifactRef,
+      problem: fixAttemptResultArtifactProblem(
+        "artifact_corrupt",
+        `Recorded fix-attempt result cannot be resumed because artifact ${summary.path} no longer matches its recorded hash.`,
+        artifactRef,
+      ),
+    };
+  }
+
+  let artifactReport;
+  try {
+    artifactReport = JSON.parse(artifactContent.toString("utf8"));
+  } catch {
+    return {
+      reusable: false,
+      artifact_ref: artifactRef,
+      problem: fixAttemptResultArtifactProblem(
+        "artifact_invalid",
+        `Recorded fix-attempt result cannot be resumed because artifact ${summary.path} is not valid JSON.`,
+        artifactRef,
+      ),
+    };
+  }
+
+  const resultProblem = validateImplementationDispatchResultReport(artifactReport, fixIntent.intent, {
+    requireCompleteProvenance: false,
+    intentArtifactPath: fixIntent.artifactPath,
+  });
+  const missingIntentArtifact = !isRecord(artifactReport.dispatch_intent_artifact)
+    || !nonEmptyString(artifactReport.dispatch_intent_artifact.path)
+    || !nonEmptyString(artifactReport.dispatch_intent_artifact.sha256);
+  if (resultProblem || missingIntentArtifact) {
+    return {
+      reusable: false,
+      artifact_ref: artifactRef,
+      problem: fixAttemptResultArtifactProblem(
+        "artifact_invalid",
+        `Recorded fix-attempt result cannot be resumed because artifact ${summary.path} does not match the current fix-attempt intent.`,
+        artifactRef,
+      ),
+    };
+  }
+
+  const evidence = sanitizeImplementationDispatchEvidence(artifactReport.evidence);
+  const intentArtifactRef = isRecord(summary.provenance?.intent_artifact)
+    ? summary.provenance.intent_artifact
+    : artifactReport.dispatch_intent_artifact;
+  return {
+    reusable: true,
+    artifact_ref: artifactRef,
+    intent_artifact_ref: intentArtifactRef,
+    fix_attempt: attempt,
+    max_fix_attempts: MAX_FIX_ATTEMPTS,
+    public_report: {
+      status: artifactReport.status,
+      summary: implementationDispatchStatusSummary(artifactReport.status),
+      implementation_epoch: Number.isSafeInteger(artifactReport.implementation_epoch) ? artifactReport.implementation_epoch : 1,
+      dispatch_intent_id: artifactReport.dispatch_intent_id,
+      dispatch_intent_artifact: artifactReport.dispatch_intent_artifact,
+      packet_artifact: artifactReport.packet_artifact,
+      workspace_preparation_artifact: artifactReport.workspace_preparation_artifact,
+      evidence,
+      problem: sanitizeImplementationDispatchProblem(artifactReport.status, artifactReport.problem),
+      adapter: nonEmptyString(artifactReport.adapter) || IMPLEMENTATION_DISPATCH_ADAPTER,
+      actor: nonEmptyString(artifactReport.actor) || IMPLEMENTATION_DISPATCH_ADAPTER,
+    },
+    adapter: nonEmptyString(artifactReport.adapter) || IMPLEMENTATION_DISPATCH_ADAPTER,
+    actor: nonEmptyString(artifactReport.actor) || IMPLEMENTATION_DISPATCH_ADAPTER,
+    status: artifactReport.status,
+  };
+}
+
 function sanitizeRunnerReportMessage(message) {
   const sanitized = sanitizePublicReportForOutput(nonEmptyString(message), []);
   return nonEmptyString(sanitized) || "Sensitive error details were redacted from the local runner report.";
@@ -1555,6 +1678,127 @@ async function runImplementationDispatchStage({ runContext = {}, reportState = {
  * Executes one bounded implementation-harness fix attempt, then returns the run to verification.
  */
 async function runFixLoopStage({ registryRoot, runId, current, previousState, stepsTaken, blockers, warnings, workspacePreparation, implementationDispatch, verification, internalReview, clock, actor, implementationDispatchAdapter } = {}) {
+  const paths = getRunPaths(registryRoot, runId);
+  const reusableFixAttemptResult = await readReusableFixAttemptResult(paths.runDir, current);
+  if (reusableFixAttemptResult?.reusable === false) {
+    blockers.push(reusableFixAttemptResult.problem);
+    stepsTaken.push(buildStep({
+      action: "fix_attempt_resume",
+      status: "blocked",
+      fromState: "fix_loop",
+      toState: "fix_loop",
+      detail: reusableFixAttemptResult.problem.message,
+      artifactPath: reusableFixAttemptResult.artifact_ref?.path || "",
+      artifactSha256: reusableFixAttemptResult.artifact_ref?.sha256 || "",
+    }));
+    return buildRunnerReport({
+      registryRoot,
+      runId,
+      previousState,
+      currentState: current.state,
+      outcome: "blocked",
+      stepsTaken,
+      blockers,
+      warnings,
+      workspacePreparation,
+      implementationDispatch,
+      verification,
+      internalReview,
+    });
+  }
+
+  if (reusableFixAttemptResult?.reusable === true) {
+    implementationDispatch = {
+      ...reusableFixAttemptResult.public_report,
+      fix_attempt: reusableFixAttemptResult.fix_attempt,
+      max_fix_attempts: reusableFixAttemptResult.max_fix_attempts,
+      intent_artifact_ref: reusableFixAttemptResult.intent_artifact_ref,
+      result_artifact_ref: reusableFixAttemptResult.artifact_ref,
+      intent_record_status: "noop",
+      result_record_status: "noop",
+      resumed_recorded_result: true,
+    };
+    stepsTaken.push(buildStep({
+      action: "fix_attempt_resume",
+      status: reusableFixAttemptResult.status === "COMPLETED" ? "noop" : "blocked",
+      fromState: "fix_loop",
+      toState: "fix_loop",
+      detail: reusableFixAttemptResult.status === "COMPLETED"
+        ? `Existing recorded fix attempt ${reusableFixAttemptResult.fix_attempt}/${MAX_FIX_ATTEMPTS} result was reused.`
+        : implementationBoundaryMessage(),
+      artifactPath: reusableFixAttemptResult.artifact_ref.path,
+      artifactSha256: reusableFixAttemptResult.artifact_ref.sha256,
+    }));
+
+    if (reusableFixAttemptResult.status !== "COMPLETED") {
+      blockers.push(buildIssue("fix_attempt_blocked", implementationBoundaryMessage(), {
+        fix_attempt: reusableFixAttemptResult.fix_attempt,
+        max_fix_attempts: MAX_FIX_ATTEMPTS,
+        dispatch_status: reusableFixAttemptResult.status,
+        problem: implementationDispatch.problem || null,
+        intent_artifact_ref: reusableFixAttemptResult.intent_artifact_ref,
+        result_artifact_ref: reusableFixAttemptResult.artifact_ref,
+        resumed_recorded_result: true,
+      }));
+      return buildRunnerReport({
+        registryRoot,
+        runId,
+        previousState,
+        currentState: current.state,
+        outcome: "blocked",
+        stepsTaken,
+        blockers,
+        warnings,
+        workspacePreparation,
+        implementationDispatch,
+        verification,
+        internalReview,
+      });
+    }
+
+    const transitioned = await transitionRun(registryRoot, runId, {
+      toState: "verification",
+      actor,
+      evidence: {
+        reason: "fixes applied",
+        fix_loop: {
+          fix_attempt: reusableFixAttemptResult.fix_attempt,
+          max_fix_attempts: MAX_FIX_ATTEMPTS,
+          intent_artifact_ref: reusableFixAttemptResult.intent_artifact_ref,
+          result_artifact_ref: reusableFixAttemptResult.artifact_ref,
+          resumed_recorded_result: true,
+        },
+      },
+      clock,
+    });
+    current = transitioned.run;
+    stepsTaken.push(buildStep({
+      action: "transition",
+      status: "completed",
+      fromState: "fix_loop",
+      toState: current.state,
+      detail: "Resumed fix attempt advanced the run to a fresh verification epoch.",
+      sequence: transitioned.event.sequence,
+      artifactPath: reusableFixAttemptResult.artifact_ref.path,
+      artifactSha256: reusableFixAttemptResult.artifact_ref.sha256,
+    }));
+
+    return buildRunnerReport({
+      registryRoot,
+      runId,
+      previousState,
+      currentState: current.state,
+      outcome: "completed",
+      stepsTaken,
+      blockers,
+      warnings,
+      workspacePreparation,
+      implementationDispatch,
+      verification,
+      internalReview,
+    });
+  }
+
   const completedAttempts = fixAttemptCount(current);
   if (completedAttempts >= MAX_FIX_ATTEMPTS) {
     const problem = buildIssue("fix_attempts_exhausted", `Fix loop stopped after ${completedAttempts} completed attempt${completedAttempts === 1 ? "" : "s"}; maximum is ${MAX_FIX_ATTEMPTS}.`);

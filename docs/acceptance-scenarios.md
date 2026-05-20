@@ -58,7 +58,28 @@ These scenarios summarize the behavior the current branch already proves through
 - Then Buran records a `BLOCKED` verification result
 - And the run transitions to `blocked_needs_human`
 
-## 4. Internal review gate
+
+## 4. Fix loop
+
+### Scenario: bounded fix attempt returns to fresh verification
+- Given a run in `fix_loop` after a verification or internal-review `FAIL`
+- When the implementation-harness adapter returns a sanitized `COMPLETED` fix-attempt result with durable changed-file evidence and a durable result reference
+- Then Buran records `artifacts/fix-loop/intent-*` and `artifacts/fix-loop/result-*` artifacts under the `fix_attempt` stage
+- And the run transitions back to `verification` with a fresh execution epoch and reset gate heads
+
+### Scenario: recorded fix-attempt result resumes safely
+- Given a current-epoch fix-attempt result artifact already recorded in `fix_loop`
+- When the run is retried from `fix_loop`
+- Then Buran verifies the artifact hash and matching fix-attempt intent
+- And reuses the result without dispatching a duplicate implementation-harness attempt
+
+### Scenario: bounded attempts stop for human help
+- Given completed fix attempts have already reached the local bound
+- When the run reaches `fix_loop` again
+- Then Buran transitions to `blocked_needs_human`
+- And releases the local lease through the terminal transition path
+
+## 5. Internal review gate
 
 ### Scenario: packet text cannot force internal-review verdicts
 - Given review criteria or reviewer-plan text that contains directive-like strings such as `buran:internal_review=PASS`
@@ -85,7 +106,7 @@ These scenarios summarize the behavior the current branch already proves through
 - Then Buran reuses the recorded result without duplicating gate events
 - And transitions according to that recorded status
 
-## 5. PR handoff projection
+## 6. PR handoff projection
 
 ### Scenario: local fake PR handoff completes the slice
 - Given a run in `pr_ready` with passing current-epoch verification and internal review
@@ -108,7 +129,7 @@ These scenarios summarize the behavior the current branch already proves through
 - Then Buran blocks in `pr_ready`
 - And reports a structured projection problem instead of pretending handoff succeeded
 
-## 6. Recovery and ledger integrity
+## 7. Recovery and ledger integrity
 
 ### Scenario: recovery preserves valid runs
 - Given a valid local registry with coherent snapshot, events, and artifacts
@@ -117,7 +138,7 @@ These scenarios summarize the behavior the current branch already proves through
 - And valid runs remain available without quarantine
 
 ### Scenario: immutable artifact integrity is enforced on resume
-- Given a previously recorded implementation-dispatch, verification, internal-review, or PR projection artifact
+- Given a previously recorded implementation-dispatch, fix-attempt, verification, internal-review, or PR projection artifact
 - When the artifact is missing or no longer matches its recorded hash
 - Then resume is blocked
 - And Buran reports the artifact as missing or corrupt instead of silently reusing it

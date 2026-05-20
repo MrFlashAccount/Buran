@@ -24,8 +24,8 @@ stateDiagram-v2
   internal_review --> pr_ready: internal review PASS
   internal_review --> fix_loop: internal review FAIL
   internal_review --> blocked_needs_human: internal review BLOCKED
-  fix_loop --> verification: fixes applied
-  fix_loop --> blocked_needs_human: fix envelope exceeded
+  fix_loop --> verification: completed fix attempt
+  fix_loop --> blocked_needs_human: bounds exhausted or envelope exceeded
   pr_ready --> ready_for_manual_review: PR created/updated
   ready_for_manual_review --> [*]
   blocked_plan_insufficient --> [*]
@@ -64,7 +64,8 @@ Engine rules:
 | `internal_review` | `pr_ready` | Fresh verification `PASS` plus fresh internal-review `PASS` for the current epoch. A PASS internal-review result must be backed by intact independent `internal-review-verdict.v1` evidence referenced from the packet's `review.verdict_artifact_path`; packet text alone cannot satisfy this edge. |
 | `internal_review` | `fix_loop` | Fresh internal-review gate head for the current epoch is `FAIL`, backed by intact independent `internal-review-verdict.v1` evidence, and fixes remain inside approved scope. |
 | `internal_review` | `blocked_needs_human` | Fresh internal-review gate head for the current epoch is `BLOCKED`, either because the independent verdict artifact returned `BLOCKED` or because valid independent verdict evidence is missing/invalid, so human/manual intervention is still required. |
-| `fix_loop` | `blocked_needs_human` | Required fix exceeds the approved packet or needs new architecture/planning. |
+| `fix_loop` | `verification` | A sanitized `fix_attempt` result artifact for the current epoch reports `COMPLETED`, includes durable changed-file evidence plus a durable result reference, and remains inside the approved packet envelope. Entering `verification` starts a fresh gate epoch. |
+| `fix_loop` | `blocked_needs_human` | Required fix exceeds the approved packet, needs new architecture/planning, or the bounded completed fix-attempt count is exhausted. |
 | `pr_ready` | `ready_for_manual_review` | A coherent PR projection result is recorded in the local journal for the current epoch; the current local adapter may satisfy this with a fake/local handoff artifact instead of a remote write. |
 
 ## Gate rules
@@ -72,6 +73,9 @@ Engine rules:
 - PR creation is forbidden unless verification is `PASS` and internal review is `PASS` for the current epoch and current attempts.
 - Gate results are recorded through `gate.result_recorded`; same idempotency key plus same payload is a no-op, while same key plus different payload is invalid.
 - Verification/internal-review artifacts are recorded through `artifact.recorded` with immutable relative paths and epoch/attempt provenance.
+- Fix-loop attempts are recorded through the `fix_attempt` artifact stage while the run is in `fix_loop`: an intent artifact is recorded before implementation-harness dispatch, and a sanitized result artifact is recorded after dispatch or reused on resume.
+- A `COMPLETED` fix-attempt result moves `fix_loop -> verification`, increments `execution.current_epoch`, and resets verification/internal-review gate heads to `PENDING` for the fresh epoch.
+- Non-`COMPLETED` fix-attempt results keep the run in `fix_loop` with a structured blocker; once the bounded completed-attempt limit is reached, the next fix-loop pass transitions to `blocked_needs_human`.
 - Gate/artifact writes are rejected in terminal states, wrong phases, foreign epochs, or stale attempts.
 - Verification/review commands are allowed adapters/gates defined by the approved packet and Buran policy, not arbitrary script execution.
 - Internal review accepts an `internal-review-verdict.v1` artifact referenced by `review.verdict_artifact_path` as independent reviewer evidence. The path must be relative to the run directory, remain under `artifacts/`, and hash-match on resume. Valid verdict `PASS`, `FAIL`, and `BLOCKED` statuses drive the corresponding internal-review transition; missing, invalid, or legacy evidence blocks rather than self-approves from packet prose.
