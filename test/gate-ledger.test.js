@@ -4,11 +4,14 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { SCHEMA_VERSION } from "../src/execution-runs/constants.js";
-import { buildLocalPrProjection } from "../src/workflow-boundary/pr-scm-projection/local-journal-adapter.js";
-import { acquireWorkspaceLease } from "../src/integrations/worktree/filesystem/locks.js";
-import { recoverRegistry } from "../src/execution-runs/recovery/index.js";
+import { SCHEMA_VERSION } from "../src/core/modules/execution-runs/constants.js";
+import { buildLocalScmHandoffProjection } from "../src/core/modules/scm-handoff/services/local-journal-scm-handoff-adapter.js";
+import { acquireWorkspaceLease as acquireWorkspaceLeaseWithPorts } from "../src/integrations/worktree/filesystem/locks.js";
+import { recoverRegistry as recoverRegistryCore } from "../src/execution-runs/recovery/index.js";
 import { createJsonRegistryRepository } from "../src/integrations/storage/json-registry/repository.js";
+import { createJsonLeaseRecordStore } from "../src/integrations/storage/json-registry/lease-record-store.js";
+import { createJsonRegistryRecoveryStore } from "../src/integrations/storage/json-registry/recovery-store.js";
+import { createFilesystemWorkspaceLeaseService } from "../src/integrations/worktree/filesystem/locks.js";
 import {
   createRunFromPacketReport,
   getRunPaths,
@@ -27,6 +30,11 @@ import {
  */
 
 const registryRepository = createJsonRegistryRepository();
+const leaseRecordStore = createJsonLeaseRecordStore();
+const workspaceLeaseService = createFilesystemWorkspaceLeaseService({ registryRepository, leaseRecordStore });
+const registryRecoveryStore = createJsonRegistryRecoveryStore();
+const acquireWorkspaceLease = (registryRoot, runId, options = {}) => acquireWorkspaceLeaseWithPorts(registryRoot, runId, { ...options, registryRepository, leaseRecordStore });
+const recoverRegistry = (registryRoot, options = {}) => recoverRegistryCore(registryRoot, { ...options, registryRepository: options.registryRepository || registryRepository, workspaceLeaseService: options.workspaceLeaseService || workspaceLeaseService, registryRecoveryStore: options.registryRecoveryStore || registryRecoveryStore });
 
 /** Creates a throwaway registry root for ledger persistence tests. */
 async function makeTempDir() {
@@ -313,7 +321,7 @@ test("projection result recording rejects semantically invalid successful PR han
   const runId = await prepareHandoffReadyRun(registryRoot, { runId: "run_gate_projection_validation" });
   const paths = getRunPaths(registryRoot, runId);
   const snapshot = await readRunSnapshot(paths.runPath);
-  const projection = buildLocalPrProjection(snapshot, {
+  const projection = buildLocalScmHandoffProjection(snapshot, {
     clock: () => new Date("2026-05-16T14:01:00.000Z"),
   });
 
@@ -363,7 +371,7 @@ test("projection result recording rejects semantically invalid successful PR han
       intent_idempotency_key: projection.intentIdempotencyKey,
       status: "projected_local",
       handoff_target: {
-        ...projection.githubPr,
+        ...projection.handoffTarget,
         url: "",
       },
       artifactPath: projection.resultArtifactPath,

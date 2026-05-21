@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
-import { ARTIFACT_STAGE_STATE_BY_NAME, GATE_STATE_BY_NAME, GATE_STATUS, SCHEMA_VERSION, TERMINAL_STATES } from "../../../execution-runs/constants.js";
+import { ARTIFACT_STAGE_STATE_BY_NAME, GATE_STATE_BY_NAME, GATE_STATUS, SCHEMA_VERSION, TERMINAL_STATES } from "../../../core/modules/execution-runs/constants.js";
 import {
   buildBatchId,
   buildBatchSnapshot,
@@ -17,8 +17,8 @@ import { getRegistryPaths, getRunPaths } from "./path-layout.js";
 import { appendRunEvent, lastEventSequence, nextSequence, readArtifactRecordedEventsByPath, readEventsByIdempotency, readEventsFile } from "./event-journal.js";
 import { removeLeaseRecordsForRun } from "./lease-records.js";
 import { rebuildIndexes } from "./indexes-snapshots.js";
-import { isSuccessfulProjectionResultStatus, mergeProjectionSnapshot, sanitizeProjectionDurableValue } from "../../../workflow-boundary/pr-scm-projection/contract.js";
-import { applyTransitionToSnapshot, buildNonTransitionEvent, buildTransitionEvent } from "../../../execution-runs/state-machine.js";
+import { isSuccessfulProjectionResultStatus, mergeProjectionSnapshot, sanitizeProjectionDurableValue } from "../../../core/modules/scm-handoff/contract.js";
+import { applyTransitionToSnapshot, buildNonTransitionEvent, buildTransitionEvent } from "../../../core/modules/execution-runs/state-machine.js";
 import { canonicalJson, isRecord, nonEmptyString, sha256Hex } from "../../../shared/primitives.js";
 
 

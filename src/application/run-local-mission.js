@@ -1,12 +1,13 @@
 /**
  * Thin local mission application orchestrator. Stage-specific behavior lives in sibling modules.
  */
-import { TERMINAL_STATES } from "../execution-runs/constants.js";
+import { TERMINAL_STATES } from "../core/modules/execution-runs/constants.js";
 import { createUnavailableImplementationDispatchAdapter } from "../gates/implementation-contract.js";
-import { acquireWorkspaceLease } from "../integrations/worktree/filesystem/locks.js";
-import { createLocalPrProjectionAdapter } from "../workflow-boundary/pr-scm-projection/local-journal-adapter.js";
+import { assertWorkspaceLeaseService } from "../core/modules/workspace-leases/ports/workspace-lease-service.js";
+import { createLocalJournalScmHandoffAdapter } from "../core/modules/scm-handoff/services/local-journal-scm-handoff-adapter.js";
+import { assertScmHandoffPort } from "../core/modules/scm-handoff/ports/scm-handoff-port.js";
 import { evaluateReviewReadyPolicy } from "../stack-workflow/review-ready-policy.js";
-import { assertRegistryRepository } from "../execution-runs/registry/index.js";
+import { assertRegistryRepository } from "../core/modules/execution-runs/ports/registry-repository.js";
 import { nonEmptyString } from "../shared/primitives.js";
 
 import { RUNNER_ACTOR } from "./mission-context.js";
@@ -16,10 +17,12 @@ import { runVerificationStage, runInternalReviewStage } from "./gate-pipeline.js
 import { runPrReadyStage } from "./scm-handoff.js";
 import { runFixLoopStage } from "./fix-review-loop.js";
 
-export async function runLocalMission({ registryRoot, runId, workspaceId = "", workspacePath = "", ttlMs = "", clock = () => new Date(), actor = RUNNER_ACTOR, implementationDispatchAdapter = createUnavailableImplementationDispatchAdapter(), prProjectionAdapter = createLocalPrProjectionAdapter(), registryRepository, stackPrerequisite = null } = {}) {
+export async function runLocalMission({ registryRoot, runId, workspaceId = "", workspacePath = "", ttlMs = "", clock = () => new Date(), actor = RUNNER_ACTOR, implementationDispatchAdapter = createUnavailableImplementationDispatchAdapter(), scmHandoffAdapter, registryRepository, workspaceLeaseService, workspacePreparationInspector, stackPrerequisite = null } = {}) {
   if (!registryRoot) throw new Error("registryRoot is required for local mission runner");
   if (!runId) throw new Error("runId is required for local mission runner");
   const registry = assertRegistryRepository(registryRepository);
+  const leases = assertWorkspaceLeaseService(workspaceLeaseService);
+  const handoffAdapter = assertScmHandoffPort(scmHandoffAdapter || createLocalJournalScmHandoffAdapter());
 
   const stepsTaken = [];
   const blockers = [];
@@ -156,7 +159,7 @@ export async function runLocalMission({ registryRoot, runId, workspaceId = "", w
       }));
     }
 
-    const acquired = await acquireWorkspaceLease(registryRoot, runId, {
+    const acquired = await leases.acquire(registryRoot, runId, {
       workspaceId,
       workspacePath,
       ttlMs,
@@ -210,7 +213,7 @@ export async function runLocalMission({ registryRoot, runId, workspaceId = "", w
     const stageResult = await runImplementationDispatchStage({
       runContext: { registryRoot, runId, current, paths },
       reportState: { stepsTaken, blockers, warnings, workspacePreparation, implementationDispatch },
-      services: { clock, actor, implementationDispatchAdapter, registryRepository: registry },
+      services: { clock, actor, implementationDispatchAdapter, registryRepository: registry, workspacePreparationInspector },
     });
     return withWorkflowPolicy(buildRunnerReport({
       registryRoot,
@@ -274,7 +277,7 @@ export async function runLocalMission({ registryRoot, runId, workspaceId = "", w
       internalReview,
       clock,
       actor,
-      prProjectionAdapter,
+      scmHandoffAdapter: handoffAdapter,
       registryRepository: registry,
     }));
   }

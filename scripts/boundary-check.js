@@ -34,6 +34,14 @@ const oldTopLevelModules = new Set([
   "workspace-preparation.js",
 ]);
 const domainVocabulary = /\b(buran|packet|registry|run|runs|gate|github|projection|workflow|lease|state-machine|implementation-dispatch)\b/i;
+const oldExecutionRunAuthorityModules = new Set([
+  "src/execution-runs/constants.js",
+  "src/execution-runs/state-machine.js",
+]);
+const coreProviderVocabulary = /GitHub|Github|github-pr/;
+const coreProviderCompatibilityFiles = new Set([
+  "src/core/modules/scm-handoff/value-objects/github-pr-handoff-target.js",
+]);
 
 function shouldSkipDirectory(parentDir, entryName) {
   if (skippedDirNames.has(entryName)) return true;
@@ -119,20 +127,45 @@ for (const file of jsFiles) {
     if (resolved.startsWith("src/") && resolved.split("/").length === 2 && oldTopLevelModules.has(path.basename(resolved))) {
       failures.push(`${fileRel} imports old flat src module ${resolved}`);
     }
-    if (/^src\/(application|approved-packets|execution-runs|gates|stack-workflow|workflow-boundary|observability|workspace-leases|shared)\//.test(fileRel)) {
-      if (/^src\/integrations\/(scm\/github|implementation\/codex|runtime\/openclaw)\//.test(resolved)) {
-        failures.push(`${fileRel} imports concrete provider integration ${resolved}`);
-      }
-      if (/^src\/integrations\/storage\/json-registry\//.test(resolved)) {
-        failures.push(`${fileRel} imports concrete JSON registry storage ${resolved}`);
+    if (oldExecutionRunAuthorityModules.has(resolved) && fileRel !== resolved && /^src\//.test(fileRel)) {
+      failures.push(`${fileRel} imports deprecated execution-run authority module ${resolved}; use src/core/modules/execution-runs`);
+    }
+    if (/^src\/core\//.test(fileRel)) {
+      if (/^src\/(application|composition|entrypoints|integrations)\//.test(resolved)) {
+        failures.push(`${fileRel} imports outside core boundary ${resolved}`);
       }
     }
+    if (/^src\/(application|approved-packets|execution-runs|gates|stack-workflow|workflow-boundary|observability|workspace-leases|shared)\//.test(fileRel)) {
+      if (/^src\/integrations\//.test(resolved)) {
+        failures.push(`${fileRel} imports concrete integration ${resolved}`);
+      }
+    }
+    if (/^src\/integrations\//.test(fileRel)) {
+      if (/^src\/(application|entrypoints|composition)\//.test(resolved)) {
+        failures.push(`${fileRel} imports orchestration/application layer ${resolved}`);
+      }
+    }
+    if (/^src\/(core\/modules\/scm-handoff|workflow-boundary\/scm-handoff)\//.test(fileRel) && /^src\/integrations\/scm\/github\//.test(resolved)) {
+      failures.push(`${fileRel} imports GitHub integration from provider-neutral SCM handoff boundary ${resolved}`);
+    }
     if (/^src\/integrations\//.test(fileRel) && !/^src\/integrations\/storage\/json-registry\//.test(fileRel)) {
-      if (/^src\/integrations\/storage\/json-registry\/(?!store\.js|path-layout\.js|event-journal\.js|atomic-read-write\.js|fs-atomic\.js)/.test(resolved)) {
-        failures.push(`${fileRel} imports non-adapter registry storage internals ${resolved}`);
+      if (/^src\/integrations\/storage\/json-registry\/store\.js$/.test(resolved)) {
+        failures.push(`${fileRel} imports JSON registry store internals ${resolved}`);
+      }
+      if (/^src\/integrations\/storage\/json-registry\/(atomic-read-write|event-journal|fs-atomic|indexes-snapshots|lease-records|path-layout)\.js$/.test(resolved)) {
+        const combinedAdapter = /(^|\/)combined-|(^|\/)composition-|(^|\/)json-registry-worktree-/.test(fileRel);
+        if (!combinedAdapter) failures.push(`${fileRel} imports JSON registry storage internals ${resolved}`);
       }
     }
   }
+}
+
+const coreModuleFiles = await listFiles(path.join(root, "src", "core", "modules"), (file) => file.endsWith(".js") || file.endsWith(".md"));
+for (const file of coreModuleFiles) {
+  const fileRel = rel(file);
+  if (coreProviderCompatibilityFiles.has(fileRel)) continue;
+  const source = await fs.readFile(file, "utf8");
+  if (coreProviderVocabulary.test(source)) failures.push(`${fileRel} contains provider-specific GitHub vocabulary in canonical core`);
 }
 
 const sharedFiles = await listFiles(path.join(root, "src", "shared"), (file) => file.endsWith(".js"));

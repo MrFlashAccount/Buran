@@ -1,5 +1,5 @@
 /** Public-safe local runner report and transition formatting helpers. */
-import { SCHEMA_VERSION } from "../execution-runs/constants.js";
+import { SCHEMA_VERSION } from "../core/modules/execution-runs/constants.js";
 import { implementationDispatchStatusSummary } from "../gates/implementation-contract.js";
 import { nonEmptyString } from "../shared/primitives.js";
 import { RUNNER_MODE } from "./mission-context.js";

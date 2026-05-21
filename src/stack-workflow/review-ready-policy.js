@@ -10,12 +10,12 @@
  * - no GitHub writes, merges, or issue/project automation,
  * - no recovery mutation; recovery callers re-evaluate this policy from replayed snapshots.
  */
-import { GATE_STATUS } from "../execution-runs/constants.js";
+import { GATE_STATUS } from "../core/modules/execution-runs/constants.js";
 import {
-  appendGithubPrContractErrors,
-  appendGithubPrValidationErrors,
+  appendScmHandoffTargetContractErrors,
+  appendScmHandoffTargetValidationErrors,
   isSuccessfulProjectionResultStatus,
-} from "../workflow-boundary/pr-scm-projection/contract.js";
+} from "../core/modules/scm-handoff/contract.js";
 import { sanitizePublicReportForOutput } from "../observability/index.js";
 import { isRecord, nonEmptyString } from "../shared/primitives.js";
 
@@ -80,10 +80,10 @@ function decodedPathParts(pathname) {
   });
 }
 
-function appendGithubPrUrlBindingErrors(githubPr, errors, fieldPath) {
-  const repo = nonEmptyString(githubPr?.repo);
-  const url = nonEmptyString(githubPr?.url);
-  const number = Number.isSafeInteger(githubPr?.number) && githubPr.number >= 1 ? githubPr.number : null;
+function appendLocalHandoffTargetUrlBindingErrors(handoffTarget, errors, fieldPath) {
+  const repo = nonEmptyString(handoffTarget?.repo);
+  const url = nonEmptyString(handoffTarget?.url);
+  const number = Number.isSafeInteger(handoffTarget?.number) && handoffTarget.number >= 1 ? handoffTarget.number : null;
   if (!repo || !url || number === null) return;
 
   let parsed;
@@ -96,14 +96,14 @@ function appendGithubPrUrlBindingErrors(githubPr, errors, fieldPath) {
   const expectedNumber = String(number);
   const parts = decodedPathParts(parsed.pathname);
   if (parsed.protocol === "local:") {
-    const matches = parsed.hostname === "github-pr"
+    const matches = parsed.hostname === "scm-handoff"
       && !parsed.search
       && !parsed.hash
       && parts.length === 3
       && parts[0] === repo
       && parts[1] === "pull"
       && parts[2] === expectedNumber;
-    if (!matches) errors.push(`${fieldPath}.url must bind to local github-pr repo and PR number`);
+    if (!matches) errors.push(`${fieldPath}.url must bind to local scm-handoff repo and handoff target number`);
     return;
   }
 
@@ -118,14 +118,14 @@ function appendGithubPrUrlBindingErrors(githubPr, errors, fieldPath) {
     && parts[1] === repoParts[1]
     && parts[2] === "pull"
     && parts[3] === expectedNumber;
-  if (!matches) errors.push(`${fieldPath}.url must bind to https://github.com repo and PR number`);
+  if (!matches) errors.push(`${fieldPath}.url must bind to https://github.com repo and handoff target number`);
 }
 
 function appendHandoffTargetErrors(snapshot, handoffTarget, errors, fieldPath) {
-  appendGithubPrValidationErrors(handoffTarget, errors, fieldPath);
+  appendScmHandoffTargetValidationErrors(handoffTarget, errors, fieldPath);
   if (!isRecord(handoffTarget)) return;
-  appendGithubPrContractErrors(snapshot, handoffTarget, errors, fieldPath);
-  appendGithubPrUrlBindingErrors(handoffTarget, errors, fieldPath);
+  appendScmHandoffTargetContractErrors(snapshot, handoffTarget, errors, fieldPath);
+  appendLocalHandoffTargetUrlBindingErrors(handoffTarget, errors, fieldPath);
 }
 
 function projectionParityErrors(handoffTarget, resultTarget) {

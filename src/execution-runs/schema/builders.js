@@ -1,5 +1,5 @@
 /** Durable execution-run snapshot and summary builders. */
-import { SCHEMA_VERSION, GATE_STATUS } from "../constants.js";
+import { SCHEMA_VERSION, GATE_STATUS } from "../../core/modules/execution-runs/constants.js";
 import { isRecord } from "../../shared/primitives.js";
 
 /**

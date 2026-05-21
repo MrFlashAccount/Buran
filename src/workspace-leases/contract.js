@@ -1,7 +1,7 @@
 /** Workspace lease contract semantics shared by filesystem lock adapters. */
 import path from "node:path";
 
-import { SCHEMA_VERSION } from "../execution-runs/constants.js";
+import { SCHEMA_VERSION } from "../core/modules/execution-runs/constants.js";
 import { nonEmptyString, safeIdPart, sha256Hex, toStringArray } from "../shared/primitives.js";
 
 export const DEFAULT_LEASE_TTL_MS = 4 * 60 * 60 * 1000;

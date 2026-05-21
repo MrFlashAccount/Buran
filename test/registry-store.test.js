@@ -4,9 +4,12 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { SCHEMA_VERSION } from "../src/execution-runs/constants.js";
-import { recoverRegistry } from "../src/execution-runs/recovery/index.js";
+import { SCHEMA_VERSION } from "../src/core/modules/execution-runs/constants.js";
+import { recoverRegistry as recoverRegistryCore } from "../src/execution-runs/recovery/index.js";
 import { createJsonRegistryRepository } from "../src/integrations/storage/json-registry/repository.js";
+import { createJsonLeaseRecordStore } from "../src/integrations/storage/json-registry/lease-record-store.js";
+import { createJsonRegistryRecoveryStore } from "../src/integrations/storage/json-registry/recovery-store.js";
+import { createFilesystemWorkspaceLeaseService } from "../src/integrations/worktree/filesystem/locks.js";
 import { createRunFromPacketReport, getRunPaths, readEventsFile, readRunSnapshot, rebuildIndexes, transitionRun } from "../src/integrations/storage/json-registry/store.js";
 
 /**
@@ -15,6 +18,10 @@ import { createRunFromPacketReport, getRunPaths, readEventsFile, readRunSnapshot
  */
 
 const registryRepository = createJsonRegistryRepository();
+const leaseRecordStore = createJsonLeaseRecordStore();
+const workspaceLeaseService = createFilesystemWorkspaceLeaseService({ registryRepository, leaseRecordStore });
+const registryRecoveryStore = createJsonRegistryRecoveryStore();
+const recoverRegistry = (registryRoot, options = {}) => recoverRegistryCore(registryRoot, { ...options, registryRepository: options.registryRepository || registryRepository, workspaceLeaseService: options.workspaceLeaseService || workspaceLeaseService, registryRecoveryStore: options.registryRecoveryStore || registryRecoveryStore });
 
 /** Creates an isolated registry root for store-level tests. */
 async function makeTempDir() {

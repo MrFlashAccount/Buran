@@ -2,8 +2,8 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
-import { SCHEMA_VERSION, TERMINAL_STATES } from "../../../execution-runs/constants.js";
-import { isKnownState } from "../../../execution-runs/state-machine.js";
+import { SCHEMA_VERSION, TERMINAL_STATES } from "../../../core/modules/execution-runs/constants.js";
+import { isKnownState } from "../../../core/modules/execution-runs/state-machine.js";
 import { canonicalJson, sha256Hex } from "../../../shared/primitives.js";
 import { writeJsonAtomic } from "./atomic-read-write.js";
 import { getRegistryPaths } from "./path-layout.js";

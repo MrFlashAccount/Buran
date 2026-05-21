@@ -2,14 +2,14 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
-import { TERMINAL_STATES } from "../execution-runs/constants.js";
+import { TERMINAL_STATES } from "../core/modules/execution-runs/constants.js";
 import { IMPLEMENTATION_DISPATCH_ADAPTER, buildImplementationDispatchIntent, executeImplementationDispatch, implementationDispatchStatusSummary, isUnavailableImplementationDispatchResult, sanitizeImplementationDispatchEvidence, validateImplementationDispatchResultReport } from "../gates/implementation-contract.js";
 import { executeInternalReviewGate, sanitizeRecordedInternalReviewReport } from "../gates/internal-review-adapter.js";
 import { sanitizePublicReportForOutput } from "../observability/index.js";
-import { buildRecordedPrProjection, createLocalPrProjectionAdapter } from "../workflow-boundary/pr-scm-projection/local-journal-adapter.js";
+import { buildRecordedScmHandoff, createLocalScmHandoffAdapter } from "../core/modules/scm-handoff/services/local-journal-scm-handoff-adapter.js";
 import { executeVerificationGate } from "../gates/verification-adapter.js";
 import { evaluateReviewReadyPolicy } from "../stack-workflow/review-ready-policy.js";
-import { assertRegistryRepository } from "../execution-runs/registry/index.js";
+import { assertRegistryRepository } from "../core/modules/execution-runs/ports/registry-repository.js";
 import { canonicalJson, isRecord, nonEmptyString, sha256Hex } from "../shared/primitives.js";
 import { hasActiveLease } from "./mission-context.js";
 import { buildIssue, buildRunnerReport, buildStep, implementationBoundaryMessage, internalReviewTransition, internalReviewTransitionReason, leaseRequiredMessage, projectionProblemCode, projectionTransitionReason, unsupportedStageMessage, verificationTransition, verificationTransitionReason } from "./final-report.js";
@@ -773,6 +773,6 @@ export async function runInternalReviewStage({ registryRoot, runId, current, pre
  * @param {object|null} params.internalReview Internal review report already attached to this runner cycle, when available.
  * @param {() => Date} params.clock
  * @param {string} params.actor
- * @param {{plan(snapshot: object, options?: object): object, execute(snapshot: object, plan: object, options?: object): Promise<object>, externalSideEffects?: boolean}} [params.prProjectionAdapter=createLocalPrProjectionAdapter()]
+ * @param {{plan(snapshot: object, options?: object): object, execute(snapshot: object, plan: object, options?: object): Promise<object>, externalSideEffects?: boolean}} [params.scmHandoffAdapter=createLocalScmHandoffAdapter()]
  * @returns {Promise<object>} Runner report after recording projection artifacts and transitioning to manual review.
  */

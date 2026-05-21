@@ -2,36 +2,37 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
-import { TERMINAL_STATES } from "../execution-runs/constants.js";
+import { TERMINAL_STATES } from "../core/modules/execution-runs/constants.js";
 import { IMPLEMENTATION_DISPATCH_ADAPTER, buildImplementationDispatchIntent, executeImplementationDispatch, implementationDispatchStatusSummary, isUnavailableImplementationDispatchResult, sanitizeImplementationDispatchEvidence, validateImplementationDispatchResultReport } from "../gates/implementation-contract.js";
 import { executeInternalReviewGate, sanitizeRecordedInternalReviewReport } from "../gates/internal-review-adapter.js";
 import { sanitizePublicReportForOutput } from "../observability/index.js";
-import { buildRecordedPrProjection, createLocalPrProjectionAdapter } from "../workflow-boundary/pr-scm-projection/local-journal-adapter.js";
+import { buildRecordedScmHandoff, createLocalJournalScmHandoffAdapter } from "../core/modules/scm-handoff/services/local-journal-scm-handoff-adapter.js";
+import { assertScmHandoffPort } from "../core/modules/scm-handoff/ports/scm-handoff-port.js";
 import { executeVerificationGate } from "../gates/verification-adapter.js";
 import { evaluateReviewReadyPolicy } from "../stack-workflow/review-ready-policy.js";
-import { assertRegistryRepository } from "../execution-runs/registry/index.js";
+import { assertRegistryRepository } from "../core/modules/execution-runs/ports/registry-repository.js";
 import { canonicalJson, isRecord, nonEmptyString, sha256Hex } from "../shared/primitives.js";
 import { hasActiveLease } from "./mission-context.js";
 import { buildIssue, buildRunnerReport, buildStep, implementationBoundaryMessage, internalReviewTransition, internalReviewTransitionReason, leaseRequiredMessage, projectionProblemCode, projectionTransitionReason, unsupportedStageMessage, verificationTransition, verificationTransitionReason } from "./final-report.js";
 
 
-function toHandoffTarget(githubPr) {
-  if (!isRecord(githubPr)) return null;
+function toHandoffTarget(handoffTarget) {
+  if (!isRecord(handoffTarget)) return null;
   return {
     provider: "github",
     kind: "pull_request",
-    number: githubPr.number,
-    url: githubPr.url,
-    repo: githubPr.repo,
-    issue_number: githubPr.issue_number ?? null,
-    head_branch: githubPr.head_branch,
-    base_branch: githubPr.base_branch,
-    state: githubPr.state,
-    draft: githubPr.draft,
-    title: githubPr.title,
-    projection_mode: githubPr.projection_mode || "",
-    projected_at: githubPr.projected_at || null,
-    actor: githubPr.actor || "",
+    number: handoffTarget.number,
+    url: handoffTarget.url,
+    repo: handoffTarget.repo,
+    issue_number: handoffTarget.issue_number ?? null,
+    head_branch: handoffTarget.head_branch,
+    base_branch: handoffTarget.base_branch,
+    state: handoffTarget.state,
+    draft: handoffTarget.draft,
+    title: handoffTarget.title,
+    projection_mode: handoffTarget.projection_mode || "",
+    projected_at: handoffTarget.projected_at || null,
+    actor: handoffTarget.actor || "",
   };
 }
 function sanitizeRunnerReportMessage(message) {
@@ -47,7 +48,7 @@ function projectionProblemFromError(error) {
   const message = sanitizeRunnerReportMessage(error?.message || String(error));
   const code = nonEmptyString(error?.code);
   if (code === "projection_missing_base_branch") return buildProjectionProblem("missing_base_branch", message);
-  if (code === "projection_invalid_transport_status" || code === "projection_invalid_transport_result" || code === "projection_invalid_github_pr") {
+  if (code === "projection_invalid_transport_status" || code === "projection_invalid_transport_result" || code === "projection_invalid_handoff_target") {
     return buildProjectionProblem("invalid_transport_result", message);
   }
   if (code.startsWith("projection_github_")) return buildProjectionProblem(code.slice("projection_".length), message);
@@ -57,16 +58,17 @@ function projectionProblemFromError(error) {
   return buildProjectionProblem("record_failed", `SCM handoff projection handoff could not be recorded locally: ${message}`);
 }
 
-export async function runPrReadyStage({ registryRoot, runId, current, previousState, stepsTaken, blockers, warnings, workspacePreparation, implementationDispatch, verification, internalReview, clock, actor, prProjectionAdapter = createLocalPrProjectionAdapter(), registryRepository } = {}) {
+export async function runPrReadyStage({ registryRoot, runId, current, previousState, stepsTaken, blockers, warnings, workspacePreparation, implementationDispatch, verification, internalReview, clock, actor, scmHandoffAdapter, registryRepository } = {}) {
   const registry = assertRegistryRepository(registryRepository);
+  const handoffAdapter = assertScmHandoffPort(scmHandoffAdapter || createLocalJournalScmHandoffAdapter());
   let projection = null;
   let plannedProjection;
   let intentArtifactRef = null;
   let intentRecordStatus = "not_recorded";
-  let projectionExternalSideEffects = Boolean(prProjectionAdapter?.externalSideEffects);
+  let projectionExternalSideEffects = Boolean(handoffAdapter?.externalSideEffects);
 
   try {
-    plannedProjection = prProjectionAdapter.plan(current, { clock, actor });
+    plannedProjection = handoffAdapter.plan(current, { clock, actor });
     projectionExternalSideEffects = Boolean(plannedProjection.externalSideEffects);
     const intentRecorded = await registry.recordProjectionIntent(registryRoot, runId, {
       projection_name: plannedProjection.projectionName,
@@ -91,13 +93,13 @@ export async function runPrReadyStage({ registryRoot, runId, current, previousSt
       toState: "handoff_ready",
       detail: projectionExternalSideEffects
         ? "SCM handoff projection intent was recorded locally before the transport-backed handoff."
-        : "SCM handoff projection intent was recorded locally without a remote GitHub write.",
+        : "SCM handoff projection intent was recorded locally without a remote write.",
       sequence: intentRecorded.event?.sequence ?? null,
       artifactPath: intentRecorded.artifact_ref.path,
       artifactSha256: intentRecorded.artifact_ref.sha256,
     }));
 
-    const resumedProjection = buildRecordedPrProjection(current, {
+    const resumedProjection = buildRecordedScmHandoff(current, {
       clock,
       expectedAdapter: plannedProjection.adapter,
       expectedMode: plannedProjection.mode,
@@ -106,7 +108,7 @@ export async function runPrReadyStage({ registryRoot, runId, current, previousSt
     if (resumedProjection && resumedProjection.resultIdempotencyKey === plannedProjection.resultIdempotencyKey) {
       plannedProjection = resumedProjection;
     } else {
-      plannedProjection = await prProjectionAdapter.execute(current, plannedProjection, { clock, actor });
+      plannedProjection = await handoffAdapter.execute(current, plannedProjection, { clock, actor });
       projectionExternalSideEffects = Boolean(plannedProjection.externalSideEffects);
     }
 
@@ -120,7 +122,7 @@ export async function runPrReadyStage({ registryRoot, runId, current, previousSt
       idempotency_key: plannedProjection.resultIdempotencyKey,
       intent_idempotency_key: plannedProjection.intentIdempotencyKey,
       status: plannedProjection.result.status,
-      handoff_target: toHandoffTarget(plannedProjection.githubPr),
+      handoff_target: toHandoffTarget(plannedProjection.handoffTarget),
       artifactPath: plannedProjection.resultArtifactPath,
       content: plannedProjection.resultArtifactContent,
       actor: plannedProjection.actor,
@@ -140,7 +142,7 @@ export async function runPrReadyStage({ registryRoot, runId, current, previousSt
       fromState: "handoff_ready",
       toState: "handoff_ready",
       detail: projectionExternalSideEffects
-        ? "SCM handoff projection result was recorded locally after the transport-backed PR handoff."
+        ? "SCM handoff projection result was recorded locally after the transport-backed handoff."
         : "SCM projection result was recorded locally and mirrored into handoff_target without a remote write.",
       sequence: resultRecorded.event?.sequence ?? null,
       artifactPath: resultRecorded.artifact_ref.path,
@@ -151,8 +153,8 @@ export async function runPrReadyStage({ registryRoot, runId, current, previousSt
     projection = {
       ...(plannedProjection?.publicReport || {
         status: "blocked",
-        adapter: prProjectionAdapter?.adapter || "local-github-pr-projection",
-        mode: prProjectionAdapter?.mode || "local_fake",
+        adapter: handoffAdapter?.adapter || "local-scm-handoff",
+        mode: handoffAdapter?.mode || "local_fake",
       }),
       intent_artifact_ref: intentArtifactRef,
       intent_record_status: intentRecordStatus,
@@ -196,7 +198,7 @@ export async function runPrReadyStage({ registryRoot, runId, current, previousSt
         execution_epoch: plannedProjection.executionEpoch,
         intent_idempotency_key: plannedProjection.intentIdempotencyKey,
         result_idempotency_key: plannedProjection.resultIdempotencyKey,
-        handoff_target: toHandoffTarget(plannedProjection.githubPr),
+        handoff_target: toHandoffTarget(plannedProjection.handoffTarget),
         result_artifact_ref: projection.result_artifact_ref,
       },
     },

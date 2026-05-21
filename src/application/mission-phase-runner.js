@@ -2,16 +2,16 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
-import { TERMINAL_STATES } from "../execution-runs/constants.js";
+import { TERMINAL_STATES } from "../core/modules/execution-runs/constants.js";
 import { IMPLEMENTATION_DISPATCH_ADAPTER, buildImplementationDispatchIntent, executeImplementationDispatch, implementationDispatchStatusSummary, isUnavailableImplementationDispatchResult, sanitizeImplementationDispatchEvidence, validateImplementationDispatchResultReport } from "../gates/implementation-contract.js";
 import { executeInternalReviewGate, sanitizeRecordedInternalReviewReport } from "../gates/internal-review-adapter.js";
 import { sanitizePublicReportForOutput } from "../observability/index.js";
-import { buildRecordedPrProjection, createLocalPrProjectionAdapter } from "../workflow-boundary/pr-scm-projection/local-journal-adapter.js";
+import { buildRecordedScmHandoff, createLocalScmHandoffAdapter } from "../core/modules/scm-handoff/services/local-journal-scm-handoff-adapter.js";
 import { executeVerificationGate } from "../gates/verification-adapter.js";
 import { evaluateReviewReadyPolicy } from "../stack-workflow/review-ready-policy.js";
-import { assertRegistryRepository } from "../execution-runs/registry/index.js";
+import { assertRegistryRepository } from "../core/modules/execution-runs/ports/registry-repository.js";
 import { canonicalJson, isRecord, nonEmptyString, sha256Hex } from "../shared/primitives.js";
-import { inspectWorkspacePreparation } from "../integrations/worktree/filesystem/workspace-preparation.js";
+import { assertWorkspacePreparationInspector } from "./workspace-preparation-inspector.js";
 import { hasActiveLease } from "./mission-context.js";
 import { buildIssue, buildRunnerReport, buildStep, implementationBoundaryMessage, internalReviewTransition, internalReviewTransitionReason, leaseRequiredMessage, projectionProblemCode, projectionTransitionReason, sanitizeImplementationDispatchProblem, unsupportedStageMessage, verificationTransition, verificationTransitionReason } from "./final-report.js";
 
@@ -172,11 +172,12 @@ export async function runImplementationDispatchStage({ runContext = {}, reportSt
     implementationDispatchAdapter = createUnavailableImplementationDispatchAdapter(),
   } = services;
   const registry = assertRegistryRepository(services.registryRepository);
+  const workspaceInspector = assertWorkspacePreparationInspector(services.workspacePreparationInspector);
   if (!hasActiveLease(current)) {
     warnings.push(buildIssue("lease_not_active", `Run ${runId} is in running without an active local lease snapshot.`));
     blockers.push(buildIssue("lease_required", leaseRequiredMessage(runId)));
   } else {
-    const inspected = await inspectWorkspacePreparation(current.workspace?.path || "", {
+    const inspected = await workspaceInspector.inspect(current.workspace?.path || "", {
       intendedBranch: current.github?.intended_branch || "",
     });
 

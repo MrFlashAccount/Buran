@@ -18,7 +18,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { PLUGIN_COMMAND_NAME, PLUGIN_ID } from "./src/execution-runs/constants.js";
+import { PLUGIN_COMMAND_NAME, PLUGIN_ID } from "./src/core/modules/execution-runs/constants.js";
 import { runBuranCli } from "./src/entrypoints/cli.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -89,8 +89,11 @@ export { acquireLeaseReport, formatBuranReport, intakePacketListFile, normalizeB
 export { normalizePacket, normalizePacketList, summarizePacketReports } from "./src/approved-packets/sufficiency.js";
 export { createInvocationObserver, normalizeObservabilityConfig, sanitizeError, sanitizeForObservability } from "./src/observability/index.js";
 export { recoverRegistry } from "./src/execution-runs/recovery/index.js";
-export { createGithubCliPrProjectionAdapter, createGithubCliProjectPr, createGithubPrTransportAdapter } from "./src/integrations/scm/github/pr-transport-adapter.js";
 export { runLocalMission } from "./src/application/run-local-mission.js";
 export { assertNextSliceAllowed, evaluateReviewReadyPolicy } from "./src/stack-workflow/review-ready-policy.js";
-export { REGISTRY_REPOSITORY_METHODS, REGISTRY_REPOSITORY_PORT, assertRegistryRepository, createRegistryRepositoryContract } from "./src/execution-runs/registry/index.js";
-export { assertTransitionAllowed, getAllowedTransitions, isTerminalState, validateTransition } from "./src/execution-runs/state-machine.js";
+export { REGISTRY_REPOSITORY_METHODS, REGISTRY_REPOSITORY_PORT, assertRegistryRepository, createRegistryRepositoryContract } from "./src/core/modules/execution-runs/ports/registry-repository.js";
+export { WORKSPACE_LEASE_SERVICE_METHODS, WORKSPACE_LEASE_SERVICE_PORT, assertWorkspaceLeaseService, createWorkspaceLeaseServiceContract } from "./src/core/modules/workspace-leases/ports/workspace-lease-service.js";
+export { SCM_HANDOFF_PORT, SCM_HANDOFF_PORT_METHODS, assertScmHandoffPort } from "./src/core/modules/scm-handoff/ports/scm-handoff-port.js";
+export { LocalJournalScmHandoffAdapter, createLocalJournalScmHandoffAdapter } from "./src/core/modules/scm-handoff/services/local-journal-scm-handoff-adapter.js";
+export { GitHubCliClient, GitHubIntegration, GitHubScmHandoffAdapter, createGithubCliPrProjectionAdapter, createGithubPrTransportAdapter } from "./src/integrations/scm/github/index.js";
+export { assertTransitionAllowed, getAllowedTransitions, isTerminalState, validateTransition } from "./src/core/modules/execution-runs/state-machine.js";

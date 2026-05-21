@@ -10,10 +10,10 @@ import {
   GATE_STATUS_SET,
   SCHEMA_VERSION,
   TERMINAL_STATES,
-} from "../constants.js";
-import { isKnownState } from "../state-machine.js";
+} from "../../core/modules/execution-runs/constants.js";
+import { isKnownState } from "../../core/modules/execution-runs/state-machine.js";
 import { isRecord } from "../../shared/primitives.js";
-import { appendGithubPrContractErrors, appendGithubPrValidationErrors } from "../../workflow-boundary/pr-scm-projection/contract.js";
+import { appendScmHandoffTargetContractErrors, appendScmHandoffTargetValidationErrors } from "../../core/modules/scm-handoff/contract.js";
 import { buildGateSummary } from "./builders.js";
 
 /**
@@ -48,9 +48,9 @@ function isSuccessfulProjectionLedgerStatus(status) {
 }
 
 function validateHandoffTarget(value, errors, fieldPath, { snapshot = null, durableContract = false } = {}) {
-  appendGithubPrValidationErrors(value, errors, fieldPath);
+  appendScmHandoffTargetValidationErrors(value, errors, fieldPath);
   if (!isRecord(value)) return;
-  if (snapshot) appendGithubPrContractErrors(snapshot, value, errors, fieldPath, { durable: durableContract });
+  if (snapshot) appendScmHandoffTargetContractErrors(snapshot, value, errors, fieldPath, { durable: durableContract });
 }
 function hasOwn(value, key) {
   return Object.prototype.hasOwnProperty.call(value, key);

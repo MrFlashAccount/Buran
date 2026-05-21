@@ -18,7 +18,7 @@ import { promises as fs } from "node:fs";
 import crypto from "node:crypto";
 import path from "node:path";
 
-import { PLUGIN_ID } from "../execution-runs/constants.js";
+import { PLUGIN_ID } from "../core/modules/execution-runs/constants.js";
 import { isRecord, nonEmptyString, resolveMaybeRelative, sha256Hex } from "../shared/primitives.js";
 import { correlationFromReport, summarizeReport } from "./public-output.js";
 

@@ -107,27 +107,27 @@ test("workflow policy blocks matching mirrored SCM handoff data that violates th
   assert.match(projectionGate.evidence.parity_errors.join("\n"), /handoff_target\.base_branch must match scm_target\.base_branch/);
 });
 
-test("workflow policy validates mirrored PR URL schema, host, repo, and number binding", () => {
+test("workflow policy validates mirrored handoff URL schema, host, repo, and number binding", () => {
   for (const { name, url, pattern } of [
     {
       name: "invalid URL syntax",
       url: "not-a-pr-url",
-      pattern: /handoff_target\.url must be a valid local:\/\/ or http\(s\):\/\/ PR URL/,
+      pattern: /handoff_target\.url must be a valid local:\/\/ or http\(s\):\/\/ handoff URL/,
     },
     {
       name: "wrong GitHub host",
       url: "https://evil.example/example-owner/example-repo/pull/99",
-      pattern: /handoff_target\.url must bind to https:\/\/github\.com repo and PR number/,
+      pattern: /handoff_target\.url must bind to https:\/\/github\.com repo and handoff target number/,
     },
     {
       name: "wrong URL repo",
       url: "https://github.com/example-owner/attacker-repo/pull/99",
-      pattern: /handoff_target\.url must bind to https:\/\/github\.com repo and PR number/,
+      pattern: /handoff_target\.url must bind to https:\/\/github\.com repo and handoff target number/,
     },
     {
       name: "wrong URL number",
       url: "https://github.com/example-owner/example-repo/pull/100",
-      pattern: /handoff_target\.url must bind to https:\/\/github\.com repo and PR number/,
+      pattern: /handoff_target\.url must bind to https:\/\/github\.com repo and handoff target number/,
     },
   ]) {
     const policy = policyForMirroredHandoffOverride({ url });

@@ -2,7 +2,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
-import { buildNonTransitionEvent } from "../../../execution-runs/state-machine.js";
+import { buildNonTransitionEvent } from "../../../core/modules/execution-runs/state-machine.js";
 import { nonEmptyString } from "../../../shared/primitives.js";
 import { appendJsonLine } from "./fs-atomic.js";
 

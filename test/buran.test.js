@@ -6,16 +6,19 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { runBuranCli } from "../src/entrypoints/cli.js";
-import { SCHEMA_VERSION } from "../src/execution-runs/constants.js";
+import { SCHEMA_VERSION } from "../src/core/modules/execution-runs/constants.js";
 import { intakePacketListFile, validatePacketListFile } from "../src/application/commands.js";
 import { validateRunSnapshot } from "../src/execution-runs/schema/index.js";
-import { acquireWorkspaceLease, getLeaseRecordPath } from "../src/integrations/worktree/filesystem/locks.js";
+import { acquireWorkspaceLease as acquireWorkspaceLeaseWithPorts, getLeaseRecordPath } from "../src/integrations/worktree/filesystem/locks.js";
 import { normalizeObservabilityConfig, sanitizeForObservability, sanitizePathForOutput, sanitizePublicReportForOutput } from "../src/observability/index.js";
-import { buildLocalPrProjection } from "../src/workflow-boundary/pr-scm-projection/local-journal-adapter.js";
-import { recoverRegistry } from "../src/execution-runs/recovery/index.js";
+import { buildLocalScmHandoffProjection } from "../src/core/modules/scm-handoff/services/local-journal-scm-handoff-adapter.js";
+import { recoverRegistry as recoverRegistryCore } from "../src/execution-runs/recovery/index.js";
 import { writeJsonAtomic } from "../src/integrations/storage/json-registry/fs-atomic.js";
 import { createJsonRegistryRepository } from "../src/integrations/storage/json-registry/repository.js";
-import { validateTransition } from "../src/execution-runs/state-machine.js";
+import { createJsonLeaseRecordStore } from "../src/integrations/storage/json-registry/lease-record-store.js";
+import { createJsonRegistryRecoveryStore } from "../src/integrations/storage/json-registry/recovery-store.js";
+import { createFilesystemWorkspaceLeaseService } from "../src/integrations/worktree/filesystem/locks.js";
+import { validateTransition } from "../src/core/modules/execution-runs/state-machine.js";
 
 /**
  * End-to-end coverage for packet intake, CLI orchestration, locks, redaction,
@@ -24,6 +27,11 @@ import { validateTransition } from "../src/execution-runs/state-machine.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const registryRepository = createJsonRegistryRepository();
+const leaseRecordStore = createJsonLeaseRecordStore();
+const workspaceLeaseService = createFilesystemWorkspaceLeaseService({ registryRepository, leaseRecordStore });
+const registryRecoveryStore = createJsonRegistryRecoveryStore();
+const acquireWorkspaceLease = (registryRoot, runId, options = {}) => acquireWorkspaceLeaseWithPorts(registryRoot, runId, { ...options, registryRepository, leaseRecordStore });
+const recoverRegistry = (registryRoot, options = {}) => recoverRegistryCore(registryRoot, { ...options, registryRepository: options.registryRepository || registryRepository, workspaceLeaseService: options.workspaceLeaseService || workspaceLeaseService, registryRecoveryStore: options.registryRecoveryStore || registryRecoveryStore });
 const fixturePath = path.join(__dirname, "fixtures", "packet-list.mixed.json");
 
 /** Creates an isolated temp workspace for full-flow integration tests. */
@@ -104,7 +112,7 @@ function projectionReadySnapshot() {
       provider: "github",
       kind: "pull_request",
       number: 123456,
-      url: "local://github-pr/example/pull/123456",
+      url: "local://scm-handoff/example/target/123456",
       repo: "example-owner/example-repo",
       issue_number: 17,
       head_branch: "user/feature",
@@ -123,7 +131,7 @@ function projectionReadySnapshot() {
       base_branch: "develop",
       pr: {
         number: 123456,
-        url: "local://github-pr/example/pull/123456",
+        url: "local://scm-handoff/example/target/123456",
         repo: "example-owner/example-repo",
         issue_number: 17,
         head_branch: "user/feature",
@@ -184,7 +192,7 @@ function projectionReadySnapshot() {
       handoff_target: {
         projection_name: "handoff_target",
         projection_target: "handoff_target",
-        adapter: "local-github-pr-projection",
+        adapter: "local-scm-handoff",
         mode: "local_fake",
         execution_epoch: 1,
         recorded_from_state: "handoff_ready",
@@ -211,7 +219,7 @@ function projectionReadySnapshot() {
             provider: "github",
             kind: "pull_request",
             number: 123456,
-            url: "local://github-pr/example/pull/123456",
+            url: "local://scm-handoff/example/target/123456",
             repo: "example-owner/example-repo",
             issue_number: 17,
             head_branch: "user/feature",
@@ -559,7 +567,7 @@ test("state machine requires a recorded SCM handoff projection result before rea
         provider: "github",
         kind: "pull_request",
         number: 123456,
-        url: "local://github-pr/example/pull/123456",
+        url: "local://scm-handoff/example/target/123456",
         repo: "example-owner/example-repo",
         issue_number: 17,
         head_branch: "user/feature",
@@ -576,7 +584,7 @@ test("state machine requires a recorded SCM handoff projection result before rea
           execution_epoch: 1,
           projection_name: "handoff_target",
           projection_target: "handoff_target",
-          adapter: "local-github-pr-projection",
+          adapter: "local-scm-handoff",
           mode: "local_fake",
           recorded_from_state: "handoff_ready",
           last_result: {
@@ -593,7 +601,7 @@ test("state machine requires a recorded SCM handoff projection result before rea
               provider: "github",
               kind: "pull_request",
               number: 123456,
-              url: "local://github-pr/example/pull/123456",
+              url: "local://scm-handoff/example/target/123456",
               repo: "example-owner/example-repo",
               issue_number: 17,
               head_branch: "user/feature",
@@ -625,7 +633,7 @@ test("state machine requires a recorded SCM handoff projection result before rea
         base_branch: "develop",
         pr: {
           number: 123456,
-          url: "local://github-pr/example/pull/123456",
+          url: "local://scm-handoff/example/target/123456",
           repo: "example-owner/example-repo",
           issue_number: 17,
           head_branch: "user/feature",
@@ -640,7 +648,7 @@ test("state machine requires a recorded SCM handoff projection result before rea
           execution_epoch: 1,
           projection_name: "github_pr",
           projection_target: "github.pr",
-          adapter: "local-github-pr-projection",
+          adapter: "local-scm-handoff",
           mode: "local_fake",
           recorded_from_state: "handoff_ready",
           last_result: {
@@ -690,7 +698,7 @@ test("state machine requires a recorded SCM handoff projection result before rea
           execution_epoch: 1,
           projection_name: "github_pr",
           projection_target: "github.pr",
-          adapter: "local-github-pr-projection",
+          adapter: "local-scm-handoff",
           mode: "local_fake",
           recorded_from_state: "handoff_ready",
           last_result: {
@@ -737,7 +745,7 @@ test("run snapshot validation rejects corrupt successful projection state", () =
 });
 
 test("projection adapter sanitizes durable projection artifacts", () => {
-  const projection = buildLocalPrProjection({
+  const projection = buildLocalScmHandoffProjection({
     run_id: "run_projection_sanitized",
     task_id: `task ${GITHUB_PAT_SECRET} /Users/user/private/notes.md`,
     state: "handoff_ready",

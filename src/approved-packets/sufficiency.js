@@ -1,4 +1,4 @@
-import { SCHEMA_VERSION, SUFFICIENCY_STATUS } from "../execution-runs/constants.js";
+import { SCHEMA_VERSION, SUFFICIENCY_STATUS } from "../core/modules/execution-runs/constants.js";
 import { canonicalJson, isRecord, nonEmptyString, safeIdPart, sha256Hex, toStringArray } from "../shared/primitives.js";
 
 function firstNonEmpty(...values) {

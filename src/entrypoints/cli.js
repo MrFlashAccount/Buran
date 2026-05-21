@@ -15,7 +15,7 @@
  * - every completed invocation finalizes an observability trace.
  */
 import { acquireLeaseReport, formatBuranReport, intakePacketListFile, normalizeBuranConfig, recoverRegistryReport, releaseLeaseReport, runLocalMissionReport, validatePacketListFile } from "../application/commands.js";
-import { createJsonRegistryRepository } from "../integrations/storage/json-registry/repository.js";
+import { createLocalBuranRuntime } from "../composition/local-runtime.js";
 import { correlationFromReport, createInvocationObserver, sanitizeError, sanitizePublicReportForOutput, summarizeArgs, summarizeReport } from "../observability/index.js";
 
 /**
@@ -294,7 +294,9 @@ async function finishCliResult({ result, options, observer, outcome = "success",
  */
 export async function runBuranCli(rawArgs, { pluginConfig = {}, workspaceDir = process.cwd(), stateDir = "", apiLogger = null } = {}) {
   const observer = createInvocationObserver({ component: "cli", pluginConfig, workspaceDir, stateDir, apiLogger });
-  const registryRepository = createJsonRegistryRepository();
+  const baseRuntimeConfig = normalizeBuranConfig(pluginConfig, { workspaceDir, stateDir });
+  const runtime = createLocalBuranRuntime({ scmHandoffAdapter: baseRuntimeConfig.scmHandoffAdapter });
+  const { registryRepository, workspaceLeaseService, workspacePreparationInspector, registryRecoveryStore, scmHandoffAdapter } = runtime;
   await observer.log("info", "cli.invocation.started", { outcome: "started", context: { args: summarizeArgs(rawArgs) } });
   let options;
   try {
@@ -364,14 +366,17 @@ export async function runBuranCli(rawArgs, { pluginConfig = {}, workspaceDir = p
         workspacePath: options.workspacePath,
         ttlMs: options.ttlMs,
         implementationDispatchAdapter: runtimeConfig.implementationDispatchAdapter,
+        scmHandoffAdapter: runtimeConfig.scmHandoffAdapter || scmHandoffAdapter,
         registryRepository,
+        workspaceLeaseService,
+        workspacePreparationInspector,
       });
       return finishCliResult({ result: { ok: true, report }, options, observer });
     }
 
     if (options.command === "recover" || options.command === "recovery") {
       const registryRoot = resolveRegistry(options, pluginConfig, workspaceDir, stateDir);
-      const report = await recoverRegistryReport({ registryRoot, registryRepository });
+      const report = await recoverRegistryReport({ registryRoot, registryRepository, workspaceLeaseService, registryRecoveryStore });
       return finishCliResult({ result: { ok: true, report }, options, observer });
     }
 
@@ -393,6 +398,7 @@ export async function runBuranCli(rawArgs, { pluginConfig = {}, workspaceDir = p
           workspaceId: options.workspaceId,
           workspacePath: options.workspacePath,
           ttlMs: options.ttlMs,
+          workspaceLeaseService,
         });
         return finishCliResult({ result: { ok: true, report }, options, observer });
       }
@@ -406,7 +412,7 @@ export async function runBuranCli(rawArgs, { pluginConfig = {}, workspaceDir = p
             reason: "missing_lease_release_arguments",
           });
         }
-        const report = await releaseLeaseReport({ registryRoot, runId: options.runId });
+        const report = await releaseLeaseReport({ registryRoot, runId: options.runId, workspaceLeaseService });
         return finishCliResult({ result: { ok: true, report }, options, observer });
       }
       return finishCliResult({

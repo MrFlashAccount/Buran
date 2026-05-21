@@ -1,7 +1,6 @@
-import { promises as fs } from "node:fs";
 import path from "node:path";
 
-import { ARTIFACT_STAGE_STATE_BY_NAME, GATE_NAMES, GATE_STATE_BY_NAME, GATE_STATUS, SCHEMA_VERSION, TERMINAL_STATES } from "../constants.js";
+import { ARTIFACT_STAGE_STATE_BY_NAME, GATE_NAMES, GATE_STATE_BY_NAME, GATE_STATUS, SCHEMA_VERSION, TERMINAL_STATES } from "../../core/modules/execution-runs/constants.js";
 import {
   buildGateResultSummary,
   buildGateSummary,
@@ -14,9 +13,10 @@ import {
   validateProjectionResultRecordedEvent,
   validateRunSnapshot,
 } from "../schema/index.js";
-import { recoverLeaseRecords } from "../../integrations/worktree/filesystem/locks.js";
 import { assertRegistryRepository } from "../registry/index.js";
-import { applyTransitionToSnapshot, validateTransition, validateTransitionEvent } from "../state-machine.js";
+import { assertWorkspaceLeaseService } from "../../core/modules/workspace-leases/ports/workspace-lease-service.js";
+import { assertRegistryRecoveryStore } from "./store.js";
+import { applyTransitionToSnapshot, validateTransition, validateTransitionEvent } from "../../core/modules/execution-runs/state-machine.js";
 import { canonicalJson, isRecord, sha256Hex } from "../../shared/primitives.js";
 
 /**
@@ -32,18 +32,6 @@ import { canonicalJson, isRecord, sha256Hex } from "../../shared/primitives.js";
  * - initiating external side effects beyond local quarantine/index writes.
  */
 
-function safeReasonPart(reason) {
-  return String(reason || "invalid")
-    .toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 48) || "invalid";
-}
-
-async function readJsonStrict(filePath) {
-  const raw = await fs.readFile(filePath, "utf8");
-  return JSON.parse(raw);
-}
 
 function parseJsonLinesStrict(raw) {
   if (!raw.trim()) return { events: [], malformed: [] };
@@ -64,12 +52,12 @@ function parseJsonLinesStrict(raw) {
   return { events, malformed };
 }
 
-async function readEventsStrict(filePath) {
-  const raw = await fs.readFile(filePath, "utf8");
+async function readEventsStrict(store, eventsPath) {
+  const raw = await store.readRunEventsText({ eventsPath });
   return parseJsonLinesStrict(raw);
 }
 
-async function verifyArtifactRefs(runDir, snapshot, events) {
+async function verifyArtifactRefs(store, runDir, snapshot, events) {
   const refs = findArtifactRefs(snapshot).concat(findArtifactRefs(events));
   const unique = new Map();
   for (const ref of refs) unique.set(`${ref.path}:${ref.sha256}`, ref);
@@ -82,7 +70,7 @@ async function verifyArtifactRefs(runDir, snapshot, events) {
       continue;
     }
     try {
-      const content = await fs.readFile(artifactPath);
+      const content = await store.readArtifactContent({ runDir, artifactPath, artifactRef: ref });
       const actual = sha256Hex(content);
       if (actual !== ref.sha256) {
         findings.push({ severity: "error", type: "artifact_hash_mismatch", path: ref.path, expected: ref.sha256, actual });
@@ -362,41 +350,26 @@ function replayDomainEvents(events, runId, snapshot) {
   return { ok: true, replay };
 }
 
-async function quarantineRun(registryRoot, runDir, runId, reason, details, { clock, registryRepository }) {
+async function quarantineRun(registryRoot, runDir, runId, reason, details, { clock, registryRepository, registryRecoveryStore }) {
   const registry = assertRegistryRepository(registryRepository);
-  const paths = registry.getRegistryPaths(registryRoot);
-  const timestamp = clock().toISOString().replace(/\D/g, "").slice(0, 14) || "undated";
-  const targetDir = path.join(paths.quarantine, `${timestamp}_${runId}_${safeReasonPart(reason)}`);
-  await fs.mkdir(path.dirname(targetDir), { recursive: true });
-  await fs.rename(runDir, targetDir);
-  const reportPath = path.join(targetDir, "quarantine-report.json");
-  const report = {
-    schema_version: SCHEMA_VERSION,
-    quarantined_at: clock().toISOString(),
-    run_id: runId,
-    reason,
-    details,
-    original_run_dir: runDir,
-    quarantine_dir: targetDir,
-    human_needed: true,
-  };
-  await registry.writeRegistryReport(reportPath, report);
-  return { run_id: runId, reason, quarantine_dir: targetDir, report_path: reportPath };
+  const store = assertRegistryRecoveryStore(registryRecoveryStore);
+  return store.quarantineRun({ paths: registry.getRegistryPaths(registryRoot), runDir, runId, reason, details, clock, registryRepository: registry });
 }
 
-async function inspectRun(registryRoot, entry, { clock, registryRepository }) {
+async function inspectRun(registryRoot, entry, { clock, registryRepository, registryRecoveryStore }) {
   const registry = assertRegistryRepository(registryRepository);
-  const runId = entry.name;
+  const store = assertRegistryRecoveryStore(registryRecoveryStore);
+  const runId = typeof entry === "string" ? entry : entry.name;
   const runDir = path.join(registry.getRegistryPaths(registryRoot).runs, runId);
   const runPath = path.join(runDir, "run.json");
   const eventsPath = path.join(runDir, "events.jsonl");
   let snapshot;
   try {
-    snapshot = await readJsonStrict(runPath);
+    snapshot = await store.readRunJson({ runDir, runPath, runId });
   } catch (error) {
     return {
       status: "quarantined",
-      quarantine: await quarantineRun(registryRoot, runDir, runId, "corrupt_run_json", { error: error?.message || String(error) }, { clock, registryRepository: registry }),
+      quarantine: await quarantineRun(registryRoot, runDir, runId, "corrupt_run_json", { error: error?.message || String(error) }, { clock, registryRepository: registry, registryRecoveryStore: store }),
     };
   }
 
@@ -404,24 +377,24 @@ async function inspectRun(registryRoot, entry, { clock, registryRepository }) {
   if (!snapshotDecision.ok) {
     return {
       status: "quarantined",
-      quarantine: await quarantineRun(registryRoot, runDir, runId, "invalid_run_snapshot", { error: snapshotDecision.error }, { clock, registryRepository: registry }),
+      quarantine: await quarantineRun(registryRoot, runDir, runId, "invalid_run_snapshot", { error: snapshotDecision.error }, { clock, registryRepository: registry, registryRecoveryStore: store }),
     };
   }
 
   let eventsResult;
   try {
-    eventsResult = await readEventsStrict(eventsPath);
+    eventsResult = await readEventsStrict(store, eventsPath);
   } catch (error) {
     return {
       status: "quarantined",
-      quarantine: await quarantineRun(registryRoot, runDir, runId, "missing_or_unreadable_events", { error: error?.message || String(error) }, { clock, registryRepository: registry }),
+      quarantine: await quarantineRun(registryRoot, runDir, runId, "missing_or_unreadable_events", { error: error?.message || String(error) }, { clock, registryRepository: registry, registryRecoveryStore: store }),
     };
   }
 
   if (eventsResult.malformed.length > 0) {
     return {
       status: "quarantined",
-      quarantine: await quarantineRun(registryRoot, runDir, runId, "malformed_events_jsonl", { malformed: eventsResult.malformed }, { clock, registryRepository: registry }),
+      quarantine: await quarantineRun(registryRoot, runDir, runId, "malformed_events_jsonl", { malformed: eventsResult.malformed }, { clock, registryRepository: registry, registryRecoveryStore: store }),
     };
   }
 
@@ -429,7 +402,7 @@ async function inspectRun(registryRoot, entry, { clock, registryRepository }) {
   if (!replay.ok) {
     return {
       status: "quarantined",
-      quarantine: await quarantineRun(registryRoot, runDir, runId, "invalid_event_replay", { error: replay.reason }, { clock, registryRepository: registry }),
+      quarantine: await quarantineRun(registryRoot, runDir, runId, "invalid_event_replay", { error: replay.reason }, { clock, registryRepository: registry, registryRecoveryStore: store }),
     };
   }
 
@@ -452,16 +425,16 @@ async function inspectRun(registryRoot, entry, { clock, registryRepository }) {
           gates: replay.replay.gates,
           artifacts: replay.replay.artifacts.recorded,
         },
-      }, { clock, registryRepository: registry }),
+      }, { clock, registryRepository: registry, registryRecoveryStore: store }),
     };
   }
 
-  const artifactFindings = await verifyArtifactRefs(runDir, snapshot, eventsResult.events);
+  const artifactFindings = await verifyArtifactRefs(store, runDir, snapshot, eventsResult.events);
   const integrityErrors = artifactFindings.filter((finding) => finding.severity === "error");
   if (integrityErrors.length > 0) {
     return {
       status: "quarantined",
-      quarantine: await quarantineRun(registryRoot, runDir, runId, "artifact_integrity_failure", { findings: integrityErrors }, { clock, registryRepository: registry }),
+      quarantine: await quarantineRun(registryRoot, runDir, runId, "artifact_integrity_failure", { findings: integrityErrors }, { clock, registryRepository: registry, registryRecoveryStore: store }),
     };
   }
 
@@ -486,24 +459,22 @@ async function inspectRun(registryRoot, entry, { clock, registryRepository }) {
  * @returns {Promise<Record<string, unknown>>}
  * @throws {Error}
  */
-export async function recoverRegistry(registryRoot, { clock = () => new Date(), registryRepository } = {}) {
+export async function recoverRegistry(registryRoot, { clock = () => new Date(), registryRepository, workspaceLeaseService, registryRecoveryStore } = {}) {
   if (!registryRoot) throw new Error("registryRoot is required for recovery");
   const registry = assertRegistryRepository(registryRepository);
+  const leases = assertWorkspaceLeaseService(workspaceLeaseService);
+  const store = assertRegistryRecoveryStore(registryRecoveryStore);
   const paths = registry.getRegistryPaths(registryRoot);
-  await fs.mkdir(paths.runs, { recursive: true });
-  const entries = await fs.readdir(paths.runs, { withFileTypes: true }).catch((error) => {
-    if (error?.code === "ENOENT") return [];
-    throw error;
-  });
+  await store.ensureRunsDir({ paths, registryRoot });
+  const entries = await store.listRunDirs({ paths, registryRoot });
 
   const validSnapshots = [];
   const runs = [];
   const quarantined = [];
   const findings = [];
 
-  for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
-    if (!entry.isDirectory()) continue;
-    const inspected = await inspectRun(registryRoot, entry, { clock, registryRepository: registry });
+  for (const entry of entries.sort((a, b) => String(a).localeCompare(String(b)))) {
+    const inspected = await inspectRun(registryRoot, entry, { clock, registryRepository: registry, registryRecoveryStore: store });
     if (inspected.status === "quarantined") {
       quarantined.push(inspected.quarantine);
       findings.push({ severity: "error", type: "quarantined_run", run_id: inspected.quarantine.run_id, reason: inspected.quarantine.reason });
@@ -514,7 +485,7 @@ export async function recoverRegistry(registryRoot, { clock = () => new Date(), 
     findings.push(...inspected.run.artifact_findings.map((finding) => ({ run_id: inspected.run.run_id, ...finding })));
   }
 
-  const leaseRecovery = await recoverLeaseRecords(registryRoot, validSnapshots, { clock });
+  const leaseRecovery = await leases.recover(registryRoot, validSnapshots, { clock });
   findings.push(...leaseRecovery.findings);
 
   const indexes = await registry.rebuildIndexes(registryRoot, { clock, snapshots: leaseRecovery.snapshots });
@@ -541,7 +512,7 @@ export async function recoverRegistry(registryRoot, { clock = () => new Date(), 
     },
     external_side_effects: false,
   };
-  await registry.writeRegistryReport(path.join(paths.indexes, "recovery-report.json"), report);
+  await store.writeRecoveryReport({ paths, report, registryRepository: registry });
   return report;
 }
 

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { SCHEMA_VERSION } from "../src/execution-runs/constants.js";
+import { SCHEMA_VERSION } from "../src/core/modules/execution-runs/constants.js";
 import {
   buildInitialRunSnapshot,
   buildLeaseRecord,

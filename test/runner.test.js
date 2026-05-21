@@ -9,16 +9,20 @@ import { promisify } from "node:util";
 
 import { formatBuranReport, runLocalMissionReport } from "../src/application/commands.js";
 import { runBuranCli } from "../src/entrypoints/cli.js";
-import { createGithubCliProjectPr, createGithubPrTransportAdapter } from "../src/integrations/scm/github/pr-transport-adapter.js";
-import { acquireWorkspaceLease } from "../src/integrations/worktree/filesystem/locks.js";
+import { createGithubCliProjectPr, createGithubPrTransportAdapter } from "../src/integrations/scm/github/index.js";
+import { acquireWorkspaceLease as acquireWorkspaceLeaseWithPorts } from "../src/integrations/worktree/filesystem/locks.js";
 import { executeImplementationDispatch, validateImplementationDispatchResultReport } from "../src/gates/implementation-contract.js";
-import { recoverRegistry } from "../src/execution-runs/recovery/index.js";
+import { recoverRegistry as recoverRegistryCore } from "../src/execution-runs/recovery/index.js";
 import { runLocalMission as runLocalMissionCore } from "../src/application/run-local-mission.js";
 import { canonicalJson } from "../src/shared/primitives.js";
 import { evaluateReviewReadyPolicy } from "../src/stack-workflow/review-ready-policy.js";
 import { reviewReadyPolicySnapshot } from "./helpers/workflow-policy-fixture.js";
 import { createRunFromPacketReport, getRunPaths, readEventsFile, readRunSnapshot, recordArtifact, recordGateResult, transitionRun, writeRunSnapshot } from "../src/integrations/storage/json-registry/store.js";
 import { createJsonRegistryRepository } from "../src/integrations/storage/json-registry/repository.js";
+import { createJsonLeaseRecordStore } from "../src/integrations/storage/json-registry/lease-record-store.js";
+import { createJsonRegistryRecoveryStore } from "../src/integrations/storage/json-registry/recovery-store.js";
+import { createFilesystemWorkspaceLeaseService } from "../src/integrations/worktree/filesystem/locks.js";
+import { createFilesystemWorkspacePreparationInspector } from "../src/integrations/worktree/filesystem/workspace-preparation-inspector.js";
 
 /**
  * Runner mission tests covering queueing, verification execution, review handoff,
@@ -27,7 +31,76 @@ import { createJsonRegistryRepository } from "../src/integrations/storage/json-r
 
 const execFileAsync = promisify(execFile);
 const registryRepository = createJsonRegistryRepository();
-const runLocalMission = (options) => runLocalMissionCore({ ...options, registryRepository: options?.registryRepository || registryRepository });
+const leaseRecordStore = createJsonLeaseRecordStore();
+const workspaceLeaseService = createFilesystemWorkspaceLeaseService({ registryRepository, leaseRecordStore });
+const registryRecoveryStore = createJsonRegistryRecoveryStore();
+const acquireWorkspaceLease = (registryRoot, runId, options = {}) => acquireWorkspaceLeaseWithPorts(registryRoot, runId, { ...options, registryRepository, leaseRecordStore });
+const recoverRegistry = (registryRoot, options = {}) => recoverRegistryCore(registryRoot, { ...options, registryRepository: options.registryRepository || registryRepository, workspaceLeaseService: options.workspaceLeaseService || workspaceLeaseService, registryRecoveryStore: options.registryRecoveryStore || registryRecoveryStore });
+const workspacePreparationInspector = createFilesystemWorkspacePreparationInspector();
+const runLocalMission = (options) => runLocalMissionCore({ ...options, registryRepository: options?.registryRepository || registryRepository, workspaceLeaseService: options?.workspaceLeaseService || workspaceLeaseService, workspacePreparationInspector: options?.workspacePreparationInspector || workspacePreparationInspector });
+
+
+test("run local mission accepts fake lease and workspace preparation seams", async () => {
+  const tempDir = await makeTempDir();
+  const registryRoot = path.join(tempDir, "registry");
+  const created = await createRunFromPacketReport(packetReport("run_fake_seams"), {
+    registryRoot,
+    clock: () => new Date("2026-05-16T13:52:00.000Z"),
+  });
+  const calls = { acquire: 0, inspect: 0 };
+  const fakeLeaseService = {
+    async acquire(root, runId, { workspaceId, workspacePath, actor = "fake-lease", clock = () => new Date() } = {}) {
+      calls.acquire += 1;
+      const paths = registryRepository.getRunPaths(root, runId);
+      const queued = await registryRepository.readRunSnapshot(paths.runPath);
+      const withLease = {
+        ...queued,
+        workspace: { id: workspaceId, path: workspacePath, lease_status: "acquired", lease_id: "fake-lease-id", expires_at: "2026-05-16T14:52:00.000Z" },
+        locks: { lease_status: "acquired", lease_id: "fake-lease-id", lock_keys: [] },
+      };
+      const transitioned = await registryRepository.commitRunTransition(paths.runDir, withLease, {
+        toState: "running",
+        actor,
+        evidence: { reason: "fake lease acquired" },
+        clock,
+      });
+      await registryRepository.rebuildIndexes(root, { clock });
+      return { status: "acquired", run: transitioned.run, lease: { lease_id: "fake-lease-id", workspace_id: workspaceId, workspace_path: workspacePath, expires_at: "2026-05-16T14:52:00.000Z", lock_keys: [] }, conflicts: [], rolled_back_records: 0 };
+    },
+    async release() { throw new Error("not used"); },
+    async recover(_root, snapshots) { return { snapshots, findings: [], active_lease_record_paths: [] }; },
+  };
+  const fakeWorkspacePreparationInspector = {
+    async inspect(workspacePath, { intendedBranch } = {}) {
+      calls.inspect += 1;
+      assert.equal(workspacePath, "/virtual/workspace");
+      return {
+        ok: true,
+        preparation_status: "ready",
+        artifact_path: "artifacts/workspace-preparation/fake.json",
+        content: `${JSON.stringify({ fake: true, intended_branch: intendedBranch })}\n`,
+        report: { workspace_snapshot_id: "fake-workspace-snapshot" },
+        warnings: [],
+      };
+    },
+  };
+
+  const result = await runLocalMissionCore({
+    registryRoot,
+    runId: created.run.run_id,
+    workspaceId: "fake-workspace",
+    workspacePath: "/virtual/workspace",
+    registryRepository,
+    workspaceLeaseService: fakeLeaseService,
+    workspacePreparationInspector: fakeWorkspacePreparationInspector,
+    clock: () => new Date("2026-05-16T13:53:00.000Z"),
+  });
+
+  assert.equal(calls.acquire, 1);
+  assert.equal(calls.inspect, 1);
+  assert.equal(result.workspace_preparation.status, "ready");
+  assert.equal(result.implementation_dispatch.status, "BLOCKED");
+});
 
 /** Creates a temp root that can host registries plus disposable git workspaces. */
 async function makeTempDir() {
@@ -525,6 +598,8 @@ test("run local report wrapper forwards stack prerequisites and formats side-eff
   });
 
   const result = await runLocalMissionReport({ registryRepository,
+    workspaceLeaseService,
+    workspacePreparationInspector,
     registryRoot,
     runId: nextRun.run.run_id,
     stackPrerequisite: {
@@ -2701,8 +2776,8 @@ test("local runner records a local SCM handoff projection handoff and advances h
   ]);
   assert.equal(result.projection.status, "projected_local");
   assert.equal(result.projection.handoff_target.projection_mode, "local_fake");
-  assert.match(result.projection.intent_artifact_ref.path, /^artifacts\/pr\/projection-intent-[a-f0-9]{16}\.json$/);
-  assert.match(result.projection.result_artifact_ref.path, /^artifacts\/pr\/projection-result-[a-f0-9]{16}\.json$/);
+  assert.match(result.projection.intent_artifact_ref.path, /^artifacts\/scm-handoff\/intent-[a-f0-9]{16}\.json$/);
+  assert.match(result.projection.result_artifact_ref.path, /^artifacts\/scm-handoff\/result-[a-f0-9]{16}\.json$/);
 
   const paths = getRunPaths(registryRoot, runId);
   const snapshot = await readRunSnapshot(paths.runPath);
@@ -2715,7 +2790,7 @@ test("local runner records a local SCM handoff projection handoff and advances h
   assert.equal(events.filter((event) => event.type === "transition").at(-1)?.state_after, "ready_for_manual_review");
 
   const projectionArtifact = JSON.parse(await fs.readFile(path.join(paths.runDir, result.projection.result_artifact_ref.path), "utf8"));
-  assert.equal(projectionArtifact.schema_version, "github-pr-projection-result.v1");
+  assert.equal(projectionArtifact.schema_version, "scm-handoff-result.v1");
   assert.equal(projectionArtifact.status, "projected_local");
   assert.equal(projectionArtifact.handoff_target.url, snapshot.handoff_target.url);
 });
@@ -2733,7 +2808,7 @@ test("transport-backed SCM handoff projection reuses a sanitized recorded result
     baseBranch,
   });
   let transportCalls = 0;
-  const prProjectionAdapter = createGithubPrTransportAdapter({
+  const scmHandoffAdapter = createGithubPrTransportAdapter({
     externalSideEffects: false,
     projectPr() {
       transportCalls += 1;
@@ -2752,7 +2827,7 @@ test("transport-backed SCM handoff projection reuses a sanitized recorded result
     registryRoot,
     runId,
     clock: () => new Date("2026-05-16T13:57:00.000Z"),
-    prProjectionAdapter,
+    scmHandoffAdapter,
   });
 
   assert.equal(first.outcome, "completed");
@@ -2779,7 +2854,7 @@ test("transport-backed SCM handoff projection reuses a sanitized recorded result
     registryRoot,
     runId,
     clock: () => new Date("2026-05-16T13:58:00.000Z"),
-    prProjectionAdapter,
+    scmHandoffAdapter,
   });
   const eventsAfterRetry = await readEventsFile(paths.eventsPath);
   const retriedSnapshot = await readRunSnapshot(paths.runPath);
@@ -2860,7 +2935,7 @@ test("transport-backed SCM handoff projection rejects PR URLs outside the config
   };
 
   for (const [name, url, number] of [
-    ["wrong host", "https://evil.example.com/example-owner/example-repo/pull/4242", 4242],
+    ["wrong host", "https://evil.example.com/example-owner/example-repo/target/4242", 4242],
     ["wrong repo", "https://github.com/other-owner/example-repo/pull/4242", 4242],
     ["wrong number", "https://github.com/example-owner/example-repo/pull/4243", 4242],
   ]) {
@@ -2901,7 +2976,7 @@ test("transport-backed SCM handoff projection rejects PR URLs outside the config
   });
   const enterprisePlan = enterpriseAdapter.plan(snapshot, { clock: () => new Date("2026-05-16T13:57:00.000Z"), actor: "runner-test" });
   const enterpriseProjection = await enterpriseAdapter.execute(snapshot, enterprisePlan);
-  assert.equal(enterpriseProjection.githubPr.url, "https://github.internal.example/example-owner/example-repo/pull/4242");
+  assert.equal(enterpriseProjection.handoffTarget.url, "https://github.internal.example/example-owner/example-repo/pull/4242");
 });
 
 
@@ -3261,17 +3336,17 @@ test("transport-backed SCM handoff projection blocks live transport without arti
     },
     projections: {},
   };
-  const prProjectionAdapter = createGithubPrTransportAdapter({
+  const scmHandoffAdapter = createGithubPrTransportAdapter({
     externalSideEffects: true,
     projectPr() {
       transportCalls += 1;
       return { status: "created", number: 99, url: "https://github.com/example-owner/example-repo/pull/99", draft: true };
     },
   });
-  const plan = prProjectionAdapter.plan(snapshot, { clock: () => new Date("2026-05-19T00:00:00.000Z"), actor: "test" });
+  const plan = scmHandoffAdapter.plan(snapshot, { clock: () => new Date("2026-05-19T00:00:00.000Z"), actor: "test" });
 
   await assert.rejects(
-    () => prProjectionAdapter.execute(snapshot, plan),
+    () => scmHandoffAdapter.execute(snapshot, plan),
     /verification PASS and internal-review PASS/i,
   );
   assert.equal(transportCalls, 0);
@@ -3296,7 +3371,7 @@ test("transport-backed SCM handoff projection preserves contract-valid repo and 
     },
     projections: {},
   };
-  const prProjectionAdapter = createGithubPrTransportAdapter({
+  const scmHandoffAdapter = createGithubPrTransportAdapter({
     externalSideEffects: false,
     projectPr() {
       return {
@@ -3310,16 +3385,16 @@ test("transport-backed SCM handoff projection preserves contract-valid repo and 
     },
   });
 
-  const plan = prProjectionAdapter.plan(snapshot, {
+  const plan = scmHandoffAdapter.plan(snapshot, {
     clock: () => new Date("2026-05-16T13:57:00.000Z"),
     actor: "runner-test",
   });
-  const projection = await prProjectionAdapter.execute(snapshot, plan);
+  const projection = await scmHandoffAdapter.execute(snapshot, plan);
 
   assert.equal(projection.result.status, "created");
-  assert.equal(projection.githubPr.repo, "example-owner/example-repo");
-  assert.equal(projection.githubPr.head_branch, "feature/[REDACTED_SECRET]<absolute_path>/private");
-  assert.equal(projection.githubPr.base_branch, "develop/[REDACTED_SECRET]");
+  assert.equal(projection.handoffTarget.repo, "example-owner/example-repo");
+  assert.equal(projection.handoffTarget.head_branch, "feature/[REDACTED_SECRET]<absolute_path>/private");
+  assert.equal(projection.handoffTarget.base_branch, "develop/[REDACTED_SECRET]");
   assert.equal(projection.result.handoff_target.repo, "example-owner/example-repo");
   assert.equal(projection.result.handoff_target.head_branch, "feature/[REDACTED_SECRET]<absolute_path>/private");
   assert.equal(projection.result.handoff_target.base_branch, "develop/[REDACTED_SECRET]");
@@ -3327,6 +3402,44 @@ test("transport-backed SCM handoff projection preserves contract-valid repo and 
   assert.match(plan.resultIdempotencyKey, /^handoff_target:[a-f0-9]{64}:result$/);
   assert.doesNotMatch(plan.intentIdempotencyKey, /(github_pat_|ghp_|glpat-|\/Users\/)/);
   assert.doesNotMatch(plan.resultIdempotencyKey, /(github_pat_|ghp_|glpat-|\/Users\/)/);
+});
+
+test("run CLI forwards configured SCM handoff adapter through runtime config", async () => {
+  const tempDir = await makeTempDir();
+  const registryRoot = path.join(tempDir, "registry");
+  const runId = await prepareHandoffReadyRun(registryRoot, tempDir, {
+    runId: "run_runner_cli_scm_handoff_config",
+  });
+  let adapterCalls = 0;
+  const scmHandoffAdapter = createGithubPrTransportAdapter({
+    externalSideEffects: false,
+    projectPr() {
+      adapterCalls += 1;
+      return {
+        status: "created",
+        number: 5150,
+        url: "https://github.com/example-owner/example-repo/pull/5150",
+        state: "open",
+        draft: false,
+        title: "Buran handoff for CLI-configured SCM adapter",
+      };
+    },
+  });
+
+  const result = await runBuranCli([
+    "run",
+    "--run", runId,
+    "--registry", registryRoot,
+    "--json",
+  ], {
+    pluginConfig: { scmHandoffAdapter },
+  });
+
+  assert.equal(adapterCalls, 1);
+  assert.equal(result.ok, true);
+  assert.equal(result.report.current_state, "ready_for_manual_review");
+  assert.equal(result.report.projection.adapter, "github-pr-transport-adapter");
+  assert.equal(result.report.projection.handoff_target.number, 5150);
 });
 
 test("local runner records sanitized projection payloads and safe idempotency keys for secret-like github contract fields", async () => {
@@ -3463,7 +3576,7 @@ test("local runner preserves structured GitHub transport blocker classifications
       runId: scenario.runId,
       repo: scenario.repo || "example-owner/example-repo",
     });
-    const prProjectionAdapter = createGithubPrTransportAdapter({
+    const scmHandoffAdapter = createGithubPrTransportAdapter({
       externalSideEffects: false,
       projectPr: scenario.projectPr(),
     });
@@ -3472,7 +3585,7 @@ test("local runner preserves structured GitHub transport blocker classifications
       registryRoot,
       runId,
       clock: () => new Date("2026-05-16T13:57:00.000Z"),
-      prProjectionAdapter,
+      scmHandoffAdapter,
     });
 
     assert.equal(result.outcome, "blocked", scenario.name);
@@ -3492,7 +3605,7 @@ test("transport-backed SCM handoff projection blocks on invalid transport result
   const runId = await prepareHandoffReadyRun(registryRoot, tempDir, {
     runId: "run_runner_pr_projection_transport_invalid",
   });
-  const prProjectionAdapter = createGithubPrTransportAdapter({
+  const scmHandoffAdapter = createGithubPrTransportAdapter({
     externalSideEffects: false,
     projectPr() {
       return {
@@ -3508,7 +3621,7 @@ test("transport-backed SCM handoff projection blocks on invalid transport result
     registryRoot,
     runId,
     clock: () => new Date("2026-05-16T13:57:00.000Z"),
-    prProjectionAdapter,
+    scmHandoffAdapter,
   });
 
   const paths = getRunPaths(registryRoot, runId);
@@ -3533,7 +3646,7 @@ test("transport-backed SCM handoff projection redacts invalid transport status i
     runId: "run_runner_pr_projection_transport_invalid_status",
   });
   const rawSecretStatus = "ghp_abcdefghijklmnopqrstuvwxyz123456 /Users/user/private/notes.txt";
-  const prProjectionAdapter = createGithubPrTransportAdapter({
+  const scmHandoffAdapter = createGithubPrTransportAdapter({
     externalSideEffects: false,
     projectPr() {
       return {
@@ -3551,7 +3664,7 @@ test("transport-backed SCM handoff projection redacts invalid transport status i
     registryRoot,
     runId,
     clock: () => new Date("2026-05-16T13:57:00.000Z"),
-    prProjectionAdapter,
+    scmHandoffAdapter,
   });
 
   const leakedFields = [

@@ -1,10 +1,10 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
-import { PLUGIN_ID, SCHEMA_VERSION } from "../execution-runs/constants.js";
-import { acquireWorkspaceLease, releaseWorkspaceLease } from "../integrations/worktree/filesystem/locks.js";
+import { PLUGIN_ID, SCHEMA_VERSION } from "../core/modules/execution-runs/constants.js";
+import { assertWorkspaceLeaseService } from "../core/modules/workspace-leases/ports/workspace-lease-service.js";
 import { normalizePacketList, summarizePacketReports } from "../approved-packets/sufficiency.js";
-import { assertRegistryRepository } from "../execution-runs/registry/index.js";
+import { assertRegistryRepository } from "../core/modules/execution-runs/ports/registry-repository.js";
 import { formatRecoveryReport, recoverRegistry } from "../execution-runs/recovery/index.js";
 import { runLocalMission } from "./run-local-mission.js";
 import { nonEmptyString, resolveMaybeRelative } from "../shared/primitives.js";
@@ -23,6 +23,20 @@ function configuredImplementationDispatchAdapter(config) {
   return candidates.find((candidate) => candidate && typeof candidate.execute === "function") || null;
 }
 
+function configuredScmHandoffAdapter(config) {
+  const candidates = [
+    config.scmHandoffAdapter,
+    config.scm_handoff_adapter,
+    config.scmHandoff?.adapter,
+    config.scm_handoff?.adapter,
+    config.prProjection?.scmHandoffAdapter,
+    config.prProjection?.adapter,
+    config.pr_projection?.scm_handoff_adapter,
+    config.pr_projection?.adapter,
+  ];
+  return candidates.find((candidate) => candidate && typeof candidate.plan === "function" && typeof candidate.execute === "function") || null;
+}
+
 export function normalizeBuranConfig(raw = {}, { workspaceDir = process.cwd(), stateDir = "" } = {}) {
   const config = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
   const configuredRoot = nonEmptyString(config.registryRoot);
@@ -32,6 +46,7 @@ export function normalizeBuranConfig(raw = {}, { workspaceDir = process.cwd(), s
   return {
     registryRoot: configuredRoot ? resolveMaybeRelative(workspaceDir, configuredRoot) : defaultRoot,
     implementationDispatchAdapter: configuredImplementationDispatchAdapter(config),
+    scmHandoffAdapter: configuredScmHandoffAdapter(config),
   };
 }
 
@@ -104,14 +119,15 @@ export function toPublicPacketReport(report) {
   };
 }
 
-export async function recoverRegistryReport({ registryRoot, registryRepository, clock = () => new Date() } = {}) {
+export async function recoverRegistryReport({ registryRoot, registryRepository, workspaceLeaseService, registryRecoveryStore, clock = () => new Date() } = {}) {
   const registry = assertRegistryRepository(registryRepository);
-  const report = await recoverRegistry(registryRoot, { clock, registryRepository: registry });
+  const report = await recoverRegistry(registryRoot, { clock, registryRepository: registry, workspaceLeaseService, registryRecoveryStore });
   return report;
 }
 
-export async function acquireLeaseReport({ registryRoot, runId, workspaceId, workspacePath = "", ttlMs, clock = () => new Date() } = {}) {
-  const result = await acquireWorkspaceLease(registryRoot, runId, {
+export async function acquireLeaseReport({ registryRoot, runId, workspaceId, workspacePath = "", ttlMs, workspaceLeaseService, clock = () => new Date() } = {}) {
+  const leases = assertWorkspaceLeaseService(workspaceLeaseService);
+  const result = await leases.acquire(registryRoot, runId, {
     workspaceId,
     workspacePath,
     ttlMs,
@@ -137,8 +153,9 @@ export async function acquireLeaseReport({ registryRoot, runId, workspaceId, wor
   };
 }
 
-export async function releaseLeaseReport({ registryRoot, runId, clock = () => new Date() } = {}) {
-  const result = await releaseWorkspaceLease(registryRoot, runId, { clock });
+export async function releaseLeaseReport({ registryRoot, runId, workspaceLeaseService, clock = () => new Date() } = {}) {
+  const leases = assertWorkspaceLeaseService(workspaceLeaseService);
+  const result = await leases.release(registryRoot, runId, { clock });
   return {
     schema_version: SCHEMA_VERSION,
     mode: "lease_release",
@@ -151,16 +168,19 @@ export async function releaseLeaseReport({ registryRoot, runId, clock = () => ne
   };
 }
 
-export async function runLocalMissionReport({ registryRoot, runId, workspaceId = "", workspacePath = "", ttlMs = "", clock = () => new Date(), implementationDispatchAdapter = null, registryRepository, stackPrerequisite = null } = {}) {
+export async function runLocalMissionReport({ registryRoot, runId, workspaceId = "", workspacePath = "", ttlMs = "", clock = () => new Date(), implementationDispatchAdapter = null, scmHandoffAdapter = null, registryRepository, workspaceLeaseService, workspacePreparationInspector, stackPrerequisite = null } = {}) {
   return runLocalMission({
     registryRoot,
     registryRepository,
+    workspaceLeaseService,
+    workspacePreparationInspector,
     runId,
     workspaceId,
     workspacePath,
     ttlMs,
     clock,
     ...(implementationDispatchAdapter ? { implementationDispatchAdapter } : {}),
+    ...(scmHandoffAdapter ? { scmHandoffAdapter } : {}),
     ...(stackPrerequisite ? { stackPrerequisite } : {}),
   });
 }
@@ -218,9 +238,9 @@ export function formatBuranReport(report) {
     if (report.projection) {
       const projection = report.projection;
       if (projection.result_artifact_ref?.path) {
-        lines.push(`PR projection: ${projection.status}; artifact=${projection.result_artifact_ref.path}`);
+        lines.push(`SCM handoff: ${projection.status}; artifact=${projection.result_artifact_ref.path}`);
       } else if (projection.problem?.code) {
-        lines.push(`PR projection: ${projection.status}; blocker=${projection.problem.code}`);
+        lines.push(`SCM handoff: ${projection.status}; blocker=${projection.problem.code}`);
       }
     }
     if (report.blockers?.length) {

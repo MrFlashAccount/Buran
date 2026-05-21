@@ -2,14 +2,14 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
-import { TERMINAL_STATES } from "../execution-runs/constants.js";
+import { TERMINAL_STATES } from "../core/modules/execution-runs/constants.js";
 import { IMPLEMENTATION_DISPATCH_ADAPTER, buildImplementationDispatchIntent, executeImplementationDispatch, implementationDispatchStatusSummary, isUnavailableImplementationDispatchResult, sanitizeImplementationDispatchEvidence, validateImplementationDispatchResultReport } from "../gates/implementation-contract.js";
 import { executeInternalReviewGate, sanitizeRecordedInternalReviewReport } from "../gates/internal-review-adapter.js";
 import { sanitizePublicReportForOutput } from "../observability/index.js";
-import { buildRecordedPrProjection, createLocalPrProjectionAdapter } from "../workflow-boundary/pr-scm-projection/local-journal-adapter.js";
+import { buildRecordedScmHandoff, createLocalScmHandoffAdapter } from "../core/modules/scm-handoff/services/local-journal-scm-handoff-adapter.js";
 import { executeVerificationGate } from "../gates/verification-adapter.js";
 import { evaluateReviewReadyPolicy } from "../stack-workflow/review-ready-policy.js";
-import { assertRegistryRepository } from "../execution-runs/registry/index.js";
+import { assertRegistryRepository } from "../core/modules/execution-runs/ports/registry-repository.js";
 import { canonicalJson, isRecord, nonEmptyString, sha256Hex } from "../shared/primitives.js";
 import { hasActiveLease } from "./mission-context.js";
 import { buildIssue, buildRunnerReport, buildStep, implementationBoundaryMessage, internalReviewTransition, internalReviewTransitionReason, leaseRequiredMessage, projectionProblemCode, projectionTransitionReason, sanitizeImplementationDispatchProblem, unsupportedStageMessage, verificationTransition, verificationTransitionReason } from "./final-report.js";
@@ -539,7 +539,7 @@ export async function runFixLoopStage({ registryRoot, runId, current, previousSt
  * @param {string} [params.actor=RUNNER_ACTOR] Actor name recorded on state transitions and artifacts.
  * @param {{adapter?: string, execute(options: object): Promise<object>}} [params.implementationDispatchAdapter=createUnavailableImplementationDispatchAdapter()]
  * Implementation-dispatch adapter invoked from `running` only when no current result artifact can be safely reused.
- * @param {{plan(snapshot: object, options?: object): object, execute(snapshot: object, plan: object, options?: object): Promise<object>, externalSideEffects?: boolean}} [params.prProjectionAdapter=createLocalPrProjectionAdapter()]
+ * @param {{plan(snapshot: object, options?: object): object, execute(snapshot: object, plan: object, options?: object): Promise<object>, externalSideEffects?: boolean}} [params.scmHandoffAdapter=createLocalScmHandoffAdapter()]
  * Projection adapter used when the run reaches `handoff_ready`.
  * @returns {Promise<object>} Sanitized public runner report describing completed work, blockers, and current state.
  * @throws {Error} When required identifiers are missing or an unexpected storage/adapter error occurs.
