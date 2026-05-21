@@ -86,13 +86,11 @@ export default defineLocalPluginEntry({
 
 export { parseBuranArgs, runBuranCli, usageText } from "./src/entrypoints/cli.js";
 export { acquireLeaseReport, formatBuranReport, intakePacketListFile, normalizeBuranConfig, recoverRegistryReport, releaseLeaseReport, runLocalMissionReport, validatePacketListFile } from "./src/application/commands.js";
-export { acquireWorkspaceLease, releaseWorkspaceLease } from "./src/integrations/worktree/filesystem/locks.js";
 export { normalizePacket, normalizePacketList, summarizePacketReports } from "./src/approved-packets/sufficiency.js";
 export { createInvocationObserver, normalizeObservabilityConfig, sanitizeError, sanitizeForObservability } from "./src/observability/index.js";
 export { recoverRegistry } from "./src/execution-runs/recovery/index.js";
 export { createGithubCliPrProjectionAdapter, createGithubCliProjectPr, createGithubPrTransportAdapter } from "./src/integrations/scm/github/pr-transport-adapter.js";
-export { buildLocalPrProjection, buildRecordedPrProjection, buildPrProjectionPlan, buildPrProjectionResult, createLocalPrProjectionAdapter } from "./src/workflow-boundary/pr-scm-projection/local-journal-adapter.js";
 export { runLocalMission } from "./src/application/run-local-mission.js";
 export { assertNextSliceAllowed, evaluateReviewReadyPolicy } from "./src/stack-workflow/review-ready-policy.js";
-export { appendRunEvent, createBatchFromPacketReports, createRunFromPacketReport, getRegistryPaths, rebuildIndexes, transitionRun, writeJsonAtomic } from "./src/execution-runs/registry/index.js";
+export { REGISTRY_REPOSITORY_METHODS, REGISTRY_REPOSITORY_PORT, assertRegistryRepository, createRegistryRepositoryContract } from "./src/execution-runs/registry/index.js";
 export { assertTransitionAllowed, getAllowedTransitions, isTerminalState, validateTransition } from "./src/execution-runs/state-machine.js";

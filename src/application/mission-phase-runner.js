@@ -9,7 +9,7 @@ import { sanitizePublicReportForOutput } from "../observability/index.js";
 import { buildRecordedPrProjection, createLocalPrProjectionAdapter } from "../workflow-boundary/pr-scm-projection/local-journal-adapter.js";
 import { executeVerificationGate } from "../gates/verification-adapter.js";
 import { evaluateReviewReadyPolicy } from "../stack-workflow/review-ready-policy.js";
-import { readRunSnapshot, recordArtifact, recordGateResult, recordProjectionIntent, recordProjectionResult, transitionRun } from "../execution-runs/registry/index.js";
+import { assertRegistryRepository } from "../execution-runs/registry/index.js";
 import { canonicalJson, isRecord, nonEmptyString, sha256Hex } from "../shared/primitives.js";
 import { inspectWorkspacePreparation } from "../integrations/worktree/filesystem/workspace-preparation.js";
 import { hasActiveLease } from "./mission-context.js";
@@ -171,6 +171,7 @@ export async function runImplementationDispatchStage({ runContext = {}, reportSt
     actor = RUNNER_ACTOR,
     implementationDispatchAdapter = createUnavailableImplementationDispatchAdapter(),
   } = services;
+  const registry = assertRegistryRepository(services.registryRepository);
   if (!hasActiveLease(current)) {
     warnings.push(buildIssue("lease_not_active", `Run ${runId} is in running without an active local lease snapshot.`));
     blockers.push(buildIssue("lease_required", leaseRequiredMessage(runId)));
@@ -191,7 +192,7 @@ export async function runImplementationDispatchStage({ runContext = {}, reportSt
       warnings.push(...(inspected.warnings || []));
     } else {
       const recordedAt = clock().toISOString();
-      const recorded = await recordArtifact(registryRoot, runId, {
+      const recorded = await registry.recordArtifact(registryRoot, runId, {
         artifactPath: inspected.artifact_path,
         content: inspected.content,
         gate_name: "workspace_preparation",
@@ -229,7 +230,7 @@ export async function runImplementationDispatchStage({ runContext = {}, reportSt
       const dispatchIntent = buildImplementationDispatchIntent(current, {
         workspacePreparationArtifactRef: recorded.artifact_ref,
       });
-      const dispatchRecorded = await recordArtifact(registryRoot, runId, {
+      const dispatchRecorded = await registry.recordArtifact(registryRoot, runId, {
         artifactPath: dispatchIntent.artifactPath,
         content: `${JSON.stringify(dispatchIntent.intent, null, 2)}\n`,
         gate_name: "implementation_dispatch",
@@ -318,7 +319,7 @@ export async function runImplementationDispatchStage({ runContext = {}, reportSt
           adapter: implementationDispatchAdapter,
           clock,
         });
-        dispatchResultRecorded = await recordArtifact(registryRoot, runId, {
+        dispatchResultRecorded = await registry.recordArtifact(registryRoot, runId, {
           artifactPath: dispatchResult.artifact_path,
           content: dispatchResult.artifact_content,
           gate_name: "implementation_dispatch",
@@ -356,7 +357,7 @@ export async function runImplementationDispatchStage({ runContext = {}, reportSt
       const dispatchStatus = implementationDispatch?.status;
       const dispatchAdapter = dispatchResult?.adapter || implementationDispatch?.adapter || IMPLEMENTATION_DISPATCH_ADAPTER;
       if (dispatchStatus === "COMPLETED") {
-        const transitioned = await transitionRun(registryRoot, runId, {
+        const transitioned = await registry.transitionRun(registryRoot, runId, {
           toState: "verification",
           actor,
           evidence: {
@@ -383,7 +384,7 @@ export async function runImplementationDispatchStage({ runContext = {}, reportSt
           artifactSha256: implementationDispatch.result_artifact_ref.sha256,
         }));
       } else if (dispatchStatus === "FAILED") {
-        const transitioned = await transitionRun(registryRoot, runId, {
+        const transitioned = await registry.transitionRun(registryRoot, runId, {
           toState: "failed_execution",
           actor,
           evidence: {

@@ -9,11 +9,31 @@ import { sanitizePublicReportForOutput } from "../observability/index.js";
 import { buildRecordedPrProjection, createLocalPrProjectionAdapter } from "../workflow-boundary/pr-scm-projection/local-journal-adapter.js";
 import { executeVerificationGate } from "../gates/verification-adapter.js";
 import { evaluateReviewReadyPolicy } from "../stack-workflow/review-ready-policy.js";
-import { readRunSnapshot, recordArtifact, recordGateResult, recordProjectionIntent, recordProjectionResult, transitionRun } from "../execution-runs/registry/index.js";
+import { assertRegistryRepository } from "../execution-runs/registry/index.js";
 import { canonicalJson, isRecord, nonEmptyString, sha256Hex } from "../shared/primitives.js";
 import { hasActiveLease } from "./mission-context.js";
 import { buildIssue, buildRunnerReport, buildStep, implementationBoundaryMessage, internalReviewTransition, internalReviewTransitionReason, leaseRequiredMessage, projectionProblemCode, projectionTransitionReason, unsupportedStageMessage, verificationTransition, verificationTransitionReason } from "./final-report.js";
 
+
+function toHandoffTarget(githubPr) {
+  if (!isRecord(githubPr)) return null;
+  return {
+    provider: "github",
+    kind: "pull_request",
+    number: githubPr.number,
+    url: githubPr.url,
+    repo: githubPr.repo,
+    issue_number: githubPr.issue_number ?? null,
+    head_branch: githubPr.head_branch,
+    base_branch: githubPr.base_branch,
+    state: githubPr.state,
+    draft: githubPr.draft,
+    title: githubPr.title,
+    projection_mode: githubPr.projection_mode || "",
+    projected_at: githubPr.projected_at || null,
+    actor: githubPr.actor || "",
+  };
+}
 function sanitizeRunnerReportMessage(message) {
   const sanitized = sanitizePublicReportForOutput(nonEmptyString(message), []);
   return nonEmptyString(sanitized) || "Sensitive error details were redacted from the local runner report.";
@@ -32,12 +52,13 @@ function projectionProblemFromError(error) {
   }
   if (code.startsWith("projection_github_")) return buildProjectionProblem(code.slice("projection_".length), message);
   if (/different hash/i.test(message)) {
-    return buildProjectionProblem("artifact_corrupt", `Recorded PR projection cannot be resumed because its local artifact is corrupt: ${message}`);
+    return buildProjectionProblem("artifact_corrupt", `Recorded SCM handoff projection cannot be resumed because its local artifact is corrupt: ${message}`);
   }
-  return buildProjectionProblem("record_failed", `PR projection handoff could not be recorded locally: ${message}`);
+  return buildProjectionProblem("record_failed", `SCM handoff projection handoff could not be recorded locally: ${message}`);
 }
 
-export async function runPrReadyStage({ registryRoot, runId, current, previousState, stepsTaken, blockers, warnings, workspacePreparation, implementationDispatch, verification, internalReview, clock, actor, prProjectionAdapter = createLocalPrProjectionAdapter() } = {}) {
+export async function runPrReadyStage({ registryRoot, runId, current, previousState, stepsTaken, blockers, warnings, workspacePreparation, implementationDispatch, verification, internalReview, clock, actor, prProjectionAdapter = createLocalPrProjectionAdapter(), registryRepository } = {}) {
+  const registry = assertRegistryRepository(registryRepository);
   let projection = null;
   let plannedProjection;
   let intentArtifactRef = null;
@@ -47,13 +68,13 @@ export async function runPrReadyStage({ registryRoot, runId, current, previousSt
   try {
     plannedProjection = prProjectionAdapter.plan(current, { clock, actor });
     projectionExternalSideEffects = Boolean(plannedProjection.externalSideEffects);
-    const intentRecorded = await recordProjectionIntent(registryRoot, runId, {
+    const intentRecorded = await registry.recordProjectionIntent(registryRoot, runId, {
       projection_name: plannedProjection.projectionName,
       projection_target: plannedProjection.projectionTarget,
       adapter: plannedProjection.adapter,
       mode: plannedProjection.mode,
       execution_epoch: plannedProjection.executionEpoch,
-      recorded_from_state: "pr_ready",
+      recorded_from_state: "handoff_ready",
       idempotency_key: plannedProjection.intentIdempotencyKey,
       artifactPath: plannedProjection.intentArtifactPath,
       content: plannedProjection.intentArtifactContent,
@@ -66,11 +87,11 @@ export async function runPrReadyStage({ registryRoot, runId, current, previousSt
     stepsTaken.push(buildStep({
       action: "projection_intent_recorded",
       status: intentRecorded.status === "noop" ? "noop" : "completed",
-      fromState: "pr_ready",
-      toState: "pr_ready",
+      fromState: "handoff_ready",
+      toState: "handoff_ready",
       detail: projectionExternalSideEffects
-        ? "PR projection intent was recorded locally before the transport-backed handoff."
-        : "PR projection intent was recorded locally without a remote GitHub write.",
+        ? "SCM handoff projection intent was recorded locally before the transport-backed handoff."
+        : "SCM handoff projection intent was recorded locally without a remote GitHub write.",
       sequence: intentRecorded.event?.sequence ?? null,
       artifactPath: intentRecorded.artifact_ref.path,
       artifactSha256: intentRecorded.artifact_ref.sha256,
@@ -89,17 +110,17 @@ export async function runPrReadyStage({ registryRoot, runId, current, previousSt
       projectionExternalSideEffects = Boolean(plannedProjection.externalSideEffects);
     }
 
-    const resultRecorded = await recordProjectionResult(registryRoot, runId, {
+    const resultRecorded = await registry.recordProjectionResult(registryRoot, runId, {
       projection_name: plannedProjection.projectionName,
       projection_target: plannedProjection.projectionTarget,
       adapter: plannedProjection.adapter,
       mode: plannedProjection.mode,
       execution_epoch: plannedProjection.executionEpoch,
-      recorded_from_state: "pr_ready",
+      recorded_from_state: "handoff_ready",
       idempotency_key: plannedProjection.resultIdempotencyKey,
       intent_idempotency_key: plannedProjection.intentIdempotencyKey,
       status: plannedProjection.result.status,
-      github_pr: plannedProjection.githubPr,
+      handoff_target: toHandoffTarget(plannedProjection.githubPr),
       artifactPath: plannedProjection.resultArtifactPath,
       content: plannedProjection.resultArtifactContent,
       actor: plannedProjection.actor,
@@ -116,11 +137,11 @@ export async function runPrReadyStage({ registryRoot, runId, current, previousSt
     stepsTaken.push(buildStep({
       action: "projection_result_recorded",
       status: resultRecorded.status === "noop" ? "noop" : "completed",
-      fromState: "pr_ready",
-      toState: "pr_ready",
+      fromState: "handoff_ready",
+      toState: "handoff_ready",
       detail: projectionExternalSideEffects
-        ? "PR projection result was recorded locally after the transport-backed PR handoff."
-        : "PR projection result was recorded locally and mirrored into github.pr without a remote GitHub write.",
+        ? "SCM handoff projection result was recorded locally after the transport-backed PR handoff."
+        : "SCM projection result was recorded locally and mirrored into handoff_target without a remote write.",
       sequence: resultRecorded.event?.sequence ?? null,
       artifactPath: resultRecorded.artifact_ref.path,
       artifactSha256: resultRecorded.artifact_ref.sha256,
@@ -142,8 +163,8 @@ export async function runPrReadyStage({ registryRoot, runId, current, previousSt
     stepsTaken.push(buildStep({
       action: "projection_result_recorded",
       status: "blocked",
-      fromState: "pr_ready",
-      toState: "pr_ready",
+      fromState: "handoff_ready",
+      toState: "handoff_ready",
       detail: problem.message,
     }));
     return buildRunnerReport({
@@ -164,7 +185,7 @@ export async function runPrReadyStage({ registryRoot, runId, current, previousSt
     });
   }
 
-  const transitioned = await transitionRun(registryRoot, runId, {
+  const transitioned = await registry.transitionRun(registryRoot, runId, {
     toState: "ready_for_manual_review",
     actor,
     evidence: {
@@ -175,7 +196,7 @@ export async function runPrReadyStage({ registryRoot, runId, current, previousSt
         execution_epoch: plannedProjection.executionEpoch,
         intent_idempotency_key: plannedProjection.intentIdempotencyKey,
         result_idempotency_key: plannedProjection.resultIdempotencyKey,
-        github_pr: plannedProjection.githubPr,
+        handoff_target: toHandoffTarget(plannedProjection.githubPr),
         result_artifact_ref: projection.result_artifact_ref,
       },
     },
@@ -185,9 +206,9 @@ export async function runPrReadyStage({ registryRoot, runId, current, previousSt
   stepsTaken.push(buildStep({
     action: "transition",
     status: "completed",
-    fromState: "pr_ready",
+    fromState: "handoff_ready",
     toState: current.state,
-    detail: "Recorded PR projection handoff advanced the run to ready_for_manual_review.",
+    detail: "Recorded SCM handoff projection handoff advanced the run to ready_for_manual_review.",
     sequence: transitioned.event.sequence,
     artifactPath: projection.result_artifact_ref.path,
     artifactSha256: projection.result_artifact_ref.sha256,

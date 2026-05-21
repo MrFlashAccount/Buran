@@ -89,7 +89,7 @@ export function normalizePacket(rawPacket, { index = 0, sourcePath = "" } = {}) 
       task_id: taskId,
       safe_task_id: safeTaskId,
       source_path: sourcePath,
-      github: {},
+      scm_target: {},
       approval: {},
       scope: { goal: "", non_goals: [], acceptance_criteria: [] },
       implementation_instructions: "",
@@ -105,7 +105,8 @@ export function normalizePacket(rawPacket, { index = 0, sourcePath = "" } = {}) 
     };
   }
 
-  const github = isRecord(rawPacket.github) ? rawPacket.github : {};
+  const profile = isRecord(rawPacket.github) ? rawPacket.github : {};
+  const scm = isRecord(rawPacket.scm_target) ? rawPacket.scm_target : profile;
   const taskId = firstNonEmpty(rawPacket.task_id, rawPacket.taskId, rawPacket.id) || `packet-${index + 1}`;
   const normalized = {
     schema_version: SCHEMA_VERSION,
@@ -113,11 +114,12 @@ export function normalizePacket(rawPacket, { index = 0, sourcePath = "" } = {}) 
     task_id: taskId,
     safe_task_id: safeIdPart(taskId, `packet-${index + 1}`),
     source_path: sourcePath,
-    github: {
-      repo: firstNonEmpty(github.repo, rawPacket.repo),
-      issue_number: normalizeIssueNumber(github.issue_number ?? github.issueNumber ?? rawPacket.issue_number ?? rawPacket.issueNumber ?? rawPacket.issue),
-      intended_branch: firstNonEmpty(github.intended_branch, github.intendedBranch, github.branch, rawPacket.branch, rawPacket.intended_branch, rawPacket.intendedBranch),
-      base_branch: firstNonEmpty(github.base_branch, github.baseBranch, github.base, rawPacket.base_branch, rawPacket.baseBranch, rawPacket.base),
+    scm_target: {
+      provider: firstNonEmpty(scm.provider, rawPacket.provider, profile.provider) || "github",
+      repo: firstNonEmpty(scm.repo, profile.repo, rawPacket.repo),
+      issue_number: normalizeIssueNumber(scm.issue_number ?? scm.issueNumber ?? profile.issue_number ?? profile.issueNumber ?? rawPacket.issue_number ?? rawPacket.issueNumber ?? rawPacket.issue),
+      intended_branch: firstNonEmpty(scm.intended_branch, scm.intendedBranch, scm.branch, profile.intended_branch, profile.intendedBranch, profile.branch, rawPacket.branch, rawPacket.intended_branch, rawPacket.intendedBranch),
+      base_branch: firstNonEmpty(scm.base_branch, scm.baseBranch, scm.base, profile.base_branch, profile.baseBranch, profile.base, rawPacket.base_branch, rawPacket.baseBranch, rawPacket.base),
     },
     approval: normalizeApproval(rawPacket),
     scope: normalizeScope(rawPacket),
@@ -130,9 +132,9 @@ export function normalizePacket(rawPacket, { index = 0, sourcePath = "" } = {}) 
 
   const missing = [];
   if (!normalized.approval.approved) missing.push("approval.approved");
-  if (!normalized.github.repo) missing.push("github.repo");
-  if (!normalized.github.issue_number) missing.push("github.issue_number");
-  if (!normalized.github.intended_branch) missing.push("github.intended_branch");
+  if (!normalized.scm_target.repo) missing.push("scm_target.repo");
+  if (!normalized.scm_target.issue_number) missing.push("scm_target.issue_number");
+  if (!normalized.scm_target.intended_branch) missing.push("scm_target.intended_branch");
   if (!normalized.scope.goal && normalized.scope.acceptance_criteria.length === 0) missing.push("scope.goal_or_acceptance_criteria");
   if (!normalized.implementation_instructions) missing.push("implementation.instructions");
   if (!normalized.verification.expectations && normalized.verification.commands.length === 0) missing.push("verification.expectations_or_commands");

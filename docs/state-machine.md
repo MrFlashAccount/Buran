@@ -1,8 +1,8 @@
 # Execution State Machine
 
-Buran executes only approved implementation packets. State is local-first: each transition is recorded in `events.jsonl` and reflected in `run.json`.
+Buran executes only approved `work_item` packets. State is local-first: each transition is recorded through the registry contract and reflected in the run snapshot. The current storage adapter persists `events.jsonl` and `run.json`; core transition rules do not depend on concrete JSON/filesystem storage.
 
-`pr_ready` means ready-for-PR creation/update: verification and internal review have passed, but PR creation has not happened yet. The `pr_ready` -> `ready_for_manual_review` transition records a deterministic projection handoff. By default this is a fake/local projection without a network write; when an embedding caller injects the GitHub CLI transport, Buran records local intent first, creates or updates the exact stacked PR, validates the returned PR payload, and records the result before transitioning.
+`pr_ready` is the current GitHub-profile name for ready-to-project-handoff: verification and internal review have passed, but the `handoff_target` projection has not happened yet. The `pr_ready` -> `ready_for_manual_review` transition records a deterministic `projection_ledger` handoff. By default this is a fake/local projection without a network write; when an embedding caller injects the GitHub CLI transport, Buran records local intent first, creates or updates the exact stacked PR, validates the returned adapter payload, and records the result before transitioning.
 
 Gate-bearing states are epoch-aware in `execution-run.v2`: entering `verification` from `running` or `fix_loop` increments `execution.current_epoch` and resets both gate heads to `PENDING` for the new epoch.
 
@@ -26,7 +26,7 @@ stateDiagram-v2
   internal_review --> blocked_needs_human: internal review BLOCKED
   fix_loop --> verification: completed fix attempt
   fix_loop --> blocked_needs_human: bounds exhausted or envelope exceeded
-  pr_ready --> ready_for_manual_review: PR created/updated
+  pr_ready --> ready_for_manual_review: handoff_target projected
   ready_for_manual_review --> [*]
   blocked_plan_insufficient --> [*]
   blocked_lock_conflict --> [*]
@@ -51,10 +51,10 @@ Engine rules:
 
 | From | To | Required evidence |
 | --- | --- | --- |
-| `packet_received` | `queued` | Approved packet has issue/repo, branch plan, implementation instructions, verification expectations, review criteria, and conflict surface. |
+| `packet_received` | `queued` | Approved packet has `work_item` identity, `scm_target`, branch plan, implementation instructions, verification expectations, review criteria, and conflict surface. |
 | `packet_received` | `blocked_plan_insufficient` | Missing or contradictory packet data. Buran must not invent missing architecture/scope. |
 | `queued` | `waiting_for_lock` | Run accepted into a manual batch. |
-| `waiting_for_lock` | `running` | Workspace lease acquired for workspace, repo, issue, branch, and conflict surface. |
+| `waiting_for_lock` | `running` | Workspace lease acquired for workspace, repo checkout, `scm_target`, branch, and conflict surface. |
 | `waiting_for_lock` | `blocked_lock_conflict` | Another active run owns an overlapping lease. |
 | `running` | `verification` | A sanitized implementation-dispatch `result-*` artifact for the current epoch reports `COMPLETED` and includes durable changed-file evidence plus a durable result reference. |
 | `running` | `failed_execution` | A sanitized implementation-dispatch `result-*` artifact for the current epoch reports `FAILED`, indicating unrecoverable implementation failure inside the approved envelope. |
@@ -66,11 +66,11 @@ Engine rules:
 | `internal_review` | `blocked_needs_human` | Fresh internal-review gate head for the current epoch is `BLOCKED`, either because the independent verdict artifact returned `BLOCKED` or because valid independent verdict evidence is missing/invalid, so human/manual intervention is still required. |
 | `fix_loop` | `verification` | A sanitized `fix_attempt` result artifact for the current epoch reports `COMPLETED`, includes durable changed-file evidence plus a durable result reference, and remains inside the approved packet envelope. Entering `verification` starts a fresh gate epoch. |
 | `fix_loop` | `blocked_needs_human` | Required fix exceeds the approved packet, needs new architecture/planning, or the bounded completed fix-attempt count is exhausted. |
-| `pr_ready` | `ready_for_manual_review` | A coherent PR projection result is recorded in the local journal for the current epoch; the default local adapter may satisfy this with a fake/local handoff artifact, while an explicitly enabled GitHub CLI transport must create/update the exact stacked head/base PR and return a contract-valid result. |
+| `pr_ready` | `ready_for_manual_review` | A coherent `handoff_target` projection result is recorded in the local `projection_ledger` for the current epoch; the default local adapter may satisfy this with a fake/local handoff artifact, while the current explicitly enabled GitHub CLI adapter must create/update the exact stacked head/base PR and return a contract-valid result. |
 
 ## Gate rules
 
-- PR creation is forbidden unless verification is `PASS` and internal review is `PASS` for the current epoch and current attempts.
+- Handoff projection is forbidden unless verification is `PASS` and internal review is `PASS` for the current epoch and current attempts.
 - Gate results are recorded through `gate.result_recorded`; same idempotency key plus same payload is a no-op, while same key plus different payload is invalid.
 - Verification/internal-review artifacts are recorded through `artifact.recorded` with immutable relative paths and epoch/attempt provenance.
 - Fix-loop attempts are recorded through the `fix_attempt` artifact stage while the run is in `fix_loop`: an intent artifact is recorded before implementation-harness dispatch, and a sanitized result artifact is recorded after dispatch or reused on resume.
@@ -87,8 +87,8 @@ Engine rules:
 
 - Target parallelism: 3–4 workspaces.
 - There is no global lock.
-- Lease keys must include workspace, repo checkout, issue, branch, and declared conflict surface.
-- Repo checkout locks are scoped to the reserved workspace path so separate workspaces may hold separate local checkouts for the same repo when issue/branch/conflict-surface keys do not overlap.
+- Lease keys must include workspace, repo checkout, `scm_target`, branch, and declared conflict surface.
+- Repo checkout locks are scoped to the reserved workspace path so separate workspaces may hold separate local checkouts for the same repo when `scm_target`/branch/conflict-surface keys do not overlap.
 - Conservative conflict detection wins over throughput.
 - Locks are released only after terminal state or explicit recovery marks the previous lease stale.
 - Lease TTL expiry is recovered locally by marking the owning run lease `stale_recovered`, removing local lease records, and reporting the recovery finding; recovery does not silently guess active ownership.
@@ -108,7 +108,7 @@ Any attempted transition from one of these states is invalid. Recovery treats te
 
 ## Stack progression policy
 
-A next stacked slice may start only after the prerequisite slice is locally review-ready. The policy is evaluated from durable registry evidence: approved packet/architect contract artifact, completed implementation dispatch/fix result artifact, fresh verification PASS, fresh independent-review PASS, successful PR projection, and terminal `ready_for_manual_review` state. If recovery rebuilds an incomplete prerequisite snapshot, the same policy remains blocked; recovery does not synthesize missing gates or treat remote PR state as authority.
+A next stacked slice may start only after the prerequisite slice is locally review-ready. The policy is evaluated from durable registry evidence: approved packet/architect contract artifact, completed implementation dispatch/fix result artifact, fresh verification PASS, fresh independent-review PASS, successful `handoff_target` projection, and terminal `ready_for_manual_review` state. If recovery rebuilds an incomplete prerequisite snapshot, the same policy remains blocked; recovery does not synthesize missing gates or treat remote provider state as authority.
 
 ## Event ordering
 

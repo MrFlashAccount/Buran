@@ -123,6 +123,9 @@ for (const file of jsFiles) {
       if (/^src\/integrations\/(scm\/github|implementation\/codex|runtime\/openclaw)\//.test(resolved)) {
         failures.push(`${fileRel} imports concrete provider integration ${resolved}`);
       }
+      if (/^src\/integrations\/storage\/json-registry\//.test(resolved)) {
+        failures.push(`${fileRel} imports concrete JSON registry storage ${resolved}`);
+      }
     }
     if (/^src\/integrations\//.test(fileRel) && !/^src\/integrations\/storage\/json-registry\//.test(fileRel)) {
       if (/^src\/integrations\/storage\/json-registry\/(?!store\.js|path-layout\.js|event-journal\.js|atomic-read-write\.js|fs-atomic\.js)/.test(resolved)) {

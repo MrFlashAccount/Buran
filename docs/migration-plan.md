@@ -1,6 +1,6 @@
 # Migration Plan
 
-The target is a new narrow plugin under `plugins/buran/`. Existing `plugins/background-worker` and `scripts/github-*queue` code are legacy/reference only during this package. Do not edit them as part of architecture package creation.
+The target is a new narrow provider-neutral execution plugin under `plugins/buran/`. Existing `plugins/background-worker` and `scripts/github-*queue` code are legacy/reference only for the current OpenClaw/GitHub profile during this package. Do not edit them as part of architecture package creation.
 
 ## Slice 0 — Architecture package
 
@@ -17,11 +17,11 @@ Exit criteria: docs state the selected direction, boundaries, schema/state/proje
 
 ## Slice 1 — Skeleton plugin boundary
 
-Create the minimal plugin entrypoint and configuration shape without executing tasks.
+Create the minimal plugin entrypoint and configuration shape without executing `work_item`s.
 
 Exit criteria:
 
-- command/interface accepts an explicit approved packet list;
+- command/interface accepts an explicit approved `work_item` packet list;
 - no autonomous discovery;
 - no remote writes;
 - dry validation can report packet sufficiency.
@@ -43,7 +43,7 @@ Rollback: preserve registry folder for inspection; disable command path.
 
 ## Slice 3 — State machine and locks
 
-Implement lifecycle transitions and workspace/repo/issue/branch/conflict-surface leases.
+Implement lifecycle transitions and workspace/repo checkout/`scm_target`/branch/conflict-surface leases.
 
 Exit criteria:
 
@@ -63,23 +63,23 @@ Exit criteria:
 - execution stays inside approved packet envelope;
 - verification artifacts are recorded;
 - review artifacts are recorded;
-- PR creation remains impossible unless both gates pass.
+- handoff projection remains impossible unless both gates pass.
 
 Rollback: leave branch/workspace for manual inspection; mark run blocked or failed locally.
 
-## Slice 5 — GitHub/TaskFlow projection
+## Slice 5 — Provider projection profile
 
-Add idempotent projection adapter for comments/status/project fields and PR creation.
+Add idempotent projection adapters for provider-specific tracker/review surfaces and handoff target creation/update. The current profile maps this to GitHub/TaskFlow comments, status/project fields, and PR creation.
 
 Exit criteria:
 
-- local JSON remains authoritative;
+- local registry state remains authoritative; JSON is the current storage adapter, not the core contract;
 - projection attempts/results are logged;
 - missing/stale projections can be repaired;
-- PR is created only after verification `PASS` and internal review `PASS`;
+- handoff target is created/updated only after verification `PASS` and internal review `PASS`;
 - terminal handoff is `Ready for Manual Review`.
 
-Rollback: disable projector; use local state to audit or manually clean remote projections.
+Rollback: disable projector; use local registry state to audit or manually clean remote projections.
 
 ## Slice 6 — Legacy retirement checks
 
@@ -95,8 +95,8 @@ Rollback: revert only the cleanup slice; the new plugin remains local-state auth
 
 ## Migration risks
 
-- Remote projection drift: mitigate with idempotency keys and repair from local JSON.
+- Remote projection drift: mitigate with idempotency keys and repair from local registry state.
 - Over-parallel execution conflicts: mitigate with conservative conflict-surface locks.
 - Weak packet quality: mitigate by blocking as `blocked_plan_insufficient`.
 - Hidden dependency on legacy queues: mitigate by keeping migration slices small and reviewable.
-- Gate bypass pressure: enforce PR creation checks in the application workflow and projector.
+- Gate bypass pressure: enforce handoff projection checks in the application workflow and projector.

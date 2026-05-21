@@ -96,7 +96,7 @@ export function verificationTransition(status) {
 }
 
 export function internalReviewTransition(status) {
-  if (status === "PASS") return "pr_ready";
+  if (status === "PASS") return "handoff_ready";
   if (status === "FAIL") return "fix_loop";
   return "blocked_needs_human";
 }

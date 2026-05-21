@@ -9,12 +9,6 @@ import {
   TERMINAL_STATES,
   TRANSITION_METADATA,
 } from "./constants.js";
-import {
-  appendGithubPrContractErrors,
-  appendGithubPrValidationErrors,
-  appendProjectedPrParityErrors,
-  isSuccessfulProjectionResultStatus,
-} from "../workflow-boundary/pr-scm-projection/contract.js";
 import { isRecord, nonEmptyString } from "../shared/primitives.js";
 
 /**
@@ -98,27 +92,26 @@ function freshGateStatus(snapshot, gateName, acceptedStatuses) {
   return gate.current_epoch === currentEpoch && Number.isSafeInteger(gate.current_attempt) && gate.current_attempt >= 1;
 }
 
-function hasRecordedPrProjection(snapshot) {
+function isSuccessfulProjectionLedgerStatus(status) {
+  return ["projected_local", "projected", "created", "updated"].includes(nonEmptyString(status));
+}
+
+function hasRecordedHandoffProjection(snapshot) {
   const currentEpoch = snapshot?.execution?.current_epoch;
-  const projection = snapshot?.projections?.github_pr;
+  const projection = snapshot?.projection_ledger?.handoff_target;
   const lastResult = projection?.last_result;
   if (!Number.isSafeInteger(currentEpoch) || currentEpoch < 1) return false;
-  if (!isRecord(snapshot?.github?.pr)) return false;
+  if (!isRecord(snapshot?.handoff_target)) return false;
   if (!isRecord(projection) || !isRecord(lastResult)) return false;
   if (projection.execution_epoch !== currentEpoch) return false;
   if (lastResult.execution_epoch !== currentEpoch) return false;
-  if (lastResult.recorded_from_state !== "pr_ready") return false;
+  if (lastResult.recorded_from_state !== "handoff_ready") return false;
   if (!nonEmptyString(lastResult.idempotency_key)) return false;
-  if (!isSuccessfulProjectionResultStatus(lastResult.status)) return false;
+  if (!isSuccessfulProjectionLedgerStatus(lastResult.status)) return false;
   if (!isRecord(lastResult.artifact_ref)) return false;
   if (!nonEmptyString(lastResult.artifact_ref.path) || !nonEmptyString(lastResult.artifact_ref.sha256)) return false;
-  const errors = [];
-  appendGithubPrValidationErrors(snapshot.github.pr, errors, "github.pr");
-  appendGithubPrValidationErrors(lastResult.github_pr, errors, "projections.github_pr.last_result.github_pr");
-  appendGithubPrContractErrors(snapshot, snapshot.github.pr, errors, "github.pr", { durable: true });
-  appendGithubPrContractErrors(snapshot, lastResult.github_pr, errors, "projections.github_pr.last_result.github_pr", { durable: true });
-  appendProjectedPrParityErrors(snapshot.github.pr, lastResult.github_pr, errors, "github.pr", "projections.github_pr.last_result.github_pr");
-  return errors.length === 0;
+  if (!isRecord(lastResult.handoff_target)) return false;
+  return JSON.stringify(snapshot.handoff_target) === JSON.stringify(lastResult.handoff_target);
 }
 
 function validateGateTransitionGuard(snapshot, fromState, toState) {
@@ -142,12 +135,12 @@ function validateGateTransitionGuard(snapshot, fromState, toState) {
       return { ok: false, reason: "transition verification -> blocked_needs_human requires a current verification BLOCKED result" };
     }
   }
-  if (fromState === "internal_review" && toState === "pr_ready") {
+  if (fromState === "internal_review" && toState === "handoff_ready") {
     if (!freshGateStatus(snapshot, "verification", [GATE_STATUS.PASS])) {
-      return { ok: false, reason: "transition internal_review -> pr_ready requires a fresh verification PASS for the current epoch" };
+      return { ok: false, reason: "transition internal_review -> handoff_ready requires a fresh verification PASS for the current epoch" };
     }
     if (!freshGateStatus(snapshot, "internal_review", [GATE_STATUS.PASS])) {
-      return { ok: false, reason: "transition internal_review -> pr_ready requires a fresh internal_review PASS for the current epoch" };
+      return { ok: false, reason: "transition internal_review -> handoff_ready requires a fresh internal_review PASS for the current epoch" };
     }
   }
   if (fromState === "internal_review" && toState === "fix_loop") {
@@ -160,9 +153,9 @@ function validateGateTransitionGuard(snapshot, fromState, toState) {
       return { ok: false, reason: "transition internal_review -> blocked_needs_human requires a current internal_review BLOCKED result" };
     }
   }
-  if (fromState === "pr_ready" && toState === "ready_for_manual_review") {
-    if (!hasRecordedPrProjection(snapshot)) {
-      return { ok: false, reason: "transition pr_ready -> ready_for_manual_review requires a recorded PR projection result for the current epoch" };
+  if (fromState === "handoff_ready" && toState === "ready_for_manual_review") {
+    if (!hasRecordedHandoffProjection(snapshot)) {
+      return { ok: false, reason: "transition handoff_ready -> ready_for_manual_review requires a recorded handoff projection result for the current epoch" };
     }
   }
 

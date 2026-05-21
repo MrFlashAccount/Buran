@@ -2,7 +2,7 @@
 
 Buran keeps three local evidence surfaces with different authority:
 
-1. **Durable execution journal** (`registry/runs/<run_id>/events.jsonl` + `run.json`): source of truth for run state, transitions, leases, quarantine, and recovery. See [execution-run-schema.md](./execution-run-schema.md).
+1. **Durable execution journal** (`registry/runs/<run_id>/events.jsonl` + `run.json` in the current JSON storage adapter): source of truth for run state, transitions, leases, quarantine, and recovery. See [execution-run-schema.md](./execution-run-schema.md).
 2. **Operational logs** (`.openclaw-runtime/plugins/buran/logs/operational.jsonl` by default): JSONL diagnostics for CLI/plugin invocations. Best-effort breadcrumbs only.
 3. **Diagnostic reports** (`.openclaw-runtime/plugins/buran/diagnostics/<trace_id>.json` by default): one bounded summary per invocation, with outcome, duration, reason, and sanitized errors.
 
@@ -68,7 +68,7 @@ The local runner returns a report with `steps_taken` plus stage summaries like:
 - `internal_review`
 - `projection`
 
-`steps_taken` is an operational breadcrumb trail only. Durable truth still lives in `registry/runs/<run_id>/run.json` and `registry/runs/<run_id>/events.jsonl`; the exact event and snapshot contract is documented in [execution-run-schema.md](./execution-run-schema.md).
+`steps_taken` is an operational breadcrumb trail only. Durable truth still lives in the registry snapshot and event journal (`registry/runs/<run_id>/run.json` and `registry/runs/<run_id>/events.jsonl` in the current JSON storage adapter); the exact event and snapshot contract is documented in [execution-run-schema.md](./execution-run-schema.md).
 
 Common breadcrumb actions include `lease_acquire`, `workspace_preparation`, `implementation_dispatch`, `verification_artifact`, `gate_result_recorded`, `verification_resume`, `internal_review_artifact`, `internal_review_resume`, `projection_intent_recorded`, `projection_result_recorded`, and `transition`.
 
@@ -99,4 +99,4 @@ Public CLI output uses the same path redaction rules and a narrower field redact
 
 ## Runtime logger boundary
 
-If the OpenClaw runtime provides `api.logger`, the plugin mirrors sanitized operational events there on a best-effort basis. Local JSONL logging and diagnostic report creation do not depend on that mirror.
+If the embedding runtime provides `api.logger` (as OpenClaw does in the current profile), the plugin mirrors sanitized operational events there on a best-effort basis. Local JSONL logging and diagnostic report creation do not depend on that mirror.

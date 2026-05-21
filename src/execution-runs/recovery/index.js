@@ -14,11 +14,10 @@ import {
   validateProjectionResultRecordedEvent,
   validateRunSnapshot,
 } from "../schema/index.js";
-import { mergeProjectionSnapshot } from "../../workflow-boundary/pr-scm-projection/contract.js";
 import { recoverLeaseRecords } from "../../integrations/worktree/filesystem/locks.js";
-import { getRegistryPaths, rebuildIndexes, writeRegistryReport } from "../../integrations/storage/json-registry/store.js";
+import { assertRegistryRepository } from "../registry/index.js";
 import { applyTransitionToSnapshot, validateTransition, validateTransitionEvent } from "../state-machine.js";
-import { canonicalJson, sha256Hex } from "../../shared/primitives.js";
+import { canonicalJson, isRecord, sha256Hex } from "../../shared/primitives.js";
 
 /**
  * Recovery-time registry inspection and quarantine pipeline.
@@ -100,13 +99,14 @@ function replaySeed(snapshot) {
     run_id: snapshot.run_id,
     state: null,
     last_sequence: 0,
-    github: {
-      repo: snapshot.github?.repo || "",
-      issue_number: snapshot.github?.issue_number ?? null,
-      intended_branch: snapshot.github?.intended_branch || "",
-      base_branch: snapshot.github?.base_branch || "",
-      pr: null,
+    scm_target: {
+      provider: snapshot.scm_target?.provider || "",
+      repo: snapshot.scm_target?.repo || "",
+      issue_number: snapshot.scm_target?.issue_number ?? null,
+      intended_branch: snapshot.scm_target?.intended_branch || "",
+      base_branch: snapshot.scm_target?.base_branch || "",
     },
+    handoff_target: null,
     execution: {
       current_epoch: 0,
     },
@@ -119,7 +119,7 @@ function replaySeed(snapshot) {
         by_path: {},
       },
     },
-    projections: {},
+    projection_ledger: {},
   };
 }
 
@@ -130,20 +130,16 @@ function compareSemanticSlice(snapshot, replay) {
     execution: snapshot.execution,
     gates: snapshot.gates,
     artifacts: snapshot.artifacts?.recorded || { by_path: {} },
-    github: {
-      pr: snapshot.github?.pr ?? null,
-    },
-    projections: snapshot.projections || {},
+    handoff_target: snapshot.handoff_target ?? null,
+    projection_ledger: snapshot.projection_ledger || {},
   }) === canonicalJson({
     state: replay.state,
     last_sequence: replay.last_sequence,
     execution: replay.execution,
     gates: replay.gates,
     artifacts: replay.artifacts.recorded,
-    github: {
-      pr: replay.github?.pr ?? null,
-    },
-    projections: replay.projections,
+    handoff_target: replay.handoff_target ?? null,
+    projection_ledger: replay.projection_ledger,
   });
 }
 
@@ -200,12 +196,63 @@ function validateGateReplaySemantics(snapshot, payload, idempotencyPayloads) {
   return "";
 }
 
+function mergeProjectionSnapshot(snapshot, payload, sequence) {
+  const currentProjection = isRecord(snapshot.projection_ledger?.handoff_target) ? snapshot.projection_ledger.handoff_target : {};
+  const nextProjection = {
+    projection_name: payload.projection_name,
+    projection_target: payload.projection_target,
+    adapter: payload.adapter,
+    mode: payload.mode,
+    execution_epoch: payload.execution_epoch,
+    recorded_from_state: payload.recorded_from_state,
+    ...(isRecord(currentProjection.last_intent) ? { last_intent: currentProjection.last_intent } : {}),
+    ...(isRecord(currentProjection.last_result) ? { last_result: currentProjection.last_result } : {}),
+  };
+  if (payload.type === "projection.intent_recorded") {
+    nextProjection.last_intent = {
+      artifact_ref: payload.artifact_ref,
+      recorded_at: payload.recorded_at,
+      actor: payload.actor,
+      idempotency_key: payload.idempotency_key,
+      execution_epoch: payload.execution_epoch,
+      recorded_from_state: payload.recorded_from_state,
+      sequence,
+    };
+  } else {
+    nextProjection.last_result = {
+      status: payload.status,
+      artifact_ref: payload.artifact_ref,
+      recorded_at: payload.recorded_at,
+      actor: payload.actor,
+      idempotency_key: payload.idempotency_key,
+      intent_idempotency_key: payload.intent_idempotency_key,
+      execution_epoch: payload.execution_epoch,
+      recorded_from_state: payload.recorded_from_state,
+      handoff_target: payload.handoff_target,
+      sequence,
+    };
+  }
+  const nextSnapshot = {
+    ...snapshot,
+    last_sequence: Math.max(Number.isSafeInteger(snapshot.last_sequence) ? snapshot.last_sequence : 0, sequence),
+    updated_at: typeof snapshot.updated_at === "string" && snapshot.updated_at > payload.recorded_at ? snapshot.updated_at : payload.recorded_at,
+    projection_ledger: {
+      ...(snapshot.projection_ledger || {}),
+      handoff_target: nextProjection,
+    },
+  };
+  if (payload.type === "projection.result_recorded" && ["projected_local", "projected", "created", "updated"].includes(payload.status)) {
+    nextSnapshot.handoff_target = payload.handoff_target;
+  }
+  return nextSnapshot;
+}
+
 function projectionHead(snapshot) {
-  return snapshot.projections?.github_pr || null;
+  return snapshot.projection_ledger?.handoff_target || null;
 }
 
 function validateProjectionIntentReplaySemantics(snapshot, payload, idempotencyPayloads) {
-  if (snapshot.state !== "pr_ready") return `projection.intent_recorded requires current state pr_ready; got ${snapshot.state}`;
+  if (snapshot.state !== "handoff_ready") return `projection.intent_recorded requires current state handoff_ready; got ${snapshot.state}`;
   if (payload.recorded_from_state !== snapshot.state) return `projection.intent_recorded recorded_from_state ${payload.recorded_from_state} does not match current state ${snapshot.state}`;
   if (payload.execution_epoch !== snapshot.execution.current_epoch) return `projection.intent_recorded execution_epoch ${payload.execution_epoch} does not match current epoch ${snapshot.execution.current_epoch}`;
 
@@ -220,7 +267,7 @@ function validateProjectionIntentReplaySemantics(snapshot, payload, idempotencyP
 }
 
 function validateProjectionResultReplaySemantics(snapshot, payload, idempotencyPayloads) {
-  if (snapshot.state !== "pr_ready") return `projection.result_recorded requires current state pr_ready; got ${snapshot.state}`;
+  if (snapshot.state !== "handoff_ready") return `projection.result_recorded requires current state handoff_ready; got ${snapshot.state}`;
   if (payload.recorded_from_state !== snapshot.state) return `projection.result_recorded recorded_from_state ${payload.recorded_from_state} does not match current state ${snapshot.state}`;
   if (payload.execution_epoch !== snapshot.execution.current_epoch) return `projection.result_recorded execution_epoch ${payload.execution_epoch} does not match current epoch ${snapshot.execution.current_epoch}`;
 
@@ -315,8 +362,9 @@ function replayDomainEvents(events, runId, snapshot) {
   return { ok: true, replay };
 }
 
-async function quarantineRun(registryRoot, runDir, runId, reason, details, { clock }) {
-  const paths = getRegistryPaths(registryRoot);
+async function quarantineRun(registryRoot, runDir, runId, reason, details, { clock, registryRepository }) {
+  const registry = assertRegistryRepository(registryRepository);
+  const paths = registry.getRegistryPaths(registryRoot);
   const timestamp = clock().toISOString().replace(/\D/g, "").slice(0, 14) || "undated";
   const targetDir = path.join(paths.quarantine, `${timestamp}_${runId}_${safeReasonPart(reason)}`);
   await fs.mkdir(path.dirname(targetDir), { recursive: true });
@@ -332,13 +380,14 @@ async function quarantineRun(registryRoot, runDir, runId, reason, details, { clo
     quarantine_dir: targetDir,
     human_needed: true,
   };
-  await writeRegistryReport(reportPath, report);
+  await registry.writeRegistryReport(reportPath, report);
   return { run_id: runId, reason, quarantine_dir: targetDir, report_path: reportPath };
 }
 
-async function inspectRun(registryRoot, entry, { clock }) {
+async function inspectRun(registryRoot, entry, { clock, registryRepository }) {
+  const registry = assertRegistryRepository(registryRepository);
   const runId = entry.name;
-  const runDir = path.join(getRegistryPaths(registryRoot).runs, runId);
+  const runDir = path.join(registry.getRegistryPaths(registryRoot).runs, runId);
   const runPath = path.join(runDir, "run.json");
   const eventsPath = path.join(runDir, "events.jsonl");
   let snapshot;
@@ -347,7 +396,7 @@ async function inspectRun(registryRoot, entry, { clock }) {
   } catch (error) {
     return {
       status: "quarantined",
-      quarantine: await quarantineRun(registryRoot, runDir, runId, "corrupt_run_json", { error: error?.message || String(error) }, { clock }),
+      quarantine: await quarantineRun(registryRoot, runDir, runId, "corrupt_run_json", { error: error?.message || String(error) }, { clock, registryRepository: registry }),
     };
   }
 
@@ -355,7 +404,7 @@ async function inspectRun(registryRoot, entry, { clock }) {
   if (!snapshotDecision.ok) {
     return {
       status: "quarantined",
-      quarantine: await quarantineRun(registryRoot, runDir, runId, "invalid_run_snapshot", { error: snapshotDecision.error }, { clock }),
+      quarantine: await quarantineRun(registryRoot, runDir, runId, "invalid_run_snapshot", { error: snapshotDecision.error }, { clock, registryRepository: registry }),
     };
   }
 
@@ -365,14 +414,14 @@ async function inspectRun(registryRoot, entry, { clock }) {
   } catch (error) {
     return {
       status: "quarantined",
-      quarantine: await quarantineRun(registryRoot, runDir, runId, "missing_or_unreadable_events", { error: error?.message || String(error) }, { clock }),
+      quarantine: await quarantineRun(registryRoot, runDir, runId, "missing_or_unreadable_events", { error: error?.message || String(error) }, { clock, registryRepository: registry }),
     };
   }
 
   if (eventsResult.malformed.length > 0) {
     return {
       status: "quarantined",
-      quarantine: await quarantineRun(registryRoot, runDir, runId, "malformed_events_jsonl", { malformed: eventsResult.malformed }, { clock }),
+      quarantine: await quarantineRun(registryRoot, runDir, runId, "malformed_events_jsonl", { malformed: eventsResult.malformed }, { clock, registryRepository: registry }),
     };
   }
 
@@ -380,7 +429,7 @@ async function inspectRun(registryRoot, entry, { clock }) {
   if (!replay.ok) {
     return {
       status: "quarantined",
-      quarantine: await quarantineRun(registryRoot, runDir, runId, "invalid_event_replay", { error: replay.reason }, { clock }),
+      quarantine: await quarantineRun(registryRoot, runDir, runId, "invalid_event_replay", { error: replay.reason }, { clock, registryRepository: registry }),
     };
   }
 
@@ -403,7 +452,7 @@ async function inspectRun(registryRoot, entry, { clock }) {
           gates: replay.replay.gates,
           artifacts: replay.replay.artifacts.recorded,
         },
-      }, { clock }),
+      }, { clock, registryRepository: registry }),
     };
   }
 
@@ -412,7 +461,7 @@ async function inspectRun(registryRoot, entry, { clock }) {
   if (integrityErrors.length > 0) {
     return {
       status: "quarantined",
-      quarantine: await quarantineRun(registryRoot, runDir, runId, "artifact_integrity_failure", { findings: integrityErrors }, { clock }),
+      quarantine: await quarantineRun(registryRoot, runDir, runId, "artifact_integrity_failure", { findings: integrityErrors }, { clock, registryRepository: registry }),
     };
   }
 
@@ -437,9 +486,10 @@ async function inspectRun(registryRoot, entry, { clock }) {
  * @returns {Promise<Record<string, unknown>>}
  * @throws {Error}
  */
-export async function recoverRegistry(registryRoot, { clock = () => new Date() } = {}) {
+export async function recoverRegistry(registryRoot, { clock = () => new Date(), registryRepository } = {}) {
   if (!registryRoot) throw new Error("registryRoot is required for recovery");
-  const paths = getRegistryPaths(registryRoot);
+  const registry = assertRegistryRepository(registryRepository);
+  const paths = registry.getRegistryPaths(registryRoot);
   await fs.mkdir(paths.runs, { recursive: true });
   const entries = await fs.readdir(paths.runs, { withFileTypes: true }).catch((error) => {
     if (error?.code === "ENOENT") return [];
@@ -453,7 +503,7 @@ export async function recoverRegistry(registryRoot, { clock = () => new Date() }
 
   for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
     if (!entry.isDirectory()) continue;
-    const inspected = await inspectRun(registryRoot, entry, { clock });
+    const inspected = await inspectRun(registryRoot, entry, { clock, registryRepository: registry });
     if (inspected.status === "quarantined") {
       quarantined.push(inspected.quarantine);
       findings.push({ severity: "error", type: "quarantined_run", run_id: inspected.quarantine.run_id, reason: inspected.quarantine.reason });
@@ -467,7 +517,7 @@ export async function recoverRegistry(registryRoot, { clock = () => new Date() }
   const leaseRecovery = await recoverLeaseRecords(registryRoot, validSnapshots, { clock });
   findings.push(...leaseRecovery.findings);
 
-  const indexes = await rebuildIndexes(registryRoot, { clock, snapshots: leaseRecovery.snapshots });
+  const indexes = await registry.rebuildIndexes(registryRoot, { clock, snapshots: leaseRecovery.snapshots });
   const report = {
     schema_version: SCHEMA_VERSION,
     mode: "recovery",
@@ -491,7 +541,7 @@ export async function recoverRegistry(registryRoot, { clock = () => new Date() }
     },
     external_side_effects: false,
   };
-  await writeRegistryReport(path.join(paths.indexes, "recovery-report.json"), report);
+  await registry.writeRegistryReport(path.join(paths.indexes, "recovery-report.json"), report);
   return report;
 }
 

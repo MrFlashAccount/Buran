@@ -11,14 +11,9 @@ import {
   SCHEMA_VERSION,
   TERMINAL_STATES,
 } from "../constants.js";
-import {
-  appendGithubPrContractErrors,
-  appendGithubPrValidationErrors,
-  appendProjectedPrParityErrors,
-  isSuccessfulProjectionResultStatus,
-} from "../../workflow-boundary/pr-scm-projection/contract.js";
 import { isKnownState } from "../state-machine.js";
 import { isRecord } from "../../shared/primitives.js";
+import { appendGithubPrContractErrors, appendGithubPrValidationErrors } from "../../workflow-boundary/pr-scm-projection/contract.js";
 import { buildGateSummary } from "./builders.js";
 
 /**
@@ -47,6 +42,16 @@ const NON_EMPTY_GATE_NAMES = new Set(GATE_NAMES);
 const NON_EMPTY_ARTIFACT_STAGE_NAMES = new Set(ARTIFACT_STAGE_NAMES);
 const GATE_RESULT_STATUS_SET = new Set(GATE_RESULT_STATUSES);
 
+
+function isSuccessfulProjectionLedgerStatus(status) {
+  return ["projected_local", "projected", "created", "updated"].includes(typeof status === "string" ? status.trim() : "");
+}
+
+function validateHandoffTarget(value, errors, fieldPath, { snapshot = null, durableContract = false } = {}) {
+  appendGithubPrValidationErrors(value, errors, fieldPath);
+  if (!isRecord(value)) return;
+  if (snapshot) appendGithubPrContractErrors(snapshot, value, errors, fieldPath, { durable: durableContract });
+}
 function hasOwn(value, key) {
   return Object.prototype.hasOwnProperty.call(value, key);
 }
@@ -329,7 +334,7 @@ export function validateGateResultRecordedEvent(event, { expectedRunId = "", exp
 }
 
 /**
- * Validates a projection intent payload written from pr_ready.
+ * Validates a projection intent payload written from handoff_ready.
  *
  * @param {unknown} payload
  * @param {{ fieldPath?: string }} [options]
@@ -345,7 +350,7 @@ export function validateProjectionIntentPayload(payload, { fieldPath = "event.ev
   if (!nonEmptyString(payload.adapter)) errors.push(`${fieldPath}.adapter must be a non-empty string`);
   if (!nonEmptyString(payload.mode)) errors.push(`${fieldPath}.mode must be a non-empty string`);
   if (!isPositiveInteger(payload.execution_epoch)) errors.push(`${fieldPath}.execution_epoch must be a positive integer`);
-  if (payload.recorded_from_state !== "pr_ready") errors.push(`${fieldPath}.recorded_from_state must be pr_ready`);
+  if (payload.recorded_from_state !== "handoff_ready") errors.push(`${fieldPath}.recorded_from_state must be handoff_ready`);
   if (!isTimestampString(payload.recorded_at)) errors.push(`${fieldPath}.recorded_at must be a timestamp string`);
   if (!nonEmptyString(payload.actor)) errors.push(`${fieldPath}.actor must be a non-empty string`);
   if (!nonEmptyString(payload.idempotency_key)) errors.push(`${fieldPath}.idempotency_key must be a non-empty string`);
@@ -365,11 +370,13 @@ export function validateProjectionResultPayload(payload, { fieldPath = "event.ev
   const errors = [...intentDecision.errors];
   if (!nonEmptyString(payload?.status)) errors.push(`${fieldPath}.status must be a non-empty string`);
   if (!nonEmptyString(payload?.intent_idempotency_key)) errors.push(`${fieldPath}.intent_idempotency_key must be a non-empty string`);
-  if (isSuccessfulProjectionResultStatus(payload?.status)) {
-    appendGithubPrValidationErrors(payload.github_pr, errors, `${fieldPath}.github_pr`);
-    if (snapshot) appendGithubPrContractErrors(snapshot, payload.github_pr, errors, `${fieldPath}.github_pr`, { durable: durableContract });
-  } else if (!(payload.github_pr === null || isRecord(payload.github_pr))) {
-    errors.push(`${fieldPath}.github_pr must be an object or null`);
+  if (isSuccessfulProjectionLedgerStatus(payload?.status)) {
+    validateHandoffTarget(payload.handoff_target, errors, `${fieldPath}.handoff_target`, { snapshot, durableContract });
+    if (snapshot && isRecord(snapshot.handoff_target) && JSON.stringify(snapshot.handoff_target) !== JSON.stringify(payload.handoff_target)) {
+      errors.push(`${fieldPath}.handoff_target must match snapshot.handoff_target`);
+    }
+  } else if (!(payload.handoff_target === null || isRecord(payload.handoff_target))) {
+    errors.push(`${fieldPath}.handoff_target must be an object or null`);
   }
   return { ok: errors.length === 0, errors, error: errors.join("; ") };
 }
@@ -460,83 +467,80 @@ function validateProjectionLedgerEntry(entry, errors, fieldPath, { requireResult
   if (!nonEmptyString(entry.actor)) errors.push(`run.json field ${fieldPath}.actor must be a non-empty string`);
   if (!nonEmptyString(entry.idempotency_key)) errors.push(`run.json field ${fieldPath}.idempotency_key must be a non-empty string`);
   if (!isPositiveInteger(entry.execution_epoch)) errors.push(`run.json field ${fieldPath}.execution_epoch must be a positive integer`);
-  if (entry.recorded_from_state !== "pr_ready") errors.push(`run.json field ${fieldPath}.recorded_from_state must be pr_ready`);
+  if (entry.recorded_from_state !== "handoff_ready") errors.push(`run.json field ${fieldPath}.recorded_from_state must be handoff_ready`);
   if (!isPositiveInteger(entry.sequence)) errors.push(`run.json field ${fieldPath}.sequence must be a positive integer`);
   if (requireResult) {
     if (!nonEmptyString(entry.intent_idempotency_key)) errors.push(`run.json field ${fieldPath}.intent_idempotency_key must be a non-empty string`);
     if (!nonEmptyString(entry.status)) errors.push(`run.json field ${fieldPath}.status must be a non-empty string`);
-    if (isSuccessfulProjectionResultStatus(entry.status)) {
-      appendGithubPrValidationErrors(entry.github_pr, errors, `${fieldPath}.github_pr`);
-    } else if (!(entry.github_pr === null || isRecord(entry.github_pr))) {
-      errors.push(`run.json field ${fieldPath}.github_pr must be an object or null`);
+    if (isSuccessfulProjectionLedgerStatus(entry.status)) {
+      validateHandoffTarget(entry.handoff_target, errors, `${fieldPath}.handoff_target`);
+    } else if (!(entry.handoff_target === null || isRecord(entry.handoff_target))) {
+      errors.push(`run.json field ${fieldPath}.handoff_target must be an object or null`);
     }
   }
 }
 
-function validateProjectionSummary(snapshot, projections, errors, currentEpoch) {
-  const githubProjection = projections && hasOwn(projections, "github_pr") ? projections.github_pr : null;
-  const githubPr = snapshot.github?.pr;
+function validateProjectionSummary(snapshot, projectionLedger, errors, currentEpoch) {
+  const handoffProjection = projectionLedger && hasOwn(projectionLedger, "handoff_target") ? projectionLedger.handoff_target : null;
+  const handoffTarget = snapshot.handoff_target;
 
-  if (!(githubPr === null || isRecord(githubPr))) errors.push("run.json field github.pr must be an object or null");
-  else if (isRecord(githubPr)) appendGithubPrValidationErrors(githubPr, errors, "github.pr");
+  if (!(handoffTarget === null || isRecord(handoffTarget))) errors.push("run.json field handoff_target must be an object or null");
+  else if (isRecord(handoffTarget)) validateHandoffTarget(handoffTarget, errors, "handoff_target");
 
-  if (githubProjection === null || githubProjection === undefined) {
-    if (snapshot.state === "ready_for_manual_review") errors.push("run.json ready_for_manual_review requires projections.github_pr");
-    if (isRecord(githubPr)) errors.push("run.json field github.pr requires matching projections.github_pr.last_result");
+  if (handoffProjection === null || handoffProjection === undefined) {
+    if (snapshot.state === "ready_for_manual_review") errors.push("run.json ready_for_manual_review requires projection_ledger.handoff_target");
+    if (isRecord(handoffTarget)) errors.push("run.json field handoff_target requires matching projection_ledger.handoff_target.last_result");
     return;
   }
 
-  if (!isRecord(githubProjection)) {
-    errors.push("run.json field projections.github_pr must be an object");
+  if (!isRecord(handoffProjection)) {
+    errors.push("run.json field projection_ledger.handoff_target must be an object");
     return;
   }
 
-  requireString(githubProjection, "projection_name", errors, { pathPrefix: "projections.github_pr", nonEmpty: true });
-  requireString(githubProjection, "projection_target", errors, { pathPrefix: "projections.github_pr", nonEmpty: true });
-  requireString(githubProjection, "adapter", errors, { pathPrefix: "projections.github_pr", nonEmpty: true });
-  requireString(githubProjection, "mode", errors, { pathPrefix: "projections.github_pr", nonEmpty: true });
-  requireInteger(githubProjection, "execution_epoch", errors, { pathPrefix: "projections.github_pr", minimum: 1 });
-  requireString(githubProjection, "recorded_from_state", errors, { pathPrefix: "projections.github_pr", nonEmpty: true });
-  if (hasOwn(githubProjection, "recorded_from_state") && githubProjection.recorded_from_state !== "pr_ready") {
-    errors.push("run.json field projections.github_pr.recorded_from_state must be pr_ready");
+  requireString(handoffProjection, "projection_name", errors, { pathPrefix: "projection_ledger.handoff_target", nonEmpty: true });
+  requireString(handoffProjection, "projection_target", errors, { pathPrefix: "projection_ledger.handoff_target", nonEmpty: true });
+  requireString(handoffProjection, "adapter", errors, { pathPrefix: "projection_ledger.handoff_target", nonEmpty: true });
+  requireString(handoffProjection, "mode", errors, { pathPrefix: "projection_ledger.handoff_target", nonEmpty: true });
+  requireInteger(handoffProjection, "execution_epoch", errors, { pathPrefix: "projection_ledger.handoff_target", minimum: 1 });
+  requireString(handoffProjection, "recorded_from_state", errors, { pathPrefix: "projection_ledger.handoff_target", nonEmpty: true });
+  if (hasOwn(handoffProjection, "recorded_from_state") && handoffProjection.recorded_from_state !== "handoff_ready") {
+    errors.push("run.json field projection_ledger.handoff_target.recorded_from_state must be handoff_ready");
   }
 
-  const hasIntent = hasOwn(githubProjection, "last_intent");
-  const hasResult = hasOwn(githubProjection, "last_result");
-  if (!hasIntent && !hasResult) errors.push("run.json field projections.github_pr must include last_intent or last_result");
+  const hasIntent = hasOwn(handoffProjection, "last_intent");
+  const hasResult = hasOwn(handoffProjection, "last_result");
+  if (!hasIntent && !hasResult) errors.push("run.json field projection_ledger.handoff_target must include last_intent or last_result");
 
-  if (hasIntent) validateProjectionLedgerEntry(githubProjection.last_intent, errors, "projections.github_pr.last_intent");
-  if (hasResult) validateProjectionLedgerEntry(githubProjection.last_result, errors, "projections.github_pr.last_result", { requireResult: true });
+  if (hasIntent) validateProjectionLedgerEntry(handoffProjection.last_intent, errors, "projection_ledger.handoff_target.last_intent");
+  if (hasResult) validateProjectionLedgerEntry(handoffProjection.last_result, errors, "projection_ledger.handoff_target.last_result", { requireResult: true });
 
-  if (Number.isSafeInteger(currentEpoch) && currentEpoch > 0 && githubProjection.execution_epoch !== currentEpoch) {
-    errors.push("run.json field projections.github_pr.execution_epoch must match execution.current_epoch");
+  if (Number.isSafeInteger(currentEpoch) && currentEpoch > 0 && handoffProjection.execution_epoch !== currentEpoch) {
+    errors.push("run.json field projection_ledger.handoff_target.execution_epoch must match execution.current_epoch");
   }
-  if (isRecord(githubProjection.last_intent) && githubProjection.last_intent.execution_epoch !== githubProjection.execution_epoch) {
-    errors.push("run.json field projections.github_pr.last_intent.execution_epoch must match projections.github_pr.execution_epoch");
+  if (isRecord(handoffProjection.last_intent) && handoffProjection.last_intent.execution_epoch !== handoffProjection.execution_epoch) {
+    errors.push("run.json field projection_ledger.handoff_target.last_intent.execution_epoch must match projection_ledger.handoff_target.execution_epoch");
   }
-  if (isRecord(githubProjection.last_result) && githubProjection.last_result.execution_epoch !== githubProjection.execution_epoch) {
-    errors.push("run.json field projections.github_pr.last_result.execution_epoch must match projections.github_pr.execution_epoch");
+  if (isRecord(handoffProjection.last_result) && handoffProjection.last_result.execution_epoch !== handoffProjection.execution_epoch) {
+    errors.push("run.json field projection_ledger.handoff_target.last_result.execution_epoch must match projection_ledger.handoff_target.execution_epoch");
   }
-  if (isRecord(githubProjection.last_result) && isRecord(githubProjection.last_intent)
-    && githubProjection.last_result.intent_idempotency_key !== githubProjection.last_intent.idempotency_key) {
-    errors.push("run.json field projections.github_pr.last_result.intent_idempotency_key must match projections.github_pr.last_intent.idempotency_key");
+  if (isRecord(handoffProjection.last_result) && isRecord(handoffProjection.last_intent)
+    && handoffProjection.last_result.intent_idempotency_key !== handoffProjection.last_intent.idempotency_key) {
+    errors.push("run.json field projection_ledger.handoff_target.last_result.intent_idempotency_key must match projection_ledger.handoff_target.last_intent.idempotency_key");
   }
 
-  if (isRecord(githubProjection.last_result) && isSuccessfulProjectionResultStatus(githubProjection.last_result.status)) {
-    appendGithubPrContractErrors(snapshot, githubProjection.last_result.github_pr, errors, "projections.github_pr.last_result.github_pr", { durable: true });
-    if (!isRecord(githubPr)) {
-      errors.push("run.json successful projections.github_pr.last_result requires github.pr");
-    } else {
-      appendGithubPrContractErrors(snapshot, githubPr, errors, "github.pr", { durable: true });
-      appendProjectedPrParityErrors(githubPr, githubProjection.last_result.github_pr, errors, "github.pr", "projections.github_pr.last_result.github_pr");
+  if (isRecord(handoffProjection.last_result) && isSuccessfulProjectionLedgerStatus(handoffProjection.last_result.status)) {
+    if (!isRecord(handoffTarget)) errors.push("run.json successful projection_ledger.handoff_target.last_result requires handoff_target");
+    else if (JSON.stringify(handoffTarget) !== JSON.stringify(handoffProjection.last_result.handoff_target)) {
+      errors.push("run.json field handoff_target must match projection_ledger.handoff_target.last_result.handoff_target");
     }
-  } else if (isRecord(githubPr)) {
-    errors.push("run.json field github.pr requires a successful projections.github_pr.last_result");
+  } else if (isRecord(handoffTarget)) {
+    errors.push("run.json field handoff_target requires a successful projection_ledger.handoff_target.last_result");
   }
 
   if (snapshot.state === "ready_for_manual_review") {
-    if (!isRecord(githubProjection.last_result) || !isSuccessfulProjectionResultStatus(githubProjection.last_result.status)) {
-      errors.push("run.json ready_for_manual_review requires a successful projections.github_pr.last_result");
+    if (!isRecord(handoffProjection.last_result) || !isSuccessfulProjectionLedgerStatus(handoffProjection.last_result.status)) {
+      errors.push("run.json ready_for_manual_review requires a successful projection_ledger.handoff_target.last_result");
     }
   }
 }
@@ -571,17 +575,17 @@ export function validateRunSnapshot(snapshot, { expectedRunId = "", mode = "reco
     errors.push("run.json terminal_reason must be non-empty for terminal blocked/failed states");
   }
 
-  const github = requireRecord(snapshot, "github", errors);
-  if (github) {
-    requireString(github, "repo", errors, { pathPrefix: "github", nonEmpty: !TERMINAL_STATES.has(snapshot.state) });
-    if (!hasOwn(github, "issue_number")) errors.push("run.json missing required field: github.issue_number");
-    else if (!isNullableInteger(github.issue_number)) errors.push("run.json field github.issue_number must be an integer or null");
-    else if (!TERMINAL_STATES.has(snapshot.state) && github.issue_number === null) errors.push("run.json field github.issue_number must be non-null for active states");
-    requireString(github, "intended_branch", errors, { pathPrefix: "github", nonEmpty: !TERMINAL_STATES.has(snapshot.state) });
-    if (hasOwn(github, "base_branch") && !(github.base_branch === "" || typeof github.base_branch === "string")) {
-      errors.push("run.json field github.base_branch must be a string when present");
+  const scmTarget = requireRecord(snapshot, "scm_target", errors);
+  if (scmTarget) {
+    requireString(scmTarget, "provider", errors, { pathPrefix: "scm_target", nonEmpty: !TERMINAL_STATES.has(snapshot.state) });
+    requireString(scmTarget, "repo", errors, { pathPrefix: "scm_target", nonEmpty: !TERMINAL_STATES.has(snapshot.state) });
+    if (!hasOwn(scmTarget, "issue_number")) errors.push("run.json missing required field: scm_target.issue_number");
+    else if (!isNullableInteger(scmTarget.issue_number)) errors.push("run.json field scm_target.issue_number must be an integer or null");
+    else if (!TERMINAL_STATES.has(snapshot.state) && scmTarget.issue_number === null) errors.push("run.json field scm_target.issue_number must be non-null for active states");
+    requireString(scmTarget, "intended_branch", errors, { pathPrefix: "scm_target", nonEmpty: !TERMINAL_STATES.has(snapshot.state) });
+    if (hasOwn(scmTarget, "base_branch") && !(scmTarget.base_branch === "" || typeof scmTarget.base_branch === "string")) {
+      errors.push("run.json field scm_target.base_branch must be a string when present");
     }
-    if (!hasOwn(github, "pr")) errors.push("run.json missing required field: github.pr");
   }
 
   const packet = requireRecord(snapshot, "packet", errors);
@@ -638,8 +642,8 @@ export function validateRunSnapshot(snapshot, { expectedRunId = "", mode = "reco
       }
     }
   }
-  const projections = requireRecord(snapshot, "projections", errors);
-  if (projections) validateProjectionSummary(snapshot, projections, errors, currentEpoch);
+  const projectionLedger = requireRecord(snapshot, "projection_ledger", errors);
+  if (projectionLedger) validateProjectionSummary(snapshot, projectionLedger, errors, currentEpoch);
 
   return { ok: errors.length === 0, errors, error: errors.join("; "), mode };
 }

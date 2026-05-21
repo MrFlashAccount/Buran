@@ -309,10 +309,11 @@ export function buildImplementationDispatchIntent(snapshot, { workspacePreparati
     dispatch_status: DISPATCH_STATUS,
     run_id: snapshot.run_id,
     task_id: snapshot.task_id,
-    github: {
-      repo: nonEmptyString(snapshot.github?.repo),
-      issue_number: snapshot.github?.issue_number ?? null,
-      intended_branch: nonEmptyString(snapshot.github?.intended_branch),
+    scm_target: {
+      provider: nonEmptyString(snapshot.scm_target?.provider),
+      repo: nonEmptyString(snapshot.scm_target?.repo),
+      issue_number: snapshot.scm_target?.issue_number ?? null,
+      intended_branch: nonEmptyString(snapshot.scm_target?.intended_branch),
     },
     workspace: {
       id: snapshot.workspace?.id ?? null,

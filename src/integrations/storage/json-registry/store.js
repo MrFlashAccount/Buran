@@ -230,7 +230,7 @@ function validateProjectionPayload(payload, { type }) {
   if (!nonEmptyString(payload?.adapter)) errors.push("adapter must be a non-empty string");
   if (!nonEmptyString(payload?.mode)) errors.push("mode must be a non-empty string");
   if (!Number.isSafeInteger(payload?.execution_epoch) || payload.execution_epoch < 1) errors.push("execution_epoch must be a positive integer");
-  if (payload?.recorded_from_state !== "pr_ready") errors.push("recorded_from_state must be pr_ready");
+  if (payload?.recorded_from_state !== "handoff_ready") errors.push("recorded_from_state must be handoff_ready");
   if (!isTimestampString(payload?.recorded_at)) errors.push("recorded_at must be a timestamp string");
   if (!nonEmptyString(payload?.actor)) errors.push("actor must be a non-empty string");
   if (!nonEmptyString(payload?.idempotency_key)) errors.push("idempotency_key must be a non-empty string");
@@ -247,7 +247,7 @@ function validateProjectionPayload(payload, { type }) {
 function ensureProjectionWritePhase(snapshot, payload, type) {
   if (!snapshot?.run_id) throw new Error(`${type} requires a run snapshot`);
   if (isTerminal(snapshot)) throw new Error(`${type} is forbidden in terminal state ${snapshot.state}`);
-  if (snapshot.state !== "pr_ready") throw new Error(`${type} requires state pr_ready; current state: ${snapshot.state}`);
+  if (snapshot.state !== "handoff_ready") throw new Error(`${type} requires state handoff_ready; current state: ${snapshot.state}`);
   if (!Number.isSafeInteger(snapshot.execution?.current_epoch) || snapshot.execution.current_epoch < 1) {
     throw new Error(`${type} requires an active execution epoch`);
   }
@@ -286,7 +286,7 @@ async function recordProjectionEvent(registryRoot, runId, {
   const artifact_ref = { path: resolved.relativePath, sha256: sha256Hex(contentBuffer) };
   const sanitizedPayload = {
     ...payload,
-    ...(hasOwn(payload, "github_pr") ? { github_pr: sanitizeProjectionDurableValue(payload.github_pr) } : {}),
+    ...(hasOwn(payload, "handoff_target") ? { handoff_target: sanitizeProjectionDurableValue(payload.handoff_target) } : {}),
     ...(hasOwn(payload, "status") ? { status: sanitizeProjectionDurableValue(payload.status) } : {}),
   };
   const sanitizedActor = sanitizeProjectionDurableValue(actor);
@@ -305,12 +305,19 @@ async function recordProjectionEvent(registryRoot, runId, {
 
   const priorEvents = await readEventsByIdempotency(paths.eventsPath, eventType, payload.idempotency_key);
   if (priorEvents.length > 0) {
-    const matchingEvent = priorEvents.find((event) => samePayload(event.evidence || {}, eventPayload));
-    if (!matchingEvent) throw new Error(`${eventType} idempotency key ${payload.idempotency_key} conflicts with an existing payload`);
+    const matchingEvent = priorEvents.find((event) => samePayload(event.evidence || {}, eventPayload))
+      || priorEvents.find((event) => event?.evidence?.artifact_ref?.path === artifact_ref.path && event?.evidence?.artifact_ref?.sha256 === artifact_ref.sha256);
+    const replayEvent = matchingEvent || priorEvents[0];
 
-    await verifyOrRecoverArtifactFile(resolved, contentBuffer, artifact_ref.sha256);
+    const replayPayload = replayEvent.evidence || eventPayload;
+    const replayArtifactRef = replayPayload.artifact_ref || artifact_ref;
+    const existingReplayArtifact = await readArtifactIfExists(resolved.absolutePath);
+    if (!existingReplayArtifact.exists) throw new Error(`artifact path ${resolved.relativePath} is missing for recorded projection event`);
+    if (existingReplayArtifact.sha256 !== replayArtifactRef.sha256) {
+      throw new Error(`artifact path ${resolved.relativePath} already exists with different hash`);
+    }
 
-    const repairedSnapshot = mergeProjectionSnapshot(snapshot, { ...eventPayload, type: eventType }, matchingEvent.sequence);
+    const repairedSnapshot = mergeProjectionSnapshot(snapshot, { ...replayPayload, type: eventType }, replayEvent.sequence);
     if (!samePayload(repairedSnapshot, snapshot)) {
       await writeJsonAtomic(paths.runPath, repairedSnapshot);
     }
@@ -318,7 +325,7 @@ async function recordProjectionEvent(registryRoot, runId, {
       status: "noop",
       run: repairedSnapshot,
       artifact_ref,
-      event: matchingEvent,
+      event: replayEvent,
     };
   }
 

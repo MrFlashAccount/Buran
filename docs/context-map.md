@@ -7,22 +7,24 @@ Buran is intentionally narrow. This map shows what the plugin owns, what it cons
 ```mermaid
 flowchart LR
   Operator[Operator or upstream prep flow]
-  Packets[Approved packet list JSON]
-  CLI[CLI / OpenClaw command surface]
+  Packets[Approved work_item packet list]
+  CLI[CLI / embedding command surface]
   Buran[Buran plugin]
-  Registry[(Local registry / artifacts / indexes)]
-  GitWorkspace[Local git workspace or worktree]
+  Registry[(Local registry port / artifacts / indexes)]
+  GitWorkspace[Local SCM workspace or worktree]
   Reviewer[Human reviewer]
-  GitHub[GitHub PR / issue projection]
-  TaskFlow[TaskFlow / project projection]
+  Handoff[handoff_target projection
+current GitHub adapter]
+  Tracker[Tracker projection
+current TaskFlow profile]
 
   Operator --> Packets --> CLI --> Buran
   Buran <--> Registry
   Buran --> GitWorkspace
-  Buran --> GitHub
-  Buran --> TaskFlow
-  GitHub --> Reviewer
-  Reviewer --> GitHub
+  Buran --> Handoff
+  Buran --> Tracker
+  Handoff --> Reviewer
+  Reviewer --> Handoff
 ```
 
 ## Upstream inputs Buran accepts
@@ -38,19 +40,19 @@ Buran does **not** discover work on its own, draft plans, or upgrade weak packet
 
 | Context | Owned by | Buran responsibility | Not owned by Buran |
 | --- | --- | --- | --- |
-| Approved packet prep | upstream manual process | read and validate sufficiency only | research, planning, architecture, scope drafting |
-| ExecutionRun lifecycle | Buran | state machine, events, artifacts, gates, projections | human approval of new scope |
-| Workspace lease and conflict control | Buran | local workspace/repo/issue/branch/conflict-surface locks | global scheduling outside this plugin |
+| Approved packet prep | upstream manual process | read and validate `work_item` sufficiency only | research, planning, architecture, scope drafting |
+| ExecutionRun lifecycle | Buran | state machine, events, artifacts, gates, `projection_ledger` records | human approval of new scope |
+| Workspace lease and conflict control | Buran | local workspace/repo checkout/`scm_target`/branch/conflict-surface locks | global scheduling outside this plugin |
 | Verification gate | Buran adapters | run allowlisted local checks, record immutable evidence | arbitrary script execution |
 | Internal review gate | Buran adapters + human evidence | record review evidence and enforce gate semantics | deriving verdicts from packet text |
-| PR / project projection | Buran adapters | record local intent/result and optionally call a transport seam | merge, babysitting, final human review |
+| Handoff / tracker projection | Buran adapters | record local intent/result and optionally call a provider transport seam | merge, babysitting, final human review |
 
 ## Lifecycle handoff points
 
-1. **Before intake**: packet approval and task shaping happen outside Buran.
+1. **Before intake**: packet approval and `work_item` shaping happen outside Buran.
 2. **After intake**: Buran owns run state in the local registry.
 3. **At `running`**: Buran records workspace-preparation and implementation-dispatch intent artifacts, calls the injected dispatch adapter only when no current result artifact can be reused, records the sanitized result artifact, and advances to `verification` only when the result is `COMPLETED` with durable evidence. `BLOCKED` stays safe in `running`; `FAILED` transitions to `failed_execution`.
-4. **At `ready_for_manual_review`**: Buran has recorded PR handoff evidence and stops for human review.
+4. **At `ready_for_manual_review`**: Buran has recorded `handoff_target` evidence and stops for human review.
 
 ## External effect policy by command
 
@@ -61,7 +63,7 @@ Buran does **not** discover work on its own, draft plans, or upgrade weak packet
 | `run` in current default slice | yes | yes when workspace data is provided | no by default |
 | `lease acquire` / `lease release` | yes | no | no |
 | `recover` | yes | no | no |
-| transport-backed PR projection adapter | yes | no | optional, only through the injected adapter seam |
+| transport-backed handoff projection adapter | yes | no | optional, only through the injected adapter seam |
 
 ## Source anchors
 
@@ -69,5 +71,5 @@ Buran does **not** discover work on its own, draft plans, or upgrade weak packet
 - ownership and placement rules: `CONTEXT.md`
 - lifecycle rules: `docs/state-machine.md`
 - registry contract: `docs/execution-run-schema.md`
-- projection semantics: `docs/github-projection-contract.md`
+- projection semantics: `docs/github-projection-contract.md` (provider-neutral contract with current GitHub adapter notes)
 - runtime orchestration entrypoint: `src/application/run-local-mission.js`

@@ -8,27 +8,35 @@ import { canonicalJson, sha256Hex } from "../../../shared/primitives.js";
 import { writeJsonAtomic } from "./atomic-read-write.js";
 import { getRegistryPaths } from "./path-layout.js";
 
+function scmTargetFromSnapshot(snapshot) {
+  if (snapshot?.scm_target && typeof snapshot.scm_target === "object") return snapshot.scm_target;
+  if (snapshot?.github && typeof snapshot.github === "object") return snapshot.github;
+  return {};
+}
+
 function indexEntryFromSnapshot(snapshot) {
+  const scmTarget = scmTargetFromSnapshot(snapshot);
   return {
     run_id: snapshot.run_id,
     state: snapshot.state,
-    repo: snapshot.github?.repo || "",
-    issue_number: snapshot.github?.issue_number || null,
-    branch: snapshot.github?.intended_branch || "",
+    repo: scmTarget.repo || "",
+    issue_number: scmTarget.issue_number || null,
+    branch: scmTarget.intended_branch || "",
   };
 }
 
 function leaseEntryFromSnapshot(snapshot) {
   if (snapshot.workspace?.lease_status !== "acquired" && snapshot.locks?.lease_status !== "acquired") return null;
+  const scmTarget = scmTargetFromSnapshot(snapshot);
   return {
     run_id: snapshot.run_id,
     state: snapshot.state,
     lease_id: snapshot.workspace?.lease_id || snapshot.locks?.lease_id || "",
     workspace_id: snapshot.workspace?.id || null,
     workspace_path: snapshot.workspace?.path || null,
-    repo: snapshot.github?.repo || snapshot.locks?.repo || "",
-    issue_number: snapshot.github?.issue_number || snapshot.locks?.issue || null,
-    branch: snapshot.github?.intended_branch || snapshot.locks?.branch || "",
+    repo: scmTarget.repo || snapshot.locks?.repo || "",
+    issue_number: scmTarget.issue_number || snapshot.locks?.issue || null,
+    branch: scmTarget.intended_branch || snapshot.locks?.branch || "",
     conflict_surface: snapshot.locks?.conflict_surface || [],
     acquired_at: snapshot.workspace?.acquired_at || snapshot.locks?.acquired_at || "",
     expires_at: snapshot.workspace?.expires_at || snapshot.locks?.expires_at || "",

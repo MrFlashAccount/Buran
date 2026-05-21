@@ -9,7 +9,7 @@ import { sanitizePublicReportForOutput } from "../observability/index.js";
 import { buildRecordedPrProjection, createLocalPrProjectionAdapter } from "../workflow-boundary/pr-scm-projection/local-journal-adapter.js";
 import { executeVerificationGate } from "../gates/verification-adapter.js";
 import { evaluateReviewReadyPolicy } from "../stack-workflow/review-ready-policy.js";
-import { getRunPaths, readRunSnapshot, recordArtifact, recordGateResult, recordProjectionIntent, recordProjectionResult, transitionRun } from "../execution-runs/registry/index.js";
+import { assertRegistryRepository } from "../execution-runs/registry/index.js";
 import { canonicalJson, isRecord, nonEmptyString, sha256Hex } from "../shared/primitives.js";
 import { hasActiveLease } from "./mission-context.js";
 import { buildIssue, buildRunnerReport, buildStep, implementationBoundaryMessage, internalReviewTransition, internalReviewTransitionReason, leaseRequiredMessage, projectionProblemCode, projectionTransitionReason, sanitizeImplementationDispatchProblem, unsupportedStageMessage, verificationTransition, verificationTransitionReason } from "./final-report.js";
@@ -179,8 +179,9 @@ async function readReusableFixAttemptResult(runDir, snapshot) {
   };
 }
 
-export async function runFixLoopStage({ registryRoot, runId, current, previousState, stepsTaken, blockers, warnings, workspacePreparation, implementationDispatch, verification, internalReview, clock, actor, implementationDispatchAdapter } = {}) {
-  const paths = getRunPaths(registryRoot, runId);
+export async function runFixLoopStage({ registryRoot, runId, current, previousState, stepsTaken, blockers, warnings, workspacePreparation, implementationDispatch, verification, internalReview, clock, actor, implementationDispatchAdapter, registryRepository } = {}) {
+  const registry = assertRegistryRepository(registryRepository);
+  const paths = registry.getRunPaths(registryRoot, runId);
   const reusableFixAttemptResult = await readReusableFixAttemptResult(paths.runDir, current);
   if (reusableFixAttemptResult?.reusable === false) {
     blockers.push(reusableFixAttemptResult.problem);
@@ -258,7 +259,7 @@ export async function runFixLoopStage({ registryRoot, runId, current, previousSt
       });
     }
 
-    const transitioned = await transitionRun(registryRoot, runId, {
+    const transitioned = await registry.transitionRun(registryRoot, runId, {
       toState: "verification",
       actor,
       evidence: {
@@ -305,7 +306,7 @@ export async function runFixLoopStage({ registryRoot, runId, current, previousSt
   if (completedAttempts >= MAX_FIX_ATTEMPTS) {
     const problem = buildIssue("fix_attempts_exhausted", `Fix loop stopped after ${completedAttempts} completed attempt${completedAttempts === 1 ? "" : "s"}; maximum is ${MAX_FIX_ATTEMPTS}.`);
     blockers.push(problem);
-    const transitioned = await transitionRun(registryRoot, runId, {
+    const transitioned = await registry.transitionRun(registryRoot, runId, {
       toState: "blocked_needs_human",
       actor,
       evidence: {
@@ -375,7 +376,7 @@ export async function runFixLoopStage({ registryRoot, runId, current, previousSt
     maxAttempts: MAX_FIX_ATTEMPTS,
   });
   const recordedAt = clock().toISOString();
-  const intentRecorded = await recordArtifact(registryRoot, runId, {
+  const intentRecorded = await registry.recordArtifact(registryRoot, runId, {
     artifactPath: fixIntent.artifactPath,
     content: `${JSON.stringify(fixIntent.intent, null, 2)}\n`,
     gate_name: "fix_attempt",
@@ -411,7 +412,7 @@ export async function runFixLoopStage({ registryRoot, runId, current, previousSt
     intentArtifactPath: fixIntent.artifactPath,
     artifactDirectory: "artifacts/fix-loop",
   });
-  const resultRecorded = await recordArtifact(registryRoot, runId, {
+  const resultRecorded = await registry.recordArtifact(registryRoot, runId, {
     artifactPath: dispatchResult.artifact_path,
     content: dispatchResult.artifact_content,
     gate_name: "fix_attempt",
@@ -474,7 +475,7 @@ export async function runFixLoopStage({ registryRoot, runId, current, previousSt
     });
   }
 
-  const transitioned = await transitionRun(registryRoot, runId, {
+  const transitioned = await registry.transitionRun(registryRoot, runId, {
     toState: "verification",
     actor,
     evidence: {
@@ -521,7 +522,7 @@ export async function runFixLoopStage({ registryRoot, runId, current, previousSt
  * Runs the local orchestration slice for a single registry run.
  *
  * The runner owns state advancement, artifact recording, and adapter invocation for
- * implementation dispatch, verification, internal review, and PR projection. In
+ * implementation dispatch, verification, internal review, and SCM handoff projection. In
  * `running`, it records workspace-preparation and dispatch-intent artifacts, invokes
  * the configured implementation-dispatch adapter only when no current result artifact
  * is already reusable, records the sanitized result artifact, and advances to
@@ -539,7 +540,7 @@ export async function runFixLoopStage({ registryRoot, runId, current, previousSt
  * @param {{adapter?: string, execute(options: object): Promise<object>}} [params.implementationDispatchAdapter=createUnavailableImplementationDispatchAdapter()]
  * Implementation-dispatch adapter invoked from `running` only when no current result artifact can be safely reused.
  * @param {{plan(snapshot: object, options?: object): object, execute(snapshot: object, plan: object, options?: object): Promise<object>, externalSideEffects?: boolean}} [params.prProjectionAdapter=createLocalPrProjectionAdapter()]
- * Projection adapter used when the run reaches `pr_ready`.
+ * Projection adapter used when the run reaches `handoff_ready`.
  * @returns {Promise<object>} Sanitized public runner report describing completed work, blockers, and current state.
  * @throws {Error} When required identifiers are missing or an unexpected storage/adapter error occurs.
  */

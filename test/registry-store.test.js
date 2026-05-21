@@ -6,12 +6,15 @@ import path from "node:path";
 
 import { SCHEMA_VERSION } from "../src/execution-runs/constants.js";
 import { recoverRegistry } from "../src/execution-runs/recovery/index.js";
+import { createJsonRegistryRepository } from "../src/integrations/storage/json-registry/repository.js";
 import { createRunFromPacketReport, getRunPaths, readEventsFile, readRunSnapshot, rebuildIndexes, transitionRun } from "../src/integrations/storage/json-registry/store.js";
 
 /**
  * Persistence and recovery tests for the registry store. Helpers keep packet and
  * JSON fixture construction consistent while the assertions focus on state changes.
  */
+
+const registryRepository = createJsonRegistryRepository();
 
 /** Creates an isolated registry root for store-level tests. */
 async function makeTempDir() {
@@ -113,7 +116,7 @@ test("registry recovery deterministically quarantines event-before-snapshot stal
     idempotency_key: `${created.run.run_id}:waiting_for_lock:3`,
   })}\n`, "utf8");
 
-  const recovery = await recoverRegistry(registryRoot, { clock: () => new Date("2026-05-16T13:54:00.000Z") });
+  const recovery = await recoverRegistry(registryRoot, { registryRepository, clock: () => new Date("2026-05-16T13:54:00.000Z") });
 
   assert.equal(recovery.summary.quarantined_runs, 1);
   assert.equal(recovery.quarantined[0].reason, "snapshot_event_state_mismatch");
@@ -127,7 +130,7 @@ test("registry recovery quarantines artifact-written but event-missing stale sta
   const events = await readEventsFile(paths.eventsPath);
   await fs.writeFile(paths.eventsPath, `${JSON.stringify(events[0])}\n`, "utf8");
 
-  const recovery = await recoverRegistry(registryRoot, { clock: () => new Date("2026-05-16T13:54:00.000Z") });
+  const recovery = await recoverRegistry(registryRoot, { registryRepository, clock: () => new Date("2026-05-16T13:54:00.000Z") });
 
   assert.equal(recovery.summary.quarantined_runs, 1);
   assert.equal(recovery.quarantined[0].reason, "snapshot_event_state_mismatch");

@@ -18,8 +18,8 @@ import {
 } from "./contract.js";
 import { nonEmptyString, sha256Hex } from "../../shared/primitives.js";
 
-const PROJECTION_NAME = "github_pr";
-const PROJECTION_TARGET = "github.pr";
+const PROJECTION_NAME = "handoff_target";
+const PROJECTION_TARGET = "handoff_target";
 export const LOCAL_PR_PROJECTION_MODE = "local_fake";
 export const LOCAL_PR_PROJECTION_ADAPTER = "local-github-pr-projection";
 
@@ -36,6 +36,12 @@ export function projectionContractError(code, message) {
   return error;
 }
 
+
+function scmTarget(snapshot) {
+  if (snapshot?.scm_target && typeof snapshot.scm_target === "object") return snapshot.scm_target;
+  return snapshot?.github && typeof snapshot.github === "object" ? snapshot.github : {};
+}
+
 function projectionBaseKey(snapshot) {
   const verificationAttempt = snapshot?.gates?.verification?.current_attempt || 0;
   const internalReviewAttempt = snapshot?.gates?.internal_review?.current_attempt || 0;
@@ -45,10 +51,10 @@ function projectionBaseKey(snapshot) {
     snapshot?.execution?.current_epoch || 0,
     verificationAttempt,
     internalReviewAttempt,
-    snapshot?.github?.repo || "",
-    snapshot?.github?.issue_number ?? "",
-    snapshot?.github?.intended_branch || "",
-    snapshot?.github?.base_branch || "",
+    scmTarget(snapshot).repo || "",
+    scmTarget(snapshot).issue_number ?? "",
+    scmTarget(snapshot).intended_branch || "",
+    scmTarget(snapshot).base_branch || "",
   ].join(":");
 }
 
@@ -72,7 +78,7 @@ function gateSummary(gate = {}) {
 }
 
 function existingProjection(snapshot) {
-  return snapshot?.projections?.github_pr || {};
+  return snapshot?.projection_ledger?.handoff_target || {};
 }
 
 function existingProjectionRecordedAt(snapshot) {
@@ -86,11 +92,11 @@ function existingProjectionActor(snapshot) {
 }
 
 function requireBaseBranch(snapshot) {
-  const baseBranch = nonEmptyString(snapshot?.github?.base_branch);
+  const baseBranch = nonEmptyString(scmTarget(snapshot).base_branch);
   if (!baseBranch) {
     throw projectionContractError(
       "projection_missing_base_branch",
-      `Run ${snapshot?.run_id || "unknown"} cannot record a PR projection because github.base_branch is missing from the approved local contract.`,
+      `Run ${snapshot?.run_id || "unknown"} cannot record a PR projection because scm_target.base_branch is missing from the approved local contract.`,
     );
   }
   return baseBranch;
@@ -132,9 +138,10 @@ export function buildPrProjectionPlan(snapshot, {
   const baseKey = projectionBaseKey(snapshot);
   const idempotencyDigest = sha256Hex(baseKey);
   const artifactDigest = idempotencyDigest.slice(0, 16);
-  const repo = nonEmptyString(snapshot?.github?.repo);
-  const issueNumber = snapshot?.github?.issue_number ?? null;
-  const headBranch = nonEmptyString(snapshot?.github?.intended_branch);
+  const target = scmTarget(snapshot);
+  const repo = nonEmptyString(target.repo);
+  const issueNumber = target.issue_number ?? null;
+  const headBranch = nonEmptyString(target.intended_branch);
   const baseBranch = requireBaseBranch(snapshot);
   const title = projectionTitle(snapshot);
 
@@ -257,7 +264,7 @@ export function buildPrProjectionResult(snapshot, plan, {
     intent_idempotency_key: plan.intentIdempotencyKey,
     verification_gate: plan.verificationGate,
     internal_review_gate: plan.internalReviewGate,
-    github_pr: effectiveGithubPr,
+    handoff_target: effectiveGithubPr,
     source_of_truth: "local_registry",
     projected_at: recordedAt,
     actor,
@@ -274,7 +281,7 @@ export function buildPrProjectionResult(snapshot, plan, {
       status: result.status,
       adapter: plan.adapter,
       mode: plan.mode,
-      github_pr: effectiveGithubPr,
+      handoff_target: effectiveGithubPr,
       intent_idempotency_key: plan.intentIdempotencyKey,
       result_idempotency_key: plan.resultIdempotencyKey,
     },
@@ -301,7 +308,7 @@ export function buildRecordedPrProjection(snapshot, {
 } = {}) {
   const projection = existingProjection(snapshot);
   const lastResult = projection?.last_result;
-  if (!lastResult?.status || !lastResult?.github_pr) return null;
+  if (!lastResult?.status || !lastResult?.handoff_target) return null;
   if (expectedAdapter && projection?.adapter !== expectedAdapter) return null;
   if (expectedMode && projection?.mode !== expectedMode) return null;
 
@@ -315,7 +322,7 @@ export function buildRecordedPrProjection(snapshot, {
 
   return buildPrProjectionResult(snapshot, plan, {
     status: lastResult.status,
-    githubPr: lastResult.github_pr,
+    githubPr: lastResult.handoff_target,
     actor: lastResult.actor || plan.actor,
     recordedAt: lastResult.recorded_at || plan.recordedAt,
     externalSideEffects,

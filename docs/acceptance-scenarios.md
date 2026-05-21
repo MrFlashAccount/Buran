@@ -5,7 +5,7 @@ These scenarios summarize the behavior the current branch already proves through
 ## 1. Packet intake and sufficiency
 
 ### Scenario: sufficient packet becomes executable
-- Given an approved packet with repo, issue, intended branch, implementation instructions, verification expectations, review criteria, and conflict surface
+- Given an approved packet with `work_item` identity, `scm_target`, intended branch, implementation instructions, verification expectations, review criteria, and conflict surface
 - When the packet list is validated and intaken
 - Then the run is created in local registry state and transitions to `queued`
 
@@ -24,7 +24,7 @@ These scenarios summarize the behavior the current branch already proves through
 - And the report returns a structured `lease_required` blocker
 
 ### Scenario: overlapping work is blocked conservatively
-- Given another active run already holds conflicting issue, branch, or conflict-surface locks
+- Given another active run already holds conflicting `scm_target`, branch, or conflict-surface locks
 - When lease acquisition is attempted
 - Then Buran transitions the contender to `blocked_lock_conflict`
 - And the report includes the conflicting lock surfaces
@@ -106,15 +106,15 @@ These scenarios summarize the behavior the current branch already proves through
 - Then Buran reuses the recorded result without duplicating gate events
 - And transitions according to that recorded status
 
-## 6. PR handoff projection
+## 6. Handoff projection
 
-### Scenario: local fake PR handoff completes the slice
+### Scenario: local fake handoff completes the slice
 - Given a run in `pr_ready` with passing current-epoch verification and internal review
 - When the default projection path runs
 - Then Buran records projection intent and result artifacts locally
-- And mirrors the projection summary into `github.pr` / `projections.github_pr`
+- And mirrors the projection summary into provider projection fields; current GitHub-profile compatibility fields are `github.pr` / `projections.github_pr`
 - And transitions to `ready_for_manual_review`
-- And no remote GitHub write occurs
+- And no remote provider write occurs
 
 ### Scenario: transport-backed projection remains contract-safe
 - Given an injected PR transport adapter
@@ -124,7 +124,7 @@ These scenarios summarize the behavior the current branch already proves through
 - And sanitizes secret-like repo or branch values in public-facing recorded payloads
 - And can resume the recorded result idempotently without calling the transport again
 
-### Scenario: GitHub CLI PR transport is opt-in and stacked
+### Scenario: current GitHub CLI PR transport is opt-in and stacked
 - Given GitHub PR transport is disabled or the repo is not allowlisted
 - When a `pr_ready` run tries to project remotely
 - Then Buran blocks in `pr_ready` without calling `gh`
@@ -136,7 +136,7 @@ These scenarios summarize the behavior the current branch already proves through
 - But if the local master workflow context or current `PASS` gate evidence is missing, Buran blocks before calling `gh`
 
 ### Scenario: invalid projection results do not advance the run
-- Given an injected PR transport adapter that returns an invalid or corrupt result
+- Given an injected handoff transport adapter that returns an invalid or corrupt result
 - When projection recording is attempted
 - Then Buran blocks in `pr_ready`
 - And reports a structured projection problem instead of pretending handoff succeeded
@@ -145,7 +145,7 @@ These scenarios summarize the behavior the current branch already proves through
 
 ### Scenario: next slice waits for review-ready evidence
 - Given a prerequisite slice run is not terminal in `ready_for_manual_review`
-- Or its completed implementation dispatch/fix result, verification PASS, independent review PASS, or PR projection evidence is missing
+- Or its completed implementation dispatch/fix result, verification PASS, independent review PASS, or handoff projection evidence is missing
 - When a next stacked slice tries to start with that prerequisite
 - Then Buran blocks before mutating the next run
 - And the runner report lists every prerequisite gate as `PASS` or `BLOCKED`
@@ -164,7 +164,7 @@ These scenarios summarize the behavior the current branch already proves through
 - And valid runs remain available without quarantine
 
 ### Scenario: immutable artifact integrity is enforced on resume
-- Given a previously recorded implementation-dispatch, fix-attempt, verification, internal-review, or PR projection artifact
+- Given a previously recorded implementation-dispatch, fix-attempt, verification, internal-review, or handoff projection artifact
 - When the artifact is missing or no longer matches its recorded hash
 - Then resume is blocked
 - And Buran reports the artifact as missing or corrupt instead of silently reusing it
@@ -178,4 +178,4 @@ Primary coverage lives in:
 - `test/registry-store.test.js`
 - `test/runner.test.js`
 
-These scenarios are documentation of the tested slice, not a promise of unimplemented worker execution, default live GitHub writes, auto-merge, or Done automation.
+These scenarios are documentation of the tested slice, not a promise of unimplemented worker execution, default live provider writes, auto-merge, or Done automation. GitHub-specific scenarios describe the current adapter/profile, not core/domain language.

@@ -9,7 +9,7 @@ import { sanitizePublicReportForOutput } from "../observability/index.js";
 import { buildRecordedPrProjection, createLocalPrProjectionAdapter } from "../workflow-boundary/pr-scm-projection/local-journal-adapter.js";
 import { executeVerificationGate } from "../gates/verification-adapter.js";
 import { evaluateReviewReadyPolicy } from "../stack-workflow/review-ready-policy.js";
-import { readRunSnapshot, recordArtifact, recordGateResult, recordProjectionIntent, recordProjectionResult, transitionRun } from "../execution-runs/registry/index.js";
+import { assertRegistryRepository } from "../execution-runs/registry/index.js";
 import { canonicalJson, isRecord, nonEmptyString, sha256Hex } from "../shared/primitives.js";
 import { hasActiveLease } from "./mission-context.js";
 import { buildIssue, buildRunnerReport, buildStep, implementationBoundaryMessage, internalReviewTransition, internalReviewTransitionReason, leaseRequiredMessage, projectionProblemCode, projectionTransitionReason, unsupportedStageMessage, verificationTransition, verificationTransitionReason } from "./final-report.js";
@@ -291,7 +291,8 @@ async function inspectRecordedGateArtifacts(runDir, snapshot, gateName) {
  * @param {{runDir: string}} params.paths
  * @returns {Promise<object>} Runner report after resuming or executing verification and applying the documented transition edge.
  */
-export async function runVerificationStage({ registryRoot, runId, current, previousState, stepsTaken, blockers, warnings, workspacePreparation, implementationDispatch, clock, actor, paths } = {}) {
+export async function runVerificationStage({ registryRoot, runId, current, previousState, stepsTaken, blockers, warnings, workspacePreparation, implementationDispatch, clock, actor, paths, registryRepository } = {}) {
+  const registry = assertRegistryRepository(registryRepository);
   let verification = null;
 
   if (hasFreshRecordedGate(current, "verification")) {
@@ -346,7 +347,7 @@ export async function runVerificationStage({ registryRoot, runId, current, previ
       detail: "Existing current-epoch verification gate result was reused without re-executing verification.",
     }));
 
-    const transitioned = await transitionRun(registryRoot, runId, {
+    const transitioned = await registry.transitionRun(registryRoot, runId, {
       toState: targetState,
       actor,
       evidence: {
@@ -392,7 +393,7 @@ export async function runVerificationStage({ registryRoot, runId, current, previ
     clock,
   });
 
-  const recordedArtifact = await recordArtifact(registryRoot, runId, {
+  const recordedArtifact = await registry.recordArtifact(registryRoot, runId, {
     artifactPath: verificationRun.artifact_path,
     content: verificationRun.artifact_content,
     gate_name: "verification",
@@ -415,7 +416,7 @@ export async function runVerificationStage({ registryRoot, runId, current, previ
     artifactSha256: recordedArtifact.artifact_ref.sha256,
   }));
 
-  const gateResult = await recordGateResult(registryRoot, runId, {
+  const gateResult = await registry.recordGateResult(registryRoot, runId, {
     gate_name: "verification",
     execution_epoch: verificationRun.execution_epoch,
     gate_attempt: verificationRun.gate_attempt,
@@ -447,7 +448,7 @@ export async function runVerificationStage({ registryRoot, runId, current, previ
   };
 
   const targetState = verificationTransition(verificationRun.status);
-  const transitioned = await transitionRun(registryRoot, runId, {
+  const transitioned = await registry.transitionRun(registryRoot, runId, {
     toState: targetState,
     actor,
     evidence: {
@@ -508,7 +509,8 @@ export async function runVerificationStage({ registryRoot, runId, current, previ
  * @param {{runDir: string}} params.paths
  * @returns {Promise<object>} Runner report after resuming or executing internal review and applying the documented transition edge.
  */
-export async function runInternalReviewStage({ registryRoot, runId, current, previousState, stepsTaken, blockers, warnings, workspacePreparation, implementationDispatch, verification, clock, actor, paths } = {}) {
+export async function runInternalReviewStage({ registryRoot, runId, current, previousState, stepsTaken, blockers, warnings, workspacePreparation, implementationDispatch, verification, clock, actor, paths, registryRepository } = {}) {
+  const registry = assertRegistryRepository(registryRepository);
   let internalReview = null;
 
   if (hasFreshRecordedGate(current, "internal_review")) {
@@ -607,7 +609,7 @@ export async function runInternalReviewStage({ registryRoot, runId, current, pre
       detail: "Existing current-epoch internal review gate result was reused with independent reviewer verdict artifact evidence.",
     }));
 
-    const transitioned = await transitionRun(registryRoot, runId, {
+    const transitioned = await registry.transitionRun(registryRoot, runId, {
       toState: targetState,
       actor,
       evidence: {
@@ -655,7 +657,7 @@ export async function runInternalReviewStage({ registryRoot, runId, current, pre
     clock,
   });
 
-  const recordedArtifact = await recordArtifact(registryRoot, runId, {
+  const recordedArtifact = await registry.recordArtifact(registryRoot, runId, {
     artifactPath: internalReviewRun.artifact_path,
     content: internalReviewRun.artifact_content,
     gate_name: "internal_review",
@@ -678,7 +680,7 @@ export async function runInternalReviewStage({ registryRoot, runId, current, pre
     artifactSha256: recordedArtifact.artifact_ref.sha256,
   }));
 
-  const gateResult = await recordGateResult(registryRoot, runId, {
+  const gateResult = await registry.recordGateResult(registryRoot, runId, {
     gate_name: "internal_review",
     execution_epoch: internalReviewRun.execution_epoch,
     gate_attempt: internalReviewRun.gate_attempt,
@@ -710,7 +712,7 @@ export async function runInternalReviewStage({ registryRoot, runId, current, pre
   };
 
   const targetState = internalReviewTransition(internalReviewRun.status);
-  const transitioned = await transitionRun(registryRoot, runId, {
+  const transitioned = await registry.transitionRun(registryRoot, runId, {
     toState: targetState,
     actor,
     evidence: {
@@ -755,7 +757,7 @@ export async function runInternalReviewStage({ registryRoot, runId, current, pre
 }
 
 /**
- * Records PR projection intent/result for runs already positioned in `pr_ready`.
+ * Records SCM handoff projection intent/result for runs already positioned in `handoff_ready`.
  *
  * @param {object} params
  * @param {string} params.registryRoot

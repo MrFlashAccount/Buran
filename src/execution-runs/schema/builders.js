@@ -76,18 +76,29 @@ export function buildGateResultSummary(payload) {
  * @param {{ createdAt: string, packetArtifactRef: ArtifactRef }} input
  * @returns {JsonRecord}
  */
+function normalizeScmTarget(report) {
+  const legacyGithub = isRecord(report.github) ? report.github : {};
+  const raw = isRecord(report.raw) ? report.raw : {};
+  const rawScmTarget = isRecord(raw.scm_target) ? raw.scm_target : {};
+  const rawGithub = isRecord(raw.github) ? raw.github : {};
+  const scmTarget = isRecord(report.scm_target) ? report.scm_target : {};
+  return {
+    provider: scmTarget.provider || rawScmTarget.provider || legacyGithub.provider || rawGithub.provider || ((legacyGithub.repo || rawGithub.repo) ? "github" : ""),
+    repo: scmTarget.repo || rawScmTarget.repo || legacyGithub.repo || rawGithub.repo || "",
+    issue_number: scmTarget.issue_number ?? rawScmTarget.issue_number ?? legacyGithub.issue_number ?? rawGithub.issue_number ?? null,
+    intended_branch: scmTarget.intended_branch || rawScmTarget.intended_branch || legacyGithub.intended_branch || rawGithub.intended_branch || "",
+    base_branch: scmTarget.base_branch || rawScmTarget.base_branch || legacyGithub.base_branch || rawGithub.base_branch || "",
+  };
+}
+
 export function buildInitialRunSnapshot(report, { createdAt, packetArtifactRef }) {
+  const scmTarget = normalizeScmTarget(report);
   return {
     schema_version: SCHEMA_VERSION,
     run_id: report.run_id,
     task_id: report.task_id,
-    github: {
-      repo: report.github.repo || "",
-      issue_number: report.github.issue_number || null,
-      intended_branch: report.github.intended_branch || "",
-      base_branch: report.github.base_branch || "",
-      pr: null,
-    },
+    scm_target: scmTarget,
+    handoff_target: null,
     packet: {
       hash: report.packet_hash || "",
       source_path: report.source_path || "",
@@ -106,9 +117,9 @@ export function buildInitialRunSnapshot(report, { createdAt, packetArtifactRef }
       lease_status: "not_requested",
     },
     locks: {
-      repo: report.github.repo || "",
-      issue: report.github.issue_number || null,
-      branch: report.github.intended_branch || "",
+      repo: scmTarget.repo,
+      issue: scmTarget.issue_number,
+      branch: scmTarget.intended_branch,
       conflict_surface: report.conflict_surface || [],
       lease_status: "not_requested",
     },
@@ -122,7 +133,7 @@ export function buildInitialRunSnapshot(report, { createdAt, packetArtifactRef }
         by_path: {},
       },
     },
-    projections: {},
+    projection_ledger: {},
     created_at: createdAt,
     updated_at: createdAt,
     terminal_reason: "",

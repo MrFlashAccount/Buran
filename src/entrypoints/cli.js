@@ -15,6 +15,7 @@
  * - every completed invocation finalizes an observability trace.
  */
 import { acquireLeaseReport, formatBuranReport, intakePacketListFile, normalizeBuranConfig, recoverRegistryReport, releaseLeaseReport, runLocalMissionReport, validatePacketListFile } from "../application/commands.js";
+import { createJsonRegistryRepository } from "../integrations/storage/json-registry/repository.js";
 import { correlationFromReport, createInvocationObserver, sanitizeError, sanitizePublicReportForOutput, summarizeArgs, summarizeReport } from "../observability/index.js";
 
 /**
@@ -293,6 +294,7 @@ async function finishCliResult({ result, options, observer, outcome = "success",
  */
 export async function runBuranCli(rawArgs, { pluginConfig = {}, workspaceDir = process.cwd(), stateDir = "", apiLogger = null } = {}) {
   const observer = createInvocationObserver({ component: "cli", pluginConfig, workspaceDir, stateDir, apiLogger });
+  const registryRepository = createJsonRegistryRepository();
   await observer.log("info", "cli.invocation.started", { outcome: "started", context: { args: summarizeArgs(rawArgs) } });
   let options;
   try {
@@ -340,7 +342,7 @@ export async function runBuranCli(rawArgs, { pluginConfig = {}, workspaceDir = p
         });
       }
       const registryRoot = resolveRegistry(options, pluginConfig, workspaceDir, stateDir);
-      const report = await intakePacketListFile(options.packets, { registryRoot });
+      const report = await intakePacketListFile(options.packets, { registryRoot, registryRepository });
       return finishCliResult({ result: { ok: true, report }, options, observer });
     }
 
@@ -362,13 +364,14 @@ export async function runBuranCli(rawArgs, { pluginConfig = {}, workspaceDir = p
         workspacePath: options.workspacePath,
         ttlMs: options.ttlMs,
         implementationDispatchAdapter: runtimeConfig.implementationDispatchAdapter,
+        registryRepository,
       });
       return finishCliResult({ result: { ok: true, report }, options, observer });
     }
 
     if (options.command === "recover" || options.command === "recovery") {
       const registryRoot = resolveRegistry(options, pluginConfig, workspaceDir, stateDir);
-      const report = await recoverRegistryReport({ registryRoot });
+      const report = await recoverRegistryReport({ registryRoot, registryRepository });
       return finishCliResult({ result: { ok: true, report }, options, observer });
     }
 

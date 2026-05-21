@@ -6,7 +6,7 @@ import { createUnavailableImplementationDispatchAdapter } from "../gates/impleme
 import { acquireWorkspaceLease } from "../integrations/worktree/filesystem/locks.js";
 import { createLocalPrProjectionAdapter } from "../workflow-boundary/pr-scm-projection/local-journal-adapter.js";
 import { evaluateReviewReadyPolicy } from "../stack-workflow/review-ready-policy.js";
-import { getRunPaths, readRunSnapshot, transitionRun } from "../execution-runs/registry/index.js";
+import { assertRegistryRepository } from "../execution-runs/registry/index.js";
 import { nonEmptyString } from "../shared/primitives.js";
 
 import { RUNNER_ACTOR } from "./mission-context.js";
@@ -16,18 +16,19 @@ import { runVerificationStage, runInternalReviewStage } from "./gate-pipeline.js
 import { runPrReadyStage } from "./scm-handoff.js";
 import { runFixLoopStage } from "./fix-review-loop.js";
 
-export async function runLocalMission({ registryRoot, runId, workspaceId = "", workspacePath = "", ttlMs = "", clock = () => new Date(), actor = RUNNER_ACTOR, implementationDispatchAdapter = createUnavailableImplementationDispatchAdapter(), prProjectionAdapter = createLocalPrProjectionAdapter(), stackPrerequisite = null } = {}) {
+export async function runLocalMission({ registryRoot, runId, workspaceId = "", workspacePath = "", ttlMs = "", clock = () => new Date(), actor = RUNNER_ACTOR, implementationDispatchAdapter = createUnavailableImplementationDispatchAdapter(), prProjectionAdapter = createLocalPrProjectionAdapter(), registryRepository, stackPrerequisite = null } = {}) {
   if (!registryRoot) throw new Error("registryRoot is required for local mission runner");
   if (!runId) throw new Error("runId is required for local mission runner");
+  const registry = assertRegistryRepository(registryRepository);
 
   const stepsTaken = [];
   const blockers = [];
   const warnings = [];
-  const paths = getRunPaths(registryRoot, runId);
+  const paths = registry.getRunPaths(registryRoot, runId);
 
   let snapshot;
   try {
-    snapshot = await readRunSnapshot(paths.runPath);
+    snapshot = await registry.readRunSnapshot(paths.runPath);
   } catch (error) {
     if (error?.code === "ENOENT") {
       return buildRunnerReport({
@@ -119,7 +120,7 @@ export async function runLocalMission({ registryRoot, runId, workspaceId = "", w
   }
 
   if (current.state === "queued") {
-    const transitioned = await transitionRun(registryRoot, runId, {
+    const transitioned = await registry.transitionRun(registryRoot, runId, {
       toState: "waiting_for_lock",
       actor,
       evidence: { reason: "local mission runner staged run for lease acquisition" },
@@ -209,7 +210,7 @@ export async function runLocalMission({ registryRoot, runId, workspaceId = "", w
     const stageResult = await runImplementationDispatchStage({
       runContext: { registryRoot, runId, current, paths },
       reportState: { stepsTaken, blockers, warnings, workspacePreparation, implementationDispatch },
-      services: { clock, actor, implementationDispatchAdapter },
+      services: { clock, actor, implementationDispatchAdapter, registryRepository: registry },
     });
     return withWorkflowPolicy(buildRunnerReport({
       registryRoot,
@@ -235,6 +236,7 @@ export async function runLocalMission({ registryRoot, runId, workspaceId = "", w
       clock,
       actor,
       paths,
+      registryRepository: registry,
     }));
   }
 
@@ -253,10 +255,11 @@ export async function runLocalMission({ registryRoot, runId, workspaceId = "", w
       clock,
       actor,
       paths,
+      registryRepository: registry,
     }));
   }
 
-  if (current.state === "pr_ready") {
+  if (current.state === "handoff_ready") {
     return withWorkflowPolicy(await runPrReadyStage({
       registryRoot,
       runId,
@@ -272,6 +275,7 @@ export async function runLocalMission({ registryRoot, runId, workspaceId = "", w
       clock,
       actor,
       prProjectionAdapter,
+      registryRepository: registry,
     }));
   }
 
@@ -291,6 +295,7 @@ export async function runLocalMission({ registryRoot, runId, workspaceId = "", w
       clock,
       actor,
       implementationDispatchAdapter,
+      registryRepository: registry,
     }));
   }
 

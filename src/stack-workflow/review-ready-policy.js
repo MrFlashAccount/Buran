@@ -14,7 +14,6 @@ import { GATE_STATUS } from "../execution-runs/constants.js";
 import {
   appendGithubPrContractErrors,
   appendGithubPrValidationErrors,
-  appendProjectedPrParityErrors,
   isSuccessfulProjectionResultStatus,
 } from "../workflow-boundary/pr-scm-projection/contract.js";
 import { sanitizePublicReportForOutput } from "../observability/index.js";
@@ -122,59 +121,63 @@ function appendGithubPrUrlBindingErrors(githubPr, errors, fieldPath) {
   if (!matches) errors.push(`${fieldPath}.url must bind to https://github.com repo and PR number`);
 }
 
-function appendProjectionGithubPrErrors(snapshot, githubPr, errors, fieldPath) {
-  appendGithubPrValidationErrors(githubPr, errors, fieldPath);
-  if (!isRecord(githubPr)) return;
-  appendGithubPrContractErrors(snapshot, githubPr, errors, fieldPath);
-  appendGithubPrUrlBindingErrors(githubPr, errors, fieldPath);
+function appendHandoffTargetErrors(snapshot, handoffTarget, errors, fieldPath) {
+  appendGithubPrValidationErrors(handoffTarget, errors, fieldPath);
+  if (!isRecord(handoffTarget)) return;
+  appendGithubPrContractErrors(snapshot, handoffTarget, errors, fieldPath);
+  appendGithubPrUrlBindingErrors(handoffTarget, errors, fieldPath);
 }
 
-function projectionParityErrors(pr, resultPr) {
+function projectionParityErrors(handoffTarget, resultTarget) {
   const errors = [];
-  if (!isRecord(resultPr)) {
-    errors.push("projections.github_pr.last_result.github_pr must be present.");
+  if (!isRecord(resultTarget)) {
+    errors.push("projection_ledger.handoff_target.last_result.handoff_target must be present.");
     return errors;
   }
-  appendProjectedPrParityErrors(pr, resultPr, errors);
+  for (const key of ["number", "url", "repo", "issue_number", "head_branch", "base_branch", "state", "draft", "title"]) {
+    if ((handoffTarget?.[key] ?? null) !== (resultTarget?.[key] ?? null)) {
+      errors.push(`handoff_target.${key} must match projection_ledger.handoff_target.last_result.handoff_target.${key}`);
+    }
+  }
   return errors;
 }
 
 function projectionReadiness(snapshot) {
-  const projection = snapshot?.projections?.github_pr;
+  const projection = snapshot?.projection_ledger?.handoff_target;
   const result = projection?.last_result;
-  const pr = snapshot?.github?.pr;
+  const handoffTarget = snapshot?.handoff_target;
   const epoch = currentEpoch(snapshot);
   const errors = [];
 
-  if (!isRecord(projection)) errors.push("projections.github_pr must be present.");
-  if (isRecord(projection) && projection.execution_epoch !== epoch) errors.push("projections.github_pr.execution_epoch must match the current epoch.");
-  if (!isRecord(result)) errors.push("projections.github_pr.last_result must be present.");
-  if (isRecord(result) && result.execution_epoch !== epoch) errors.push("projections.github_pr.last_result.execution_epoch must match the current epoch.");
-  if (isRecord(result) && result.recorded_from_state !== "pr_ready") errors.push("projections.github_pr.last_result.recorded_from_state must be pr_ready.");
-  if (isRecord(result) && !isSuccessfulProjectionResultStatus(result.status)) errors.push("projections.github_pr.last_result.status must be successful.");
-  if (isRecord(result) && !artifactRefOk(result.artifact_ref)) errors.push("projections.github_pr.last_result.artifact_ref must be recorded.");
-  if (isRecord(result) && !nonEmptyString(result.idempotency_key)) errors.push("projections.github_pr.last_result.idempotency_key must be recorded.");
+  if (!isRecord(projection)) errors.push("projection_ledger.handoff_target must be present.");
+  if (isRecord(projection) && projection.execution_epoch !== epoch) errors.push("projection_ledger.handoff_target.execution_epoch must match the current epoch.");
+  if (!isRecord(result)) errors.push("projection_ledger.handoff_target.last_result must be present.");
+  if (isRecord(result) && result.execution_epoch !== epoch) errors.push("projection_ledger.handoff_target.last_result.execution_epoch must match the current epoch.");
+  if (isRecord(result) && result.recorded_from_state !== "handoff_ready") errors.push("projection_ledger.handoff_target.last_result.recorded_from_state must be handoff_ready.");
+  if (isRecord(result) && !isSuccessfulProjectionResultStatus(result.status)) errors.push("projection_ledger.handoff_target.last_result.status must be successful.");
+  if (isRecord(result) && !artifactRefOk(result.artifact_ref)) errors.push("projection_ledger.handoff_target.last_result.artifact_ref must be recorded.");
+  if (isRecord(result) && !nonEmptyString(result.idempotency_key)) errors.push("projection_ledger.handoff_target.last_result.idempotency_key must be recorded.");
   const intent = projection?.last_intent;
   if (isRecord(intent)) {
-    if (intent.execution_epoch !== epoch) errors.push("projections.github_pr.last_intent.execution_epoch must match the current epoch.");
-    if (intent.recorded_from_state !== "pr_ready") errors.push("projections.github_pr.last_intent.recorded_from_state must be pr_ready.");
-    if (!artifactRefOk(intent.artifact_ref)) errors.push("projections.github_pr.last_intent.artifact_ref must be recorded.");
-    if (!nonEmptyString(intent.idempotency_key)) errors.push("projections.github_pr.last_intent.idempotency_key must be recorded.");
+    if (intent.execution_epoch !== epoch) errors.push("projection_ledger.handoff_target.last_intent.execution_epoch must match the current epoch.");
+    if (intent.recorded_from_state !== "handoff_ready") errors.push("projection_ledger.handoff_target.last_intent.recorded_from_state must be handoff_ready.");
+    if (!artifactRefOk(intent.artifact_ref)) errors.push("projection_ledger.handoff_target.last_intent.artifact_ref must be recorded.");
+    if (!nonEmptyString(intent.idempotency_key)) errors.push("projection_ledger.handoff_target.last_intent.idempotency_key must be recorded.");
     if (isRecord(result) && nonEmptyString(result.intent_idempotency_key) && result.intent_idempotency_key !== intent.idempotency_key) {
-      errors.push("projections.github_pr.last_result.intent_idempotency_key must match projections.github_pr.last_intent.idempotency_key.");
+      errors.push("projection_ledger.handoff_target.last_result.intent_idempotency_key must match projection_ledger.handoff_target.last_intent.idempotency_key.");
     }
   }
 
-  if (!isRecord(pr)) {
-    errors.push("github.pr must be present.");
+  if (!isRecord(handoffTarget)) {
+    errors.push("handoff_target must be present.");
   } else {
-    appendProjectionGithubPrErrors(snapshot, pr, errors, "github.pr");
+    appendHandoffTargetErrors(snapshot, handoffTarget, errors, "handoff_target");
   }
 
-  if (isRecord(result?.github_pr)) {
-    appendProjectionGithubPrErrors(snapshot, result.github_pr, errors, "projections.github_pr.last_result.github_pr");
+  if (isRecord(result?.handoff_target)) {
+    appendHandoffTargetErrors(snapshot, result.handoff_target, errors, "projection_ledger.handoff_target.last_result.handoff_target");
   }
-  if (isRecord(pr) && isRecord(result)) errors.push(...projectionParityErrors(pr, result.github_pr));
+  if (isRecord(handoffTarget) && isRecord(result)) errors.push(...projectionParityErrors(handoffTarget, result.handoff_target));
   return { ready: errors.length === 0, errors };
 }
 
@@ -240,10 +243,10 @@ export function evaluateReviewReadyPolicy(snapshot, { currentSlice = "", nextSli
         gate: snapshot?.gates?.internal_review || null,
       }),
     gate("pr_projection", projectionReady, projectionReady
-      ? "PR projection result is recorded and mirrored into github.pr."
-      : "A successful current-epoch PR projection result that matches github.pr is required before starting the next slice.", {
-        projection: snapshot?.projections?.github_pr || null,
-        github_pr: snapshot?.github?.pr || null,
+      ? "SCM handoff projection result is recorded and mirrored into handoff_target."
+      : "A successful current-epoch SCM handoff projection result that matches handoff_target is required before starting the next slice.", {
+        projection: snapshot?.projection_ledger?.handoff_target || null,
+        handoff_target: snapshot?.handoff_target || null,
         parity_errors: projectionReadinessResult.errors,
       }),
     gate("review_ready_terminal_state", terminalReady, terminalReady

@@ -6,7 +6,7 @@ This file is the quick source-tree guide for maintainers. It maps the context-fi
 
 | Path | Responsibility |
 | --- | --- |
-| `index.js` | OpenClaw plugin export surface. |
+| `index.js` | embedding/plugin export surface; current runtime profile is OpenClaw. |
 | `bin/buran.js` | CLI wrapper for local command execution. |
 | `src/entrypoints/cli.js` | argument parsing and command dispatch for `validate`, `intake`, `run`, `lease`, and `recover`. |
 | `src/application/commands.js` | packet-list validation, intake orchestration, and CLI report assembly. |
@@ -26,7 +26,7 @@ This file is the quick source-tree guide for maintainers. It maps the context-fi
 | `src/gates/verification-adapter.js` | allowlisted verification command execution and verification report generation. |
 | `src/gates/internal-review-adapter.js` | local internal-review report generation that treats packet review text as context only. |
 | `src/stack-workflow/review-ready-policy.js` | review-ready stack progression policy. |
-| `src/workflow-boundary/pr-scm-projection/` | generic PR/SCM projection contract and local journal projection adapter. |
+| `src/workflow-boundary/pr-scm-projection/` | provider-neutral SCM/handoff projection contract and local `projection_ledger` adapter; `pr` is current GitHub-profile naming. |
 | `src/observability/` | redaction, public report sanitization, summaries, and observability path helpers. |
 | `src/shared/primitives.js` | generic helpers such as hashing, string normalization, and utility checks. |
 
@@ -39,18 +39,18 @@ This file is the quick source-tree guide for maintainers. It maps the context-fi
 | `src/application/mission-phase-runner.js` | workspace-preparation and implementation-dispatch stage coordination. |
 | `src/application/gate-pipeline.js` | verification and internal-review sequencing. |
 | `src/application/fix-review-loop.js` | bounded fix-loop retry coordination. |
-| `src/application/scm-handoff.js` | provider-neutral PR/SCM handoff coordination. |
+| `src/application/scm-handoff.js` | provider-neutral SCM/handoff coordination. |
 | `src/application/final-report.js` | runner report and step/problem formatting. |
 
 ## External integrations
 
 | Path | Responsibility |
 | --- | --- |
-| `src/integrations/storage/json-registry/` | JSON registry store, path layout, event journal, and atomic file writes. |
-| `src/integrations/worktree/filesystem/locks.js` | filesystem-backed workspace lease acquisition/release and conflict detection. |
+| `src/integrations/storage/json-registry/` | concrete JSON/filesystem registry adapter: path layout, event journal, and atomic file writes. |
+| `src/integrations/worktree/filesystem/locks.js` | concrete filesystem-backed workspace lease acquisition/release and conflict detection. |
 | `src/integrations/worktree/filesystem/workspace-preparation.js` | local git workspace inspection and immutable preparation artifact content. |
-| `src/integrations/implementation/codex/CONTEXT.md` | reserved Codex/runtime integration note; no concrete Codex adapter is implemented in this slice. |
-| `src/integrations/scm/github/pr-transport-adapter.js` | optional GitHub CLI stacked-PR transport adapter. |
+| `src/integrations/implementation/codex/CONTEXT.md` | reserved concrete Codex/runtime integration note; no concrete Codex adapter is implemented in this slice and core does not depend on it. |
+| `src/integrations/scm/github/pr-transport-adapter.js` | optional current-profile GitHub CLI stacked-PR transport adapter. |
 
 ## Test map
 
@@ -85,9 +85,9 @@ recover -> replay + rebuild + quarantine when state is ambiguous
 
 ## What is intentionally absent
 
-- no autonomous task discovery
+- no autonomous `work_item` discovery
 - no direct implementation or fix worker execution inside the runner; worker execution is behind injected approved adapters
 - no implementation worker execution outside the approved implementation-harness adapter boundary
 - no fix-loop worker execution outside the approved implementation-harness adapter boundary
-- no default remote GitHub write path in the CLI/runtime slice; live GitHub PR transport is injected and explicitly enabled only
+- no default remote provider write path in the CLI/runtime slice; live GitHub PR transport is a current-profile adapter that is injected and explicitly enabled only
 - no dashboard or backlog management surface

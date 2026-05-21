@@ -4,7 +4,7 @@ import path from "node:path";
 import { PLUGIN_ID, SCHEMA_VERSION } from "../execution-runs/constants.js";
 import { acquireWorkspaceLease, releaseWorkspaceLease } from "../integrations/worktree/filesystem/locks.js";
 import { normalizePacketList, summarizePacketReports } from "../approved-packets/sufficiency.js";
-import { createBatchFromPacketReports, createRunFromPacketReport, getRegistryPaths } from "../execution-runs/registry/index.js";
+import { assertRegistryRepository } from "../execution-runs/registry/index.js";
 import { formatRecoveryReport, recoverRegistry } from "../execution-runs/recovery/index.js";
 import { runLocalMission } from "./run-local-mission.js";
 import { nonEmptyString, resolveMaybeRelative } from "../shared/primitives.js";
@@ -56,8 +56,9 @@ export async function validatePacketListFile(packetListPath) {
   };
 }
 
-export async function intakePacketListFile(packetListPath, { registryRoot, clock = () => new Date() } = {}) {
+export async function intakePacketListFile(packetListPath, { registryRoot, registryRepository, clock = () => new Date() } = {}) {
   if (!registryRoot) throw new Error("registryRoot is required for intake");
+  const registry = assertRegistryRepository(registryRepository);
   const parsed = await readPacketListFile(packetListPath);
   const reports = normalizePacketList(parsed, { sourcePath: packetListPath });
   const runs = [];
@@ -65,7 +66,7 @@ export async function intakePacketListFile(packetListPath, { registryRoot, clock
   const intakeClock = () => new Date(createdAt);
 
   for (const report of reports) {
-    const created = await createRunFromPacketReport(report, { registryRoot, clock: intakeClock });
+    const created = await registry.createRunFromPacketReport(report, { registryRoot, clock: intakeClock });
     runs.push({
       run_id: created.run.run_id,
       task_id: created.run.task_id,
@@ -74,7 +75,7 @@ export async function intakePacketListFile(packetListPath, { registryRoot, clock
       missing_fields: created.run.packet.missing_fields,
     });
   }
-  const batch = await createBatchFromPacketReports(reports, runs, {
+  const batch = await registry.createBatchFromPacketReports(reports, runs, {
     registryRoot,
     createdAt,
   });
@@ -83,7 +84,7 @@ export async function intakePacketListFile(packetListPath, { registryRoot, clock
     schema_version: SCHEMA_VERSION,
     mode: "intake",
     registry_written: true,
-    registry: getRegistryPaths(registryRoot),
+    registry: registry.getRegistryPaths(registryRoot),
     summary: summarizePacketReports(reports),
     packets: reports.map(toPublicPacketReport),
     batch,
@@ -98,13 +99,14 @@ export function toPublicPacketReport(report) {
     sufficiency_status: report.sufficiency_status,
     sufficient: report.sufficient,
     missing_fields: report.missing_fields,
-    github: report.github || {},
+    scm_target: report.scm_target || {},
     conflict_surface: report.conflict_surface || [],
   };
 }
 
-export async function recoverRegistryReport({ registryRoot, clock = () => new Date() } = {}) {
-  const report = await recoverRegistry(registryRoot, { clock });
+export async function recoverRegistryReport({ registryRoot, registryRepository, clock = () => new Date() } = {}) {
+  const registry = assertRegistryRepository(registryRepository);
+  const report = await recoverRegistry(registryRoot, { clock, registryRepository: registry });
   return report;
 }
 
@@ -149,9 +151,10 @@ export async function releaseLeaseReport({ registryRoot, runId, clock = () => ne
   };
 }
 
-export async function runLocalMissionReport({ registryRoot, runId, workspaceId = "", workspacePath = "", ttlMs = "", clock = () => new Date(), implementationDispatchAdapter = null, stackPrerequisite = null } = {}) {
+export async function runLocalMissionReport({ registryRoot, runId, workspaceId = "", workspacePath = "", ttlMs = "", clock = () => new Date(), implementationDispatchAdapter = null, registryRepository, stackPrerequisite = null } = {}) {
   return runLocalMission({
     registryRoot,
+    registryRepository,
     runId,
     workspaceId,
     workspacePath,

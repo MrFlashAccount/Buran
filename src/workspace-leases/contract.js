@@ -63,9 +63,9 @@ export function buildLeaseRequest(snapshot, {
   const resolvedWorkspaceId = normalizeWorkspaceId(workspaceId, snapshot.run_id);
   const requestedWorkspacePath = nonEmptyString(workspacePath) || defaultWorkspacePath(registryRoot, resolvedWorkspaceId);
   const resolvedWorkspacePath = path.resolve(requestedWorkspacePath);
-  const repo = nonEmptyString(snapshot.github?.repo || snapshot.locks?.repo);
-  const issueNumber = Number.isSafeInteger(snapshot.github?.issue_number) ? snapshot.github.issue_number : snapshot.locks?.issue;
-  const branch = nonEmptyString(snapshot.github?.intended_branch || snapshot.locks?.branch);
+  const repo = nonEmptyString(snapshot.scm_target?.repo || snapshot.locks?.repo);
+  const issueNumber = Number.isSafeInteger(snapshot.scm_target?.issue_number) ? snapshot.scm_target.issue_number : snapshot.locks?.issue;
+  const branch = nonEmptyString(snapshot.scm_target?.intended_branch || snapshot.locks?.branch);
   if (!repo) throw new Error("run repo is required for lease acquisition");
   if (!Number.isSafeInteger(issueNumber) || issueNumber <= 0) throw new Error("run issue number is required for lease acquisition");
   if (!branch) throw new Error("run branch is required for lease acquisition");

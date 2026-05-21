@@ -157,22 +157,28 @@ export function appendGithubPrValidationErrors(githubPr, errors, fieldPath = "gi
  * @returns {void}
  */
 export function appendGithubPrContractErrors(snapshot, githubPr, errors, fieldPath = "github.pr", { durable = false } = {}) {
-  const expectedRepo = projectionContractString(snapshot?.github?.repo, { durable });
-  const expectedIssueNumber = Number.isSafeInteger(snapshot?.github?.issue_number) ? snapshot.github.issue_number : null;
-  const expectedHeadBranch = projectionContractString(snapshot?.github?.intended_branch, { durable });
-  const expectedBaseBranch = projectionContractString(snapshot?.github?.base_branch, { durable });
+  const scmTarget = isRecord(snapshot?.scm_target) ? snapshot.scm_target : {};
+  const legacyGithub = isRecord(snapshot?.github) ? snapshot.github : {};
+  const expectedRepo = projectionContractString(scmTarget.repo || legacyGithub.repo, { durable });
+  const expectedIssueNumber = Number.isSafeInteger(scmTarget.issue_number)
+    ? scmTarget.issue_number
+    : Number.isSafeInteger(legacyGithub.issue_number)
+      ? legacyGithub.issue_number
+      : null;
+  const expectedHeadBranch = projectionContractString(scmTarget.intended_branch || legacyGithub.intended_branch, { durable });
+  const expectedBaseBranch = projectionContractString(scmTarget.base_branch || legacyGithub.base_branch, { durable });
 
-  if (!expectedRepo) errors.push(`${fieldPath}.repo cannot be verified because github.repo is missing from the local contract`);
-  else if (githubPr?.repo !== expectedRepo) errors.push(`${fieldPath}.repo must match github.repo`);
+  if (!expectedRepo) errors.push(`${fieldPath}.repo cannot be verified because scm_target.repo is missing from the local contract`);
+  else if (githubPr?.repo !== expectedRepo) errors.push(`${fieldPath}.repo must match scm_target.repo`);
 
-  if (expectedIssueNumber === null) errors.push(`${fieldPath}.issue_number cannot be verified because github.issue_number is missing from the local contract`);
-  else if (githubPr?.issue_number !== expectedIssueNumber) errors.push(`${fieldPath}.issue_number must match github.issue_number`);
+  if (expectedIssueNumber === null) errors.push(`${fieldPath}.issue_number cannot be verified because scm_target.issue_number is missing from the local contract`);
+  else if (githubPr?.issue_number !== expectedIssueNumber) errors.push(`${fieldPath}.issue_number must match scm_target.issue_number`);
 
-  if (!expectedHeadBranch) errors.push(`${fieldPath}.head_branch cannot be verified because github.intended_branch is missing from the local contract`);
-  else if (githubPr?.head_branch !== expectedHeadBranch) errors.push(`${fieldPath}.head_branch must match github.intended_branch`);
+  if (!expectedHeadBranch) errors.push(`${fieldPath}.head_branch cannot be verified because scm_target.intended_branch is missing from the local contract`);
+  else if (githubPr?.head_branch !== expectedHeadBranch) errors.push(`${fieldPath}.head_branch must match scm_target.intended_branch`);
 
   if (!expectedBaseBranch) errors.push(`${fieldPath}.base_branch cannot be derived from the local run contract`);
-  else if (githubPr?.base_branch !== expectedBaseBranch) errors.push(`${fieldPath}.base_branch must match github.base_branch`);
+  else if (githubPr?.base_branch !== expectedBaseBranch) errors.push(`${fieldPath}.base_branch must match scm_target.base_branch`);
 }
 
 export function appendProjectedPrParityErrors(left, right, errors, leftPath = "github.pr", rightPath = "projections.github_pr.last_result.github_pr") {
@@ -194,7 +200,7 @@ export function appendProjectedPrParityErrors(left, right, errors, leftPath = "g
  * @returns {object} Next snapshot state with updated projection bookkeeping.
  */
 export function mergeProjectionSnapshot(snapshot, payload, sequence) {
-  const currentProjection = isRecord(snapshot.projections?.github_pr) ? snapshot.projections.github_pr : {};
+  const currentProjection = isRecord(snapshot.projection_ledger?.handoff_target) ? snapshot.projection_ledger.handoff_target : {};
   const nextProjection = {
     projection_name: payload.projection_name,
     projection_target: payload.projection_target,
@@ -226,7 +232,7 @@ export function mergeProjectionSnapshot(snapshot, payload, sequence) {
       intent_idempotency_key: payload.intent_idempotency_key,
       execution_epoch: payload.execution_epoch,
       recorded_from_state: payload.recorded_from_state,
-      github_pr: payload.github_pr,
+      handoff_target: payload.handoff_target,
       sequence,
     };
   }
@@ -235,17 +241,14 @@ export function mergeProjectionSnapshot(snapshot, payload, sequence) {
     ...snapshot,
     last_sequence: Math.max(Number.isSafeInteger(snapshot.last_sequence) ? snapshot.last_sequence : 0, sequence),
     updated_at: typeof snapshot.updated_at === "string" && snapshot.updated_at > payload.recorded_at ? snapshot.updated_at : payload.recorded_at,
-    projections: {
-      ...(snapshot.projections || {}),
-      github_pr: nextProjection,
+    projection_ledger: {
+      ...(snapshot.projection_ledger || {}),
+      handoff_target: nextProjection,
     },
   };
 
   if (payload.type === "projection.result_recorded" && isSuccessfulProjectionResultStatus(payload.status)) {
-    nextSnapshot.github = {
-      ...(snapshot.github || {}),
-      pr: payload.github_pr,
-    };
+    nextSnapshot.handoff_target = payload.handoff_target;
   }
 
   return nextSnapshot;

@@ -254,6 +254,22 @@ export async function releaseWorkspaceLease(registryRoot, runId, { reason = "exp
   return { status: "released", ...result };
 }
 
+function withLegacyGithubScmTarget(snapshot) {
+  if (snapshot?.scm_target?.repo) return snapshot;
+  const github = snapshot?.github;
+  if (!github || typeof github !== "object") return snapshot;
+  return {
+    ...snapshot,
+    scm_target: {
+      provider: "github",
+      repo: github.repo,
+      issue_number: github.issue_number,
+      intended_branch: github.intended_branch,
+      base_branch: github.base_branch,
+    },
+  };
+}
+
 export async function acquireWorkspaceLease(registryRoot, runId, {
   workspaceId,
   workspacePath = "",
@@ -265,7 +281,7 @@ export async function acquireWorkspaceLease(registryRoot, runId, {
 } = {}) {
   if (!registryRoot) throw new Error("registryRoot is required for lease acquisition");
   const paths = getRunPaths(registryRoot, runId);
-  let snapshot = await readRunSnapshot(paths.runPath);
+  let snapshot = withLegacyGithubScmTarget(await readRunSnapshot(paths.runPath));
   if (TERMINAL_STATES.has(snapshot.state)) throw new Error(`terminal run ${runId} cannot acquire a lease from state ${snapshot.state}`);
   if (snapshot.state === "queued") {
     const waiting = await commitRunTransition(paths.runDir, snapshot, {
@@ -274,7 +290,7 @@ export async function acquireWorkspaceLease(registryRoot, runId, {
       evidence: { reason: "lease acquisition requested" },
       clock,
     });
-    snapshot = waiting.run;
+    snapshot = withLegacyGithubScmTarget(waiting.run);
   }
   if (snapshot.state !== "waiting_for_lock") throw new Error(`run ${runId} must be queued or waiting_for_lock to acquire a lease; current state: ${snapshot.state}`);
 
