@@ -31,6 +31,25 @@ function publicGhAction(args) {
   return [args?.[0], args?.[1]].map(nonEmptyString).filter(Boolean).join(" ") || "gh";
 }
 
+/**
+ * Noninteractive GitHub CLI client for the GitHub PR transport integration.
+ *
+ * Contract:
+ * - invokes `gh` with explicit argv arrays via injected `execFileImpl`;
+ * - never prompts interactively; auth must already be available from the supplied environment;
+ * - merges `env` and `extraEnv` through `buildGithubCliEnv`;
+ * - applies a positive `timeoutMs`, defaulting to `DEFAULT_GH_TIMEOUT_MS`; and
+ * - normalizes process failures into projection errors with stable `code` values.
+ *
+ * Methods:
+ * - `run(args)` executes raw `gh` commands and returns stdout/stderr from `execFile`;
+ * - `runJson(args)` parses JSON stdout or returns `null` for empty output;
+ * - PR helpers map to `gh pr list/create/edit/view` with explicit repo/head/base selectors.
+ *
+ * Error semantics: missing CLI => `projection_github_unavailable`; timeout => `projection_github_timeout`;
+ * auth/permission/interactive-login failure => `projection_github_auth_failed`; malformed JSON or PR shape mismatch
+ * is reported as `projection_github_remote_mismatch` by this client or its caller.
+ */
 export class GitHubCliClient {
   constructor({ ghPath = "gh", execFileImpl = execFileAsync, env = process.env, extraEnv = {}, timeoutMs = DEFAULT_GH_TIMEOUT_MS } = {}) {
     this.ghPath = ghPath;
@@ -87,6 +106,12 @@ export class GitHubCliClient {
   }
 }
 
+/**
+ * Create a `gh` CLI client for GitHub PR transport calls.
+ *
+ * @param {object} [options] CLI path, exec implementation, environment, additional env, and timeout settings.
+ * @returns {GitHubCliClient} Noninteractive GitHub CLI client.
+ */
 export function createGitHubCliClient(options = {}) {
   return new GitHubCliClient(options);
 }

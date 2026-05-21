@@ -34,14 +34,33 @@ const oldTopLevelModules = new Set([
   "workspace-preparation.js",
 ]);
 const domainVocabulary = /\b(buran|packet|registry|run|runs|gate|github|projection|workflow|lease|state-machine|implementation-dispatch)\b/i;
-const oldExecutionRunAuthorityModules = new Set([
-  "src/execution-runs/constants.js",
-  "src/execution-runs/state-machine.js",
-]);
-const coreProviderVocabulary = /GitHub|Github|github-pr/;
-const coreProviderCompatibilityFiles = new Set([
+const removedCompatibilityModules = new Set([
+  "src/application/workspace-preparation-inspector.js",
   "src/core/modules/scm-handoff/value-objects/github-pr-handoff-target.js",
+  "src/execution-runs/constants.js",
+  "src/execution-runs/registry/index.js",
+  "src/execution-runs/state-machine.js",
+  "src/integrations/scm/github/pr-transport-adapter.js",
+  "src/workflow-boundary/pr-scm-projection/contract.js",
+  "src/workflow-boundary/pr-scm-projection/local-journal-adapter.js",
+  "src/workflow-boundary/scm-handoff/contract.js",
+  "src/workflow-boundary/scm-handoff/index.js",
+  "src/workflow-boundary/scm-handoff/local-journal-adapter.js",
+  "src/workflow-boundary/scm-handoff/port.js",
+  "src/workspace-leases/lease-record-store.js",
+  "src/workspace-leases/service.js",
 ]);
+const removedCompatibilityPathPrefixes = [
+  "src/workflow-boundary/pr-scm-projection/",
+  "src/workflow-boundary/scm-handoff/",
+];
+const forbiddenCompatibilitySourcePatterns = [
+  "Compatibility re-export",
+  "Compatibility wrapper",
+  "deprecated re-export",
+  "deprecated wrapper",
+].map((text) => new RegExp(text));
+const coreProviderVocabulary = /GitHub|Github|github-pr/;
 
 function shouldSkipDirectory(parentDir, entryName) {
   if (skippedDirNames.has(entryName)) return true;
@@ -113,6 +132,10 @@ async function validateDocumentedRepoPaths() {
 
 await validateDocumentedRepoPaths();
 
+for (const removedPath of removedCompatibilityModules) {
+  if (await documentedPathExists(removedPath)) failures.push(`removed compatibility module still exists: ${removedPath}`);
+}
+
 const srcTop = await fs.readdir(path.join(root, "src"), { withFileTypes: true });
 for (const entry of srcTop) {
   if (entry.isFile() && entry.name.endsWith(".js")) failures.push(`top-level src shim/file is not allowed: src/${entry.name}`);
@@ -127,8 +150,8 @@ for (const file of jsFiles) {
     if (resolved.startsWith("src/") && resolved.split("/").length === 2 && oldTopLevelModules.has(path.basename(resolved))) {
       failures.push(`${fileRel} imports old flat src module ${resolved}`);
     }
-    if (oldExecutionRunAuthorityModules.has(resolved) && fileRel !== resolved && /^src\//.test(fileRel)) {
-      failures.push(`${fileRel} imports deprecated execution-run authority module ${resolved}; use src/core/modules/execution-runs`);
+    if (removedCompatibilityModules.has(resolved) || removedCompatibilityPathPrefixes.some((prefix) => resolved.startsWith(prefix))) {
+      failures.push(`${fileRel} imports removed compatibility module ${resolved}; use canonical architecture paths`);
     }
     if (/^src\/core\//.test(fileRel)) {
       if (/^src\/(application|composition|entrypoints|integrations)\//.test(resolved)) {
@@ -163,9 +186,19 @@ for (const file of jsFiles) {
 const coreModuleFiles = await listFiles(path.join(root, "src", "core", "modules"), (file) => file.endsWith(".js") || file.endsWith(".md"));
 for (const file of coreModuleFiles) {
   const fileRel = rel(file);
-  if (coreProviderCompatibilityFiles.has(fileRel)) continue;
   const source = await fs.readFile(file, "utf8");
   if (coreProviderVocabulary.test(source)) failures.push(`${fileRel} contains provider-specific GitHub vocabulary in canonical core`);
+}
+
+const sourceContractFiles = await listFiles(root, (file) => {
+  const fileRel = rel(file);
+  return (file.endsWith(".js") || file.endsWith(".md")) && /^(src|test|scripts)\//.test(fileRel) && fileRel !== "scripts/boundary-check.js";
+});
+for (const file of sourceContractFiles) {
+  const source = await fs.readFile(file, "utf8");
+  for (const pattern of forbiddenCompatibilitySourcePatterns) {
+    if (pattern.test(source)) failures.push(`${rel(file)} contains removed compatibility/deprecated-wrapper marker ${pattern}`);
+  }
 }
 
 const sharedFiles = await listFiles(path.join(root, "src", "shared"), (file) => file.endsWith(".js"));

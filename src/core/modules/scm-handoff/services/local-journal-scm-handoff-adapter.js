@@ -381,10 +381,21 @@ export class LocalJournalScmHandoffAdapter {
   }
 }
 
+/**
+ * Create the local journal SCM handoff adapter and assert it satisfies the provider-neutral port.
+ *
+ * @param {object} [options] Adapter/mode labels for durable projection metadata.
+ * @returns {LocalJournalScmHandoffAdapter} Port-checked no-network SCM handoff adapter.
+ */
 export function createLocalJournalScmHandoffAdapter(options = {}) {
   return assertScmHandoffPort(new LocalJournalScmHandoffAdapter(options));
 }
 
+/**
+ * Backward-compatible factory alias for the local journal SCM handoff adapter.
+ *
+ * @returns {LocalJournalScmHandoffAdapter} Port-checked no-network SCM handoff adapter.
+ */
 export function createLocalScmHandoffAdapter() {
   return createLocalJournalScmHandoffAdapter();
 }

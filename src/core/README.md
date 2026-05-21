@@ -13,4 +13,4 @@ Canonical modules:
 
 - `modules/execution-runs` is the execution lifecycle authority;
 - `modules/scm-handoff` owns provider-neutral handoff contracts and the no-network local adapter;
-- GitHub-specific vocabulary/transport belongs in `src/integrations/scm/github/` or explicit deprecated compatibility wrappers only.
+- GitHub-specific vocabulary/transport belongs in `src/integrations/scm/github/`.

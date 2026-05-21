@@ -6,7 +6,7 @@ Implementation ownership is explicit:
 
 - `src/execution-runs/schema/index.js` owns current `execution-run.v2` snapshot, batch, lease-record builders/validators, typed artifact/gate event validators, artifact-ref traversal, and version rejection policy.
 - `src/integrations/storage/json-registry/store.js` owns registry domain write ordering for run snapshots, events, artifacts, indexes, and run lease snapshot/event updates.
-- `src/execution-runs/registry/index.js` remains a compatibility export surface for existing callers; new domain mutations should route through the store seam.
+- Registry mutation callers route through the canonical `src/core/modules/execution-runs/ports/registry-repository.js` port and concrete registry store seam.
 
 ## Layout
 
@@ -74,7 +74,7 @@ Required fields:
 | `task_id` | Legacy-compatible local identifier for the approved `work_item` from the packet/batch. |
 | `work_item` | Provider-neutral approved work identity and summary. |
 | `scm_target` | Provider-neutral repo/review target, branch, and conflict identity. |
-| `github` | Current GitHub-profile compatibility view of repo, issue number, intended branch, and PR metadata when created or locally projected for handoff. Adapter-specific; not core/domain language. |
+| `github` | Current GitHub-profile persisted view of repo, issue number, intended branch, and PR metadata when created or locally projected for handoff. Adapter-specific; not core/domain language. |
 | `packet` | Packet hash, source path/reference, approval metadata, and sufficiency status. |
 | `state` | Current state from `docs/state-machine.md`. |
 | `last_sequence` | Last fully applied event sequence reflected by the snapshot. |
@@ -85,7 +85,7 @@ Required fields:
 | `gates.internal_review` | Current internal-review gate head: status, epoch, attempt, refs, actor, and idempotency summary. |
 | `artifacts.recorded.by_path` | Immutable recorded-artifact heads keyed by relative artifact path, with epoch/attempt provenance. |
 | `artifacts` | Named artifact references and recorded-artifact content hashes. |
-| `projections` | Last known provider projection results, including local fake handoff metadata when no network write is allowed. Current GitHub/TaskFlow fields are adapter/profile compatibility views. |
+| `projections` | Last known provider projection results, including local fake handoff metadata when no network write is allowed. Current GitHub/TaskFlow fields are adapter/profile persisted views. |
 | `created_at` / `updated_at` | Timestamps. |
 | `terminal_reason` | Required for terminal blocked/failed states. |
 
@@ -125,10 +125,10 @@ Required lease fields:
 | `lease_id` | Lease id shared by all surface records for one run acquisition. |
 | `run_id` / `task_id` | Owning run and legacy-compatible `work_item` id. |
 | `status` | `acquired` for active lease records. |
-| `surface` | `workspace`, `repo_checkout`, `scm_target`, `branch`, or `conflict_surface` (`issue` remains a current GitHub-profile compatibility surface). |
+| `surface` | `workspace`, `repo_checkout`, `scm_target`, `branch`, or `conflict_surface` (`issue` remains a current GitHub-profile persisted surface). |
 | `key` / `value` | Canonical lock key and human-readable value. |
 | `workspace_id` / `workspace_path` | Reserved local workspace identity/path; no checkout is created by this slice. |
-| `repo` / `scm_target` / `branch` / `conflict_surface` | Conflict metadata. `issue_number` is a current GitHub-profile compatibility field. |
+| `repo` / `scm_target` / `branch` / `conflict_surface` | Conflict metadata. `issue_number` is a current GitHub-profile persisted field. |
 | `acquired_at` / `expires_at` / `ttl_ms` | TTL metadata used by local recovery. |
 
 Conflict detection is conservative across workspace id, repo checkout path, `scm_target`, branch, and declared conflict surfaces. `repo_checkout` is scoped to the reserved workspace path so 3–4 parallel workspaces can hold separate checkouts for the same repo when `scm_target`/branch/conflict-surface keys do not overlap.
@@ -150,8 +150,8 @@ Minimum expected artifacts:
 - `verification.json` — verification commands/checks, outcomes, evidence, and the embedded `verification-policy.v1` artifact field.
 - `internal-review/<hash>.json` — immutable local `internal-review-report.v1` findings, sanitized packet review context, sanitized independent reviewer result when supplied, and final review status. The report records `packet_review.verdict_artifact_path` from the approved packet's `review.verdict_artifact_path` and, when a verdict artifact is accepted, `reviewer_result.artifact_ref` with the immutable verdict path and hash.
 - `internal-review/<verdict-name>.json` or another safe path under `artifacts/` referenced by `review.verdict_artifact_path` — independent reviewer verdict input with `schema_version: internal-review-verdict.v1`. The verdict JSON object must contain `status` (`PASS`, `FAIL`, or `BLOCKED`) and may include `reviewer`/`actor`, `summary`, `findings[]`, `evidence[]`, and `problem`. The adapter sanitizes this payload before copying it into the internal-review report; private prompt, transcript, stdout/stderr, output, log, and session-like fields are not retained in public reports or immutable review reports. Absolute paths, paths escaping the run directory, paths outside `artifacts/`, invalid JSON, unsupported statuses, or another `schema_version` block the gate instead of producing a PASS/FAIL.
-- `pr/projection-intent-<hash>.json` — immutable local `handoff_target` projection intent derived from the approved local contract. The `pr/` path name is current GitHub-profile compatibility.
-- `pr/projection-result-<hash>.json` — immutable local `handoff_target` projection result mirrored into provider projection fields only after a semantically valid successful projection record. Current `github.pr` / `projections.github_pr` mirrors are GitHub-profile compatibility views.
+- `pr/projection-intent-<hash>.json` — immutable local `handoff_target` projection intent derived from the approved local contract. The `pr/` path name is a current GitHub-profile persisted artifact location.
+- `pr/projection-result-<hash>.json` — immutable local `handoff_target` projection result mirrored into provider projection fields only after a semantically valid successful projection record. Current `github.pr` / `projections.github_pr` mirrors are GitHub-profile persisted views.
 
 Implementation-dispatch `problem` uses a small safe shape: `code` plus generic `message`; extra raw adapter fields are intentionally not copied into immutable artifacts or public runner reports. `BLOCKED` keeps the run in `running`; `FAILED` transitions `running -> failed_execution`; only `COMPLETED` with durable evidence transitions to `verification`.
 
@@ -195,7 +195,7 @@ Recovery and consumers must treat `policy` as the durable reference for how pack
 
 ## Atomic writes
 
-- Low-level atomic helpers live behind the registry store/compatibility seam.
+- Low-level atomic helpers live behind the registry store seam.
 - Write snapshots/artifacts to a temporary file in the same directory.
 - Flush file contents where practical.
 - Rename temp file into place.
@@ -216,7 +216,7 @@ Recovery order:
 7. Rebuild active-run and workspace-lease indexes.
 8. Reclaim expired lease records by marking the owning run lease as `stale_recovered`, appending `recovery.lease_stale_reclaimed`, deleting local lease records, and reporting the finding. Recovery only reclaims when TTL has elapsed; it does not guess active ownership.
 9. Remove terminal/orphan lease records from the local lease-record directory.
-10. Semantically replay `projection.intent_recorded` / `projection.result_recorded` so provider projection mirrors, including current `github.pr` and `projections.github_pr` compatibility fields, are rebuilt from local event truth before `ready_for_manual_review` is trusted.
+10. Semantically replay `projection.intent_recorded` / `projection.result_recorded` so provider projection mirrors, including current `github.pr` and `projections.github_pr` persisted fields, are rebuilt from local event truth before `ready_for_manual_review` is trusted.
 11. Quarantine corrupt, malformed, incomplete, unknown-event, missing-artifact, hash-mismatch, conflicting-idempotency, stale/wrong-state gate, or other ambiguous run folders instead of guessing.
 
 Slice 2 quarantine layout:

@@ -348,6 +348,17 @@ export function buildImplementationDispatchIntent(snapshot, { workspacePreparati
   };
 }
 
+/**
+ * Create a safe implementation-dispatch adapter used when no real implementation harness is configured.
+ *
+ * The adapter implements the public dispatch shape (`adapter`, `externalSideEffects`, `execute`) but never performs
+ * external work. `execute()` returns a normalized BLOCKED result with `implementation_dispatch_unavailable`, allowing
+ * local runner composition to fail closed before verification.
+ *
+ * @param {object} [options]
+ * @param {string} [options.reason] Public blocked reason recorded in the dispatch result.
+ * @returns {{adapter: string, externalSideEffects: boolean, execute(): Promise<object>}} Safe unavailable adapter.
+ */
 export function createUnavailableImplementationDispatchAdapter({ reason = "Implementation-harness dispatch adapter is not configured for this local runner invocation." } = {}) {
   return {
     adapter: DEFAULT_UNAVAILABLE_ADAPTER,

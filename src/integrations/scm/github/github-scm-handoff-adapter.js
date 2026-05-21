@@ -6,9 +6,13 @@ import { DEFAULT_GITHUB_HOST, normalizeGithubHost } from "./config.js";
 import { GitHubIntegration, assertMasterWorkflowContext, createGithubCliProjectPr } from "./github-integration.js";
 import { createGitHubCliClient } from "./github-cli-client.js";
 
+/** Projection mode recorded for GitHub-backed PR handoff transport results. */
 export const GITHUB_PR_TRANSPORT_MODE = "github_transport";
+/** Alias retained for provider-neutral SCM handoff call sites that still consume the GitHub mode. */
 export const GITHUB_SCM_HANDOFF_MODE = GITHUB_PR_TRANSPORT_MODE;
+/** Public adapter id for the GitHub PR transport profile. */
 export const GITHUB_PR_TRANSPORT_ADAPTER = "github-pr-transport-adapter";
+/** Public adapter id for the GitHub SCM handoff implementation. */
 export const GITHUB_SCM_HANDOFF_ADAPTER = "github-scm-handoff-adapter";
 const SUCCESSFUL_TRANSPORT_STATUSES = new Set(["projected", "created", "updated"]);
 
@@ -94,6 +98,19 @@ function normalizeTransportProjectionResult(raw, plan, { githubHost = DEFAULT_GI
   };
 }
 
+/**
+ * GitHub-backed implementation of the provider-neutral SCM handoff port.
+ *
+ * Constructor dependencies:
+ * - `integration`: object exposing `projectPullRequest(context)`; or
+ * - `projectPr`: function used as `projectPullRequest` for tests/lightweight callers.
+ *
+ * Invariants:
+ * - `plan(snapshot, options)` records local handoff intent metadata before any remote write.
+ * - `execute(snapshot, plan)` validates master-workflow evidence when external side effects are enabled.
+ * - transport results must bind to the configured GitHub host, repo, PR number, and draft/title shape before
+ *   they are converted into a durable provider-neutral handoff result.
+ */
 export class GitHubScmHandoffAdapter {
   constructor({ integration, projectPr, adapter = GITHUB_PR_TRANSPORT_ADAPTER, mode = GITHUB_PR_TRANSPORT_MODE, externalSideEffects = true, githubHost = DEFAULT_GITHUB_HOST } = {}) {
     if (integration && typeof integration.projectPullRequest !== "function") {
@@ -109,6 +126,13 @@ export class GitHubScmHandoffAdapter {
     this.githubHost = githubHost;
   }
 
+  /**
+   * Build an SCM handoff plan for a run snapshot.
+   *
+   * @param {object} snapshot Execution-run snapshot containing SCM target and gate evidence.
+   * @param {object} [options] Planner overrides such as actor/clock/idempotency metadata.
+   * @returns {object} Provider-neutral handoff plan consumed by `execute` and local journaling.
+   */
   plan(snapshot, options = {}) {
     return buildScmHandoffPlan(snapshot, {
       ...options,
@@ -118,6 +142,13 @@ export class GitHubScmHandoffAdapter {
     });
   }
 
+  /**
+   * Execute the approved handoff plan through the configured GitHub integration.
+   *
+   * @param {object} snapshot Execution-run snapshot used for run identity and existing PR context.
+   * @param {object} plan Plan produced by `plan(snapshot, options)`.
+   * @returns {Promise<object>} Provider-neutral handoff result suitable for projection-ledger recording.
+   */
   async execute(snapshot, plan) {
     const transportContext = {
       run_id: snapshot?.run_id || "",
@@ -146,10 +177,22 @@ export class GitHubScmHandoffAdapter {
   }
 }
 
+/**
+ * Create a GitHub SCM handoff adapter and assert it satisfies the handoff port.
+ *
+ * @param {object} [options] `GitHubScmHandoffAdapter` constructor options.
+ * @returns {GitHubScmHandoffAdapter} Port-checked adapter instance.
+ */
 export function createGithubPrTransportAdapter(options = {}) {
   return assertScmHandoffPort(new GitHubScmHandoffAdapter(options));
 }
 
+/**
+ * Create a GitHub CLI-backed handoff adapter for local composition.
+ *
+ * @param {object} [options] CLI client, environment, host, mode, adapter id, and enablement options.
+ * @returns {GitHubScmHandoffAdapter} Port-checked GitHub CLI adapter; external writes occur only when enabled.
+ */
 export function createGithubCliPrProjectionAdapter(options = {}) {
   const actor = options.adapter || GITHUB_PR_TRANSPORT_ADAPTER;
   const client = options.client || createGitHubCliClient(options);

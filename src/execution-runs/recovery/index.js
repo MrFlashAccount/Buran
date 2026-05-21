@@ -13,7 +13,7 @@ import {
   validateProjectionResultRecordedEvent,
   validateRunSnapshot,
 } from "../schema/index.js";
-import { assertRegistryRepository } from "../registry/index.js";
+import { assertRegistryRepository } from "../../core/modules/execution-runs/ports/registry-repository.js";
 import { assertWorkspaceLeaseService } from "../../core/modules/workspace-leases/ports/workspace-lease-service.js";
 import { assertRegistryRecoveryStore } from "./store.js";
 import { applyTransitionToSnapshot, validateTransition, validateTransitionEvent } from "../../core/modules/execution-runs/state-machine.js";

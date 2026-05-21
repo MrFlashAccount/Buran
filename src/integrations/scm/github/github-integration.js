@@ -1,8 +1,18 @@
 import { projectionContractError } from "../../../core/modules/scm-handoff/services/local-journal-scm-handoff-adapter.js";
 import { sanitizeProjectionDurableValue } from "../../../core/modules/scm-handoff/contract.js";
 import { isRecord, nonEmptyString } from "../../../shared/primitives.js";
+import { createIntegrationDescriptor } from "../../integration.js";
 import { createGitHubCliClient, GitHubCliClient } from "./github-cli-client.js";
 import { normalizeAllowedRepos } from "./config.js";
+
+/** Descriptor exposed for composition/debug surfaces that need to see the GitHub PR transport boundary. */
+export const GITHUB_PR_INTEGRATION_DESCRIPTOR = createIntegrationDescriptor({
+  name: "github-pr-transport",
+  kind: "scm",
+  boundary: "Projects an approved local SCM handoff into GitHub pull requests through the noninteractive gh CLI client.",
+  implementsPorts: ["projectPullRequest(context) transport used by GitHubScmHandoffAdapter"],
+  externalSideEffects: true,
+});
 
 function githubTransportError(code, message) {
   return projectionContractError(code, message);
@@ -21,6 +31,12 @@ function gatePassedForEpoch(gate, executionEpoch) {
     && artifactRefsPresent(gate.artifact_refs);
 }
 
+/**
+ * Assert that a PR projection context carries current local workflow evidence.
+ *
+ * @param {object} context Transport context built from an SCM handoff plan and run snapshot.
+ * @throws {Error & {code: string}} When epoch, idempotency keys, or PASS gates are missing/stale.
+ */
 export function assertMasterWorkflowContext(context) {
   const executionEpoch = context.execution_epoch;
   if (!Number.isSafeInteger(executionEpoch) || executionEpoch < 1) {
@@ -38,6 +54,12 @@ function safeBodyField(value, fallback = "<unknown>") {
   return nonEmptyString(sanitizeProjectionDurableValue(value)) || fallback;
 }
 
+/**
+ * Build the default GitHub PR body from sanitized local run/stack metadata.
+ *
+ * @param {object} context Transport context containing run id, task id, and stack branches.
+ * @returns {string} Markdown PR body that points reviewers back to the local registry source of truth.
+ */
 export function buildDefaultPrBody(context) {
   return [
     "## Buran stacked PR handoff",
@@ -78,6 +100,26 @@ function assertRemotePrComplete(raw) {
   }
 }
 
+/**
+ * GitHub PR transport integration used behind the provider-neutral SCM handoff adapter.
+ *
+ * Responsibility:
+ * - validate local master-workflow evidence before remote writes;
+ * - list an existing open stacked PR by explicit head/base branch;
+ * - create or update exactly one GitHub PR; and
+ * - return a compact provider-neutral transport result.
+ *
+ * Side effects: when `enabled` is true and `projectPullRequest` passes validation, this class may execute
+ * `gh pr list`, `gh pr create`, `gh pr edit`, and `gh pr view` through the injected client. It does not write
+ * the local registry directly.
+ *
+ * Context shape: `projectPullRequest(context)` expects run/task ids, `repo`, `head_branch`, `base_branch`,
+ * optional `title`, current `execution_epoch`, projection idempotency keys, and current-epoch PASS gate summaries.
+ * Result shape: `{status, number, url, draft, title, state, actor}` where status is `created` or `updated`.
+ *
+ * Constructor dependencies: allowlist/config flags, a `GitHubCliClient`-compatible client,
+ * optional PR body builder, and actor label for durable projection reports.
+ */
 export class GitHubIntegration {
   constructor({ enabled = false, allowedRepos = [], draft = true, client = null, bodyBuilder = buildDefaultPrBody, actor = "github-pr-transport-adapter" } = {}) {
     this.enabled = Boolean(enabled);
@@ -86,6 +128,7 @@ export class GitHubIntegration {
     this.client = client || createGitHubCliClient();
     this.bodyBuilder = bodyBuilder;
     this.actor = actor;
+    this.integrationDescriptor = GITHUB_PR_INTEGRATION_DESCRIPTOR;
   }
 
   async projectPullRequest(context = {}) {
@@ -140,6 +183,12 @@ export class GitHubIntegration {
   }
 }
 
+/**
+ * Create a function adapter that projects a PR through `GitHubIntegration` backed by `GitHubCliClient`.
+ *
+ * @param {object} [options] GitHub integration options plus CLI client options.
+ * @returns {(context?: object) => Promise<object>} `projectPullRequest`-compatible transport function.
+ */
 export function createGithubCliProjectPr(options = {}) {
   const { ghPath, execFileImpl, env, extraEnv, timeoutMs, ...integrationOptions } = options;
   const client = options.client instanceof GitHubCliClient ? options.client : createGitHubCliClient({ ghPath, execFileImpl, env, extraEnv, timeoutMs });

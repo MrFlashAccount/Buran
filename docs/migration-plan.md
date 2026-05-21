@@ -89,7 +89,7 @@ Exit criteria:
 
 - no runtime dependency on legacy queue ownership;
 - any copied behavior has a test and an explicit new owner;
-- old paths are either untouched reference, deprecated, or removed in a separate approved cleanup.
+- old paths are historical references only or removed by the approved cleanup.
 
 Rollback: revert only the cleanup slice; the new plugin remains local-state authoritative.
 

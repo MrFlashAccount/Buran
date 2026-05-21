@@ -11,7 +11,7 @@ import { executeVerificationGate } from "../gates/verification-adapter.js";
 import { evaluateReviewReadyPolicy } from "../stack-workflow/review-ready-policy.js";
 import { assertRegistryRepository } from "../core/modules/execution-runs/ports/registry-repository.js";
 import { canonicalJson, isRecord, nonEmptyString, sha256Hex } from "../shared/primitives.js";
-import { assertWorkspacePreparationInspector } from "./workspace-preparation-inspector.js";
+import { assertWorkspacePreparationInspector } from "../core/modules/workspaces/ports/workspace-preparation-inspector.js";
 import { hasActiveLease } from "./mission-context.js";
 import { buildIssue, buildRunnerReport, buildStep, implementationBoundaryMessage, internalReviewTransition, internalReviewTransitionReason, leaseRequiredMessage, projectionProblemCode, projectionTransitionReason, sanitizeImplementationDispatchProblem, unsupportedStageMessage, verificationTransition, verificationTransitionReason } from "./final-report.js";
 

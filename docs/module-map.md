@@ -1,6 +1,6 @@
 # Module Map
 
-This file maps the implemented source layout and compatibility surfaces.
+This file maps the implemented source layout and canonical runtime surfaces.
 
 ## Entrypoints and composition
 
@@ -21,15 +21,12 @@ This file maps the implemented source layout and compatibility surfaces.
 | `src/core/modules/workspaces/` | Workspace preparation/inspection port. |
 | `src/core/README.md` | Core dependency rules. |
 
-## Compatibility surfaces
+## Execution-run application support
 
 | Path | Responsibility |
 | --- | --- |
-| `src/execution-runs/constants.js` | Deprecated compatibility re-export to `src/core/modules/execution-runs/constants.js`. |
-| `src/execution-runs/state-machine.js` | Deprecated compatibility re-export to `src/core/modules/execution-runs/state-machine.js`. |
 | `src/execution-runs/schema/` | Durable `execution-run.v2` builders/validators; imports canonical core authority. |
 | `src/execution-runs/recovery/` | Recovery/replay/quarantine flow; imports canonical core authority. |
-| `src/core/modules/scm-handoff/value-objects/github-pr-handoff-target.js` | Deprecated compatibility wrapper around `ScmHandoffTarget`; not exported by canonical core index. |
 
 ## Application orchestration
 
@@ -65,8 +62,8 @@ This file maps the implemented source layout and compatibility surfaces.
 - canonical core does not import application, composition, entrypoints, or integrations;
 - provider-neutral SCM handoff contexts do not import concrete GitHub integrations;
 - integrations do not import application/composition/entrypoints;
-- non-compat runtime files do not import deprecated `src/execution-runs/constants.js` or `src/execution-runs/state-machine.js`;
-- canonical core modules do not contain GitHub-specific public vocabulary except the explicit deprecated compatibility wrapper;
+- removed wrapper paths are absent and not imported by runtime/tests;
+- canonical core modules do not contain GitHub-specific public vocabulary;
 - documented paths in this module map exist.
 
 ## Test map

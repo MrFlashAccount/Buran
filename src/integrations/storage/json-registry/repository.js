@@ -3,6 +3,15 @@ import { promises as fs } from "node:fs";
 import * as store from "./store.js";
 import { createRegistryRepositoryContract } from "../../../core/modules/execution-runs/ports/registry-repository.js";
 
+/**
+ * Create the JSON-registry implementation of the execution-runs registry repository port.
+ *
+ * Implements `core/modules/execution-runs/ports/registry-repository.js` by binding run snapshots, event journals,
+ * indexes, artifacts, projection ledger updates, and lease-record cleanup to the durable JSON registry layout.
+ * This adapter owns persistence semantics for registry JSON files; callers should depend on the port, not store helpers.
+ *
+ * @returns {Readonly<object>} Port-checked registry repository backed by local JSON files.
+ */
 export function createJsonRegistryRepository() {
   return createRegistryRepositoryContract({
     appendRunEvent: store.appendRunEvent,
@@ -34,4 +43,5 @@ export function createJsonRegistryRepository() {
   });
 }
 
+/** Default JSON-registry repository instance for local composition. */
 export const jsonRegistryRepository = createJsonRegistryRepository();

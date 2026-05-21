@@ -1,6 +1,6 @@
 # Execution State Machine
 
-Buran executes approved packets through the canonical state machine in `src/core/modules/execution-runs/`. Runtime, storage, recovery, and tests import that core authority rather than the deprecated `src/execution-runs/*` compatibility re-exports.
+Buran executes approved packets through the canonical state machine in `src/core/modules/execution-runs/`. Runtime, storage, recovery, and tests import that core authority directly.
 
 ## States
 

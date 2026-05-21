@@ -14,8 +14,6 @@ import {
   buildTransitionEvent,
   validateTransition,
 } from "../src/core/modules/execution-runs/index.js";
-import { SCHEMA_VERSION as COMPAT_SCHEMA_VERSION } from "../src/execution-runs/constants.js";
-import { validateTransition as compatValidateTransition } from "../src/execution-runs/state-machine.js";
 import { WorkspaceLease, WorkspaceLeaseServicePort } from "../src/core/modules/workspace-leases/index.js";
 import { ScmHandoffProjection, ScmHandoffTarget } from "../src/core/modules/scm-handoff/index.js";
 
@@ -73,10 +71,8 @@ function fakeRegistry() {
 
 test("canonical execution-runs core exports constants and state-machine authority", () => {
   assert.equal(SCHEMA_VERSION, "execution-run.v2");
-  assert.equal(COMPAT_SCHEMA_VERSION, SCHEMA_VERSION);
   assert.equal(TERMINAL_STATES.has("ready_for_manual_review"), true);
   assert.deepEqual(validateTransition({ fromState: "handoff_ready", toState: "ready_for_manual_review", snapshot: null }), { ok: true, reason: "allowed transition" });
-  assert.deepEqual(compatValidateTransition({ fromState: "handoff_ready", toState: "ready_for_manual_review", snapshot: null }), validateTransition({ fromState: "handoff_ready", toState: "ready_for_manual_review", snapshot: null }));
   assert.throws(() => assertTransitionAllowed({ fromState: "ready_for_manual_review", toState: "running" }), /terminal state/);
   const event = buildTransitionEvent({ runId: "run_arch", sequence: 1, timestamp: "2026-05-21T20:00:00.000Z", fromState: "packet_received", toState: "queued", actor: "test" });
   assert.equal(event.schema_version, SCHEMA_VERSION);

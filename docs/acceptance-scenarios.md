@@ -112,7 +112,7 @@ These scenarios summarize the behavior the current branch already proves through
 - Given a run in `pr_ready` with passing current-epoch verification and internal review
 - When the default projection path runs
 - Then Buran records projection intent and result artifacts locally
-- And mirrors the projection summary into provider projection fields; current GitHub-profile compatibility fields are `github.pr` / `projections.github_pr`
+- And mirrors the projection summary into provider projection fields; current GitHub-profile persisted fields are `github.pr` / `projections.github_pr`
 - And transitions to `ready_for_manual_review`
 - And no remote provider write occurs
 

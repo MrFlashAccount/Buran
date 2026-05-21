@@ -11,6 +11,15 @@ function safeReasonPart(reason) {
     .slice(0, 48) || "invalid";
 }
 
+/**
+ * Create the JSON-registry implementation of the registry recovery store contract.
+ *
+ * Implements `execution-runs/recovery/store.js` by providing recovery-time filesystem operations: ensure/list run
+ * directories, read snapshots/events/artifacts, quarantine corrupt run directories, and write the recovery report.
+ * Quarantine and report writes remain local JSON-registry side effects.
+ *
+ * @returns {Readonly<object>} Port-checked recovery store for local registry recovery.
+ */
 export function createJsonRegistryRecoveryStore() {
   return createRegistryRecoveryStoreContract({
     async ensureRunsDir({ paths }) {
@@ -57,4 +66,5 @@ export function createJsonRegistryRecoveryStore() {
   });
 }
 
+/** Default JSON-registry recovery store instance for local composition. */
 export const jsonRegistryRecoveryStore = createJsonRegistryRecoveryStore();

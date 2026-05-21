@@ -3,7 +3,7 @@ import { assertRegistryRepository } from "../../../core/modules/execution-runs/p
 import { buildLeaseRecord, validateLeaseRecord } from "../../../execution-runs/schema/index.js";
 import { nonEmptyString, safeIdPart } from "../../../shared/primitives.js";
 import { DEFAULT_LEASE_TTL_MS, LEASE_STATUSES, buildLeaseRequest, getLeaseRecordPath } from "../../../workspace-leases/contract.js";
-import { assertLeaseRecordStore } from "../../../workspace-leases/lease-record-store.js";
+import { assertLeaseRecordStore } from "../../../core/modules/workspace-leases/ports/lease-record-store.js";
 import { createWorkspaceLeaseServiceContract } from "../../../core/modules/workspace-leases/ports/workspace-lease-service.js";
 export { getLeaseRecordPath } from "../../../workspace-leases/contract.js";
 
@@ -405,6 +405,15 @@ export async function recoverLeaseRecords(registryRoot, snapshots, { clock = () 
   return { snapshots: updatedSnapshots, findings, active_lease_record_paths: [...consumedRecordPaths].sort() };
 }
 
+/**
+ * Create the filesystem/worktree workspace lease service.
+ *
+ * @param {{registryRepository: object, leaseRecordStore: object}} deps Dependencies:
+ * `registryRepository` supplies run snapshots/transitions/artifact paths, while
+ * `leaseRecordStore` supplies durable exclusive lock records.
+ * @returns {Readonly<object>} Workspace lease service with `acquire`, `release`, and `recover`.
+ * @throws {Error} When required dependencies do not satisfy their ports.
+ */
 export function createFilesystemWorkspaceLeaseService({ registryRepository, leaseRecordStore } = {}) {
   const registry = assertRegistryRepository(registryRepository);
   const leaseStore = assertLeaseRecordStore(leaseRecordStore);

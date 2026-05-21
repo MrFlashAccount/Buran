@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
-import { createLeaseRecordStoreContract } from "../../../workspace-leases/lease-record-store.js";
+import { createLeaseRecordStoreContract } from "../../../core/modules/workspace-leases/ports/lease-record-store.js";
 import { leaseRecordsDir } from "../../../workspace-leases/contract.js";
 import { removeLeaseRecordPath, writeLeaseRecordExclusive } from "./lease-records.js";
 
@@ -14,6 +14,16 @@ async function readLeaseRecord(filePath) {
   }
 }
 
+/**
+ * Create the JSON-registry implementation of the lease-record store port.
+ *
+ * The adapter reads lease records from `<registryRoot>/leases/*.json`, marks
+ * malformed JSON records as corrupt findings instead of throwing during listing,
+ * removes records by path, and delegates exclusive file creation to the registry
+ * lease-record atomic helpers.
+ *
+ * @returns {Readonly<object>} Lease-record store contract bound to JSON files.
+ */
 export function createJsonLeaseRecordStore() {
   return createLeaseRecordStoreContract({
     async listLeaseRecords(registryRoot) {
@@ -40,4 +50,5 @@ export function createJsonLeaseRecordStore() {
   });
 }
 
+/** Default JSON lease-record store instance for local composition. */
 export const jsonLeaseRecordStore = createJsonLeaseRecordStore();

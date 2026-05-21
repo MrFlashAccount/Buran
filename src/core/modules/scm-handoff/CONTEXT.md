@@ -9,10 +9,9 @@ Responsibilities:
 - define the handoff port consumed by application orchestration;
 - provide a no-network local journal adapter for manual-review handoff flows.
 
-Compatibility:
+Durable-data rule:
 
-- legacy durable provider-profile fields may be read internally as an explicit compatibility fallback;
-- the deprecated provider-profile value-object wrapper is not exported from the canonical context index;
+- legacy durable provider-profile fields may be read internally for persisted-data continuity;
 - provider-specific transport, validation, and remote-write behavior lives under concrete integration modules.
 
 Non-goals:

@@ -1,6 +1,20 @@
 import { isRecord, nonEmptyString } from "../../../../shared/primitives.js";
 import { RunId } from "../value-objects/run-id.js";
 
+/**
+ * Entity wrapper around a durable execution-run snapshot.
+ *
+ * Ownership: the instance keeps the supplied snapshot reference and does not clone it; callers that need
+ * immutability must freeze or copy before construction. Getters expose normalized read-only views, while
+ * `toSnapshot()` intentionally returns the same snapshot object for registry/state-machine flows that own mutation.
+ *
+ * Public surface:
+ * - `id` is a validated `RunId`;
+ * - `state` and `currentEpoch` read the current durable state;
+ * - `gate(name)` returns a gate summary or `null`;
+ * - `scmTarget()` prefers provider-neutral `scm_target` and falls back to legacy `github`;
+ * - `hasState(state)` is a convenience predicate.
+ */
 export class ExecutionRun {
   constructor(snapshot = {}) {
     if (!isRecord(snapshot)) throw new Error("ExecutionRun snapshot must be an object");
@@ -16,6 +30,12 @@ export class ExecutionRun {
   toSnapshot() { return this.snapshot; }
 }
 
+/**
+ * Rehydrate an execution-run entity from a durable snapshot.
+ *
+ * @param {object} snapshot Durable run snapshot.
+ * @returns {ExecutionRun} Entity wrapper over the supplied snapshot reference.
+ */
 export function executionRunFromSnapshot(snapshot) {
   return new ExecutionRun(snapshot);
 }

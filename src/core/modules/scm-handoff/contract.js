@@ -192,7 +192,7 @@ export function appendProjectedHandoffTargetParityErrors(left, right, errors, le
  * Applies a projection ledger event to the in-memory registry snapshot.
  *
  * Successful projection results mirror the projected target into `snapshot.handoff_target` so
- * later stages can consume the same contract-bearing shape. Legacy durable fields are handled by schema compatibility code.
+ * later stages can consume the same contract-bearing shape. Legacy durable fields are handled by persisted-schema continuity code.
  *
  * @param {object} snapshot Current registry snapshot.
  * @param {object} payload Projection ledger payload being applied.

@@ -10,9 +10,8 @@ Responsibilities:
 - apply pure transition updates to snapshots;
 - define execution-run entity/value objects and registry repository port.
 
-Compatibility:
+Canonical import rule:
 
-- `src/execution-runs/constants.js` and `src/execution-runs/state-machine.js` are deprecated re-exports only;
 - runtime/application/storage/recovery code imports this core context directly.
 
 Non-goals:
