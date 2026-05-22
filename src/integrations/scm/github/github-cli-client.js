@@ -1,7 +1,7 @@
 import { promisify } from "node:util";
 import { execFile } from "node:child_process";
 
-import { projectionContractError } from "../../../core/modules/scm-handoff/services/local-journal-scm-handoff-adapter.js";
+import { projectionContractError } from "../../../core/modules/scm-handoff/errors.js";
 import { nonEmptyString } from "../../../shared/primitives.js";
 import { buildGithubCliEnv, DEFAULT_GH_TIMEOUT_MS } from "./config.js";
 

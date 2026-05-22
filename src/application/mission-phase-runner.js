@@ -1,19 +1,13 @@
 /** Implementation dispatch phase runner for local mission orchestration. */
 import { promises as fs } from "node:fs";
-import path from "node:path";
 
-import { TERMINAL_STATES } from "../core/modules/execution-runs/constants.js";
-import { IMPLEMENTATION_DISPATCH_ADAPTER, buildImplementationDispatchIntent, executeImplementationDispatch, implementationDispatchStatusSummary, isUnavailableImplementationDispatchResult, sanitizeImplementationDispatchEvidence, validateImplementationDispatchResultReport } from "../gates/implementation-contract.js";
-import { executeInternalReviewGate, sanitizeRecordedInternalReviewReport } from "../gates/internal-review-adapter.js";
-import { sanitizePublicReportForOutput } from "../observability/index.js";
-import { buildRecordedScmHandoff, createLocalScmHandoffAdapter } from "../core/modules/scm-handoff/services/local-journal-scm-handoff-adapter.js";
-import { executeVerificationGate } from "../gates/verification-adapter.js";
-import { evaluateReviewReadyPolicy } from "../stack-workflow/review-ready-policy.js";
+import { IMPLEMENTATION_DISPATCH_ADAPTER, buildImplementationDispatchIntent, createUnavailableImplementationDispatchAdapter, executeImplementationDispatch, implementationDispatchStatusSummary, isUnavailableImplementationDispatchResult, sanitizeImplementationDispatchEvidence, validateImplementationDispatchResultReport } from "../gates/implementation-contract.js";
 import { assertRegistryRepository } from "../core/modules/execution-runs/ports/registry-repository.js";
-import { canonicalJson, isRecord, nonEmptyString, sha256Hex } from "../shared/primitives.js";
-import { assertWorkspacePreparationInspector } from "../core/modules/workspaces/ports/workspace-preparation-inspector.js";
-import { hasActiveLease } from "./mission-context.js";
-import { buildIssue, buildRunnerReport, buildStep, implementationBoundaryMessage, internalReviewTransition, internalReviewTransitionReason, leaseRequiredMessage, projectionProblemCode, projectionTransitionReason, sanitizeImplementationDispatchProblem, unsupportedStageMessage, verificationTransition, verificationTransitionReason } from "./final-report.js";
+import { nonEmptyString, sha256Hex } from "../shared/primitives.js";
+import { assertWorkspacePreparationInspector } from "../core/ports/workspace-preparation-inspector.js";
+import { RUNNER_ACTOR, hasActiveLease } from "./mission-context.js";
+import { buildIssue, buildStep, implementationBoundaryMessage, leaseRequiredMessage, sanitizeImplementationDispatchProblem } from "./final-report.js";
+import { resolveRecordedArtifactPath } from "./recorded-artifacts.js";
 
 function dispatchResultArtifactSummary(snapshot, dispatchIntentId) {
   const currentEpoch = snapshot?.execution?.current_epoch;
@@ -39,10 +33,21 @@ async function readReusableImplementationDispatchResult(runDir, snapshot, intent
   if (!summary) return null;
 
   const artifactRef = { path: summary.path, sha256: summary.sha256 };
-  const absoluteArtifactPath = path.join(runDir, summary.path);
+  const resolvedArtifactPath = resolveRecordedArtifactPath(runDir, summary.path);
+  if (!resolvedArtifactPath) {
+    return {
+      reusable: false,
+      artifact_ref: artifactRef,
+      problem: dispatchResultArtifactProblem(
+        "artifact_invalid",
+        `Recorded implementation dispatch result cannot be resumed because artifact ${summary.path} has an invalid path.`,
+        artifactRef,
+      ),
+    };
+  }
   let artifactContent;
   try {
-    artifactContent = await fs.readFile(absoluteArtifactPath);
+    artifactContent = await fs.readFile(resolvedArtifactPath.absolutePath);
   } catch (error) {
     if (error?.code === "ENOENT") {
       return {
@@ -125,17 +130,6 @@ async function readReusableImplementationDispatchResult(runDir, snapshot, intent
   };
 }
 
-async function readRecordedArtifactJson(runDir, artifactRef) {
-  const artifactPath = nonEmptyString(artifactRef?.path);
-  if (!artifactPath) return null;
-  try {
-    const artifactText = await fs.readFile(path.join(runDir, artifactPath), "utf8");
-    return JSON.parse(artifactText);
-  } catch {
-    return null;
-  }
-}
-
 export function buildImplementationDispatchStageResult({
   current,
   stepsTaken,
@@ -177,8 +171,11 @@ export async function runImplementationDispatchStage({ runContext = {}, reportSt
     warnings.push(buildIssue("lease_not_active", `Run ${runId} is in running without an active local lease snapshot.`));
     blockers.push(buildIssue("lease_required", leaseRequiredMessage(runId)));
   } else {
-    const inspected = await workspaceInspector.inspect(current.workspace?.path || "", {
-      intendedBranch: current.github?.intended_branch || "",
+    const inspected = await workspaceInspector.inspect({
+      workspacePath: current.workspace?.path || "",
+      intendedBranch: current.scm_target?.intended_branch || "",
+      scmTarget: current.scm_target || null,
+      runId,
     });
 
     if (!inspected.ok) {

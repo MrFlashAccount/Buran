@@ -1,22 +1,10 @@
-/**
- * Local SCM handoff planning/execution helpers for turning a reviewed run into durable `handoff_target` data.
- *
- * Responsibility:
- * - derive deterministic SCM handoff intent/result artifacts from the local run contract,
- * - validate that projected handoff data matches repo/issue/branch expectations,
- * - provide a no-network local adapter for manual-review handoff flows.
- *
- * Non-goals:
- * - no network provider writes in the local adapter,
- * - no projection when base-branch contract data is missing,
- * - no acceptance of unsanitized durable handoff payloads.
- */
+/** Provider-neutral SCM handoff planning/result/read-model helpers. */
 import {
   appendScmHandoffTargetContractErrors,
   appendScmHandoffTargetValidationErrors,
   sanitizeProjectionDurableValue,
 } from "../contract.js";
-import { assertScmHandoffPort } from "../ports/scm-handoff-port.js";
+import { projectionContractError } from "../errors.js";
 import { nonEmptyString, sha256Hex } from "../../../../shared/primitives.js";
 
 const PROJECTION_NAME = "handoff_target";
@@ -24,20 +12,6 @@ const PROJECTION_TARGET = "handoff_target";
 export const LOCAL_SCM_HANDOFF_MODE = "local_fake";
 export const LOCAL_SCM_HANDOFF_ADAPTER = "local-scm-handoff";
 export const LOCAL_JOURNAL_SCM_HANDOFF_ADAPTER = LOCAL_SCM_HANDOFF_ADAPTER;
-
-/**
- * Builds a typed error used when projection data violates the documented local contract.
- *
- * @param {string} code Stable machine-readable error code.
- * @param {string} message Public-safe explanation.
- * @returns {Error & {code: string}}
- */
-export function projectionContractError(code, message) {
-  const error = new Error(message);
-  error.code = code;
-  return error;
-}
-
 
 function scmTarget(snapshot) {
   if (snapshot?.scm_target && typeof snapshot.scm_target === "object") return snapshot.scm_target;
@@ -332,87 +306,3 @@ export function buildRecordedScmHandoff(snapshot, {
   });
 }
 
-function buildLocalHandoffTarget(snapshot, plan) {
-  const targetNumber = buildFakeHandoffNumber(snapshot);
-  return {
-    number: targetNumber,
-    url: buildLocalHandoffUrl(plan.repo, targetNumber),
-    repo: plan.repo,
-    issue_number: plan.issueNumber,
-    head_branch: plan.headBranch,
-    base_branch: plan.baseBranch,
-    state: "open",
-    draft: false,
-    title: plan.title,
-    projection_mode: plan.mode,
-    projected_at: plan.recordedAt,
-    actor: plan.actor,
-  };
-}
-
-/**
- * Creates the deterministic no-network projection adapter used by local runner flows.
- *
- * @returns {{adapter: string, mode: string, externalSideEffects: boolean, plan(snapshot: object, options?: object): object, execute(snapshot: object, plan: object): Promise<object>}}
- * Adapter that records a synthetic but contract-valid local SCM handoff projection.
- */
-export class LocalJournalScmHandoffAdapter {
-  constructor({ adapter = LOCAL_SCM_HANDOFF_ADAPTER, mode = LOCAL_SCM_HANDOFF_MODE } = {}) {
-    this.adapter = adapter;
-    this.mode = mode;
-    this.externalSideEffects = false;
-  }
-
-  plan(snapshot, options = {}) {
-    return buildScmHandoffPlan(snapshot, {
-      ...options,
-      adapter: this.adapter,
-      mode: this.mode,
-      externalSideEffects: false,
-    });
-  }
-
-  async execute(snapshot, plan) {
-    return buildScmHandoffResult(snapshot, plan, {
-      status: "projected_local",
-      handoffTarget: buildLocalHandoffTarget(snapshot, plan),
-      externalSideEffects: false,
-    });
-  }
-}
-
-/**
- * Create the local journal SCM handoff adapter and assert it satisfies the provider-neutral port.
- *
- * @param {object} [options] Adapter/mode labels for durable projection metadata.
- * @returns {LocalJournalScmHandoffAdapter} Port-checked no-network SCM handoff adapter.
- */
-export function createLocalJournalScmHandoffAdapter(options = {}) {
-  return assertScmHandoffPort(new LocalJournalScmHandoffAdapter(options));
-}
-
-/**
- * Backward-compatible factory alias for the local journal SCM handoff adapter.
- *
- * @returns {LocalJournalScmHandoffAdapter} Port-checked no-network SCM handoff adapter.
- */
-export function createLocalScmHandoffAdapter() {
-  return createLocalJournalScmHandoffAdapter();
-}
-
-/**
- * Convenience helper that plans and executes the local fake SCM handoff projection in one call.
- *
- * @param {object} snapshot Current run snapshot.
- * @param {object} [options] Planning options forwarded to the local adapter.
- * @returns {object} Contract-valid local handoff projection result.
- */
-export function buildLocalScmHandoffProjection(snapshot, options = {}) {
-  const adapter = createLocalScmHandoffAdapter();
-  const plan = adapter.plan(snapshot, options);
-  return buildScmHandoffResult(snapshot, plan, {
-    status: "projected_local",
-    handoffTarget: buildLocalHandoffTarget(snapshot, plan),
-    externalSideEffects: false,
-  });
-}

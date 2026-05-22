@@ -223,7 +223,9 @@ function workspaceStatusWarnings(report) {
   return warnings;
 }
 
-export async function inspectWorkspacePreparation(workspacePath, { intendedBranch = "" } = {}) {
+export async function inspectWorkspacePreparation(context = {}) {
+  const workspacePath = context?.workspacePath ?? context?.workspace_path ?? "";
+  const intendedBranch = context?.intendedBranch ?? context?.scmTarget?.intended_branch ?? "";
   const resolvedWorkspacePath = nonEmptyString(workspacePath);
   if (!resolvedWorkspacePath) {
     return {

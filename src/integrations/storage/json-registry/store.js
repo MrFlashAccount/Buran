@@ -725,7 +725,7 @@ export async function recordGateResult(registryRoot, runId, payload = {}) {
 }
 
 /**
- * Records a projection intent from pr_ready.
+ * Records a projection intent from the handoff-ready stage.
  *
  * @param {string} registryRoot
  * @param {string} runId

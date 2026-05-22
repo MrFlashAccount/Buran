@@ -1,9 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { runPrReadyStage } from "../src/application/scm-handoff.js";
+import { runScmHandoffStage } from "../src/application/scm-handoff.js";
 import { assertScmHandoffPort, SCM_HANDOFF_PORT, SCM_HANDOFF_PORT_METHODS } from "../src/core/modules/scm-handoff/ports/scm-handoff-port.js";
-import { createLocalJournalScmHandoffAdapter } from "../src/core/modules/scm-handoff/services/local-journal-scm-handoff-adapter.js";
+import { createLocalJournalScmHandoffAdapter } from "../src/integrations/scm/local-journal/local-journal-scm-handoff-adapter.js";
 import { GitHubIntegration, GitHubScmHandoffAdapter } from "../src/integrations/scm/github/index.js";
 import {
   ExecutionRun,
@@ -16,6 +16,8 @@ import {
 } from "../src/core/modules/execution-runs/index.js";
 import { WorkspaceLease, WorkspaceLeaseServicePort } from "../src/core/modules/workspace-leases/index.js";
 import { ScmHandoffProjection, ScmHandoffTarget } from "../src/core/modules/scm-handoff/index.js";
+import { createIntegrationDescriptor } from "../src/core/ports/integration.js";
+import { WorkspacePreparationInspectorPort } from "../src/core/ports/workspace-preparation-inspector.js";
 
 function snapshot() {
   return {
@@ -92,6 +94,7 @@ test("core exposes named entities, value objects, and port classes", () => {
   assert.equal(run.scmTarget().base_branch, "main");
   assert.equal(RegistryRepositoryPort.portName, "buran.core.executionRuns.registryRepository");
   assert.equal(WorkspaceLeaseServicePort.portName, "buran.core.workspaceLeases.workspaceLeaseService");
+  assert.equal(WorkspacePreparationInspectorPort.portName, "buran.core.workspacePreparationInspector");
 
   const lease = new WorkspaceLease({ lease_id: "lease-1", run_id: run.id.toString(), workspace_id: "ws", workspace_path: "/tmp/ws", expires_at: "2026-05-21T21:00:00.000Z" });
   assert.equal(lease.isExpired(new Date("2026-05-21T22:00:00.000Z")), true);
@@ -129,7 +132,7 @@ test("application accepts any adapter implementing the explicit SCM handoff port
     },
   });
 
-  const result = await runPrReadyStage({
+  const result = await runScmHandoffStage({
     registryRoot: "/tmp/registry",
     runId: "run_scm_handoff_architecture",
     current: snapshot(),
@@ -146,6 +149,21 @@ test("application accepts any adapter implementing the explicit SCM handoff port
   assert.deepEqual(calls, ["plan", "execute"]);
   assert.equal(result.outcome, "completed");
   assert.equal(result.projection.adapter, "fake-scm-handoff-adapter");
+});
+
+test("integration descriptor helper is imported by concrete integrations", () => {
+  const descriptor = createIntegrationDescriptor({
+    name: "example-integration",
+    kind: "scm",
+    boundary: "example IO",
+  });
+  assert.deepEqual(descriptor, {
+    name: "example-integration",
+    kind: "scm",
+    boundary: "example IO",
+    implementsPorts: [],
+    externalSideEffects: false,
+  });
 });
 
 test("GitHubScmHandoffAdapter composes GitHubIntegration instead of a loose function bag", () => {

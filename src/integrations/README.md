@@ -27,4 +27,4 @@ The filesystem worktree lease service may use the JSON-registry lease-record por
 
 SCM integrations project provider-neutral handoff plans/results into concrete SCM transports. For example, the GitHub integration uses the noninteractive `gh` CLI to create or update pull requests only after local master-workflow evidence has passed validation.
 
-`integration.js` provides a lightweight descriptor for composition/debug visibility. It is metadata, not a required superclass for adapters.
+The lightweight descriptor/base contract lives at `src/core/ports/integration.js`. Concrete integrations may import it for composition/debug metadata; core never imports concrete integrations.

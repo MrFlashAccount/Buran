@@ -29,10 +29,6 @@ function configuredScmHandoffAdapter(config) {
     config.scm_handoff_adapter,
     config.scmHandoff?.adapter,
     config.scm_handoff?.adapter,
-    config.prProjection?.scmHandoffAdapter,
-    config.prProjection?.adapter,
-    config.pr_projection?.scm_handoff_adapter,
-    config.pr_projection?.adapter,
   ];
   return candidates.find((candidate) => candidate && typeof candidate.plan === "function" && typeof candidate.execute === "function") || null;
 }

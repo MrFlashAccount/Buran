@@ -2,17 +2,12 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
-import { TERMINAL_STATES } from "../core/modules/execution-runs/constants.js";
-import { IMPLEMENTATION_DISPATCH_ADAPTER, buildImplementationDispatchIntent, executeImplementationDispatch, implementationDispatchStatusSummary, isUnavailableImplementationDispatchResult, sanitizeImplementationDispatchEvidence, validateImplementationDispatchResultReport } from "../gates/implementation-contract.js";
 import { executeInternalReviewGate, sanitizeRecordedInternalReviewReport } from "../gates/internal-review-adapter.js";
-import { sanitizePublicReportForOutput } from "../observability/index.js";
-import { buildRecordedScmHandoff, createLocalScmHandoffAdapter } from "../core/modules/scm-handoff/services/local-journal-scm-handoff-adapter.js";
 import { executeVerificationGate } from "../gates/verification-adapter.js";
-import { evaluateReviewReadyPolicy } from "../stack-workflow/review-ready-policy.js";
 import { assertRegistryRepository } from "../core/modules/execution-runs/ports/registry-repository.js";
-import { canonicalJson, isRecord, nonEmptyString, sha256Hex } from "../shared/primitives.js";
-import { hasActiveLease } from "./mission-context.js";
-import { buildIssue, buildRunnerReport, buildStep, implementationBoundaryMessage, internalReviewTransition, internalReviewTransitionReason, leaseRequiredMessage, projectionProblemCode, projectionTransitionReason, unsupportedStageMessage, verificationTransition, verificationTransitionReason } from "./final-report.js";
+import { isRecord, nonEmptyString, sha256Hex } from "../shared/primitives.js";
+import { buildIssue, buildRunnerReport, buildStep, internalReviewTransition, internalReviewTransitionReason, verificationTransition, verificationTransitionReason } from "./final-report.js";
+import { readRecordedArtifactJson, resolveRecordedArtifactPath } from "./recorded-artifacts.js";
 
 function hasFreshRecordedGate(snapshot, gateName) {
   const currentEpoch = snapshot?.execution?.current_epoch;
@@ -38,25 +33,6 @@ function internalReviewResumeProblem(code, message, artifactRef = null) {
   return buildIssue(`internal_review_${code}`, message, artifactRef ? { artifact_ref: artifactRef } : {});
 }
 
-function resolveRecordedArtifactPath(runDir, artifactPath) {
-  const input = nonEmptyString(artifactPath);
-  if (!input || path.isAbsolute(input)) return null;
-  const absolutePath = path.resolve(runDir, path.normalize(input));
-  const relativePath = path.relative(runDir, absolutePath);
-  if (!relativePath || relativePath.startsWith("..") || path.isAbsolute(relativePath)) return null;
-  return { absolutePath, relativePath };
-}
-
-async function readRecordedArtifactJson(runDir, artifactRef) {
-  const resolved = resolveRecordedArtifactPath(runDir, artifactRef?.path);
-  if (!resolved) return null;
-  try {
-    const artifactText = await fs.readFile(resolved.absolutePath, "utf8");
-    return JSON.parse(artifactText);
-  } catch {
-    return null;
-  }
-}
 
 async function inspectRecordedInternalReviewEvidence(runDir, gateStatus, reportArtifactRef, { workspacePath = "" } = {}) {
   const reportArtifactPath = nonEmptyString(reportArtifactRef?.path);
@@ -242,10 +218,19 @@ async function inspectRecordedGateArtifacts(runDir, snapshot, gateName) {
       };
     }
 
-    const absoluteArtifactPath = path.join(runDir, artifactPath);
+    const resolvedArtifactPath = resolveRecordedArtifactPath(runDir, artifactPath);
+    if (!resolvedArtifactPath) {
+      return {
+        ok: false,
+        problem: buildIssue(
+          gateArtifactProblemCode(gateName, "artifact_invalid"),
+          `Recorded ${gateLabel} result cannot be resumed because artifact ${artifactPath} has an invalid path.`,
+        ),
+      };
+    }
     let artifactContent;
     try {
-      artifactContent = await fs.readFile(absoluteArtifactPath);
+      artifactContent = await fs.readFile(resolvedArtifactPath.absolutePath);
     } catch (error) {
       if (error?.code === "ENOENT") {
         return {
@@ -773,6 +758,6 @@ export async function runInternalReviewStage({ registryRoot, runId, current, pre
  * @param {object|null} params.internalReview Internal review report already attached to this runner cycle, when available.
  * @param {() => Date} params.clock
  * @param {string} params.actor
- * @param {{plan(snapshot: object, options?: object): object, execute(snapshot: object, plan: object, options?: object): Promise<object>, externalSideEffects?: boolean}} [params.scmHandoffAdapter=createLocalScmHandoffAdapter()]
+ * @param {{plan(snapshot: object, options?: object): object, execute(snapshot: object, plan: object, options?: object): Promise<object>, externalSideEffects?: boolean}} params.scmHandoffAdapter
  * @returns {Promise<object>} Runner report after recording projection artifacts and transitioning to manual review.
  */

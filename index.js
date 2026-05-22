@@ -94,6 +94,5 @@ export { assertNextSliceAllowed, evaluateReviewReadyPolicy } from "./src/stack-w
 export { REGISTRY_REPOSITORY_METHODS, REGISTRY_REPOSITORY_PORT, assertRegistryRepository, createRegistryRepositoryContract } from "./src/core/modules/execution-runs/ports/registry-repository.js";
 export { WORKSPACE_LEASE_SERVICE_METHODS, WORKSPACE_LEASE_SERVICE_PORT, assertWorkspaceLeaseService, createWorkspaceLeaseServiceContract } from "./src/core/modules/workspace-leases/ports/workspace-lease-service.js";
 export { SCM_HANDOFF_PORT, SCM_HANDOFF_PORT_METHODS, assertScmHandoffPort } from "./src/core/modules/scm-handoff/ports/scm-handoff-port.js";
-export { LocalJournalScmHandoffAdapter, createLocalJournalScmHandoffAdapter } from "./src/core/modules/scm-handoff/services/local-journal-scm-handoff-adapter.js";
-export { GitHubCliClient, GitHubIntegration, GitHubScmHandoffAdapter, createGithubCliPrProjectionAdapter, createGithubPrTransportAdapter } from "./src/integrations/scm/github/index.js";
+export { GitHubCliClient, GitHubIntegration, GitHubScmHandoffAdapter, createGithubCliScmHandoffAdapter, createGithubScmHandoffAdapter, createGithubCliPrProjectionAdapter, createGithubPrTransportAdapter } from "./src/integrations/scm/github/index.js";
 export { assertTransitionAllowed, getAllowedTransitions, isTerminalState, validateTransition } from "./src/core/modules/execution-runs/state-machine.js";

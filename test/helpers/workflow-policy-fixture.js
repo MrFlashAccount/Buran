@@ -1,10 +1,9 @@
 export function reviewReadyPolicySnapshot({ runId = "run_policy_ready", state = "ready_for_manual_review" } = {}) {
   const verificationRef = { path: "artifacts/verification/pass.json", sha256: "sha-verification" };
   const reviewRef = { path: "artifacts/internal-review/pass.json", sha256: "sha-review" };
-  const projectionRef = { path: "artifacts/pr/projection-result.json", sha256: "sha-projection" };
+  const projectionRef = { path: "artifacts/scm-handoff/result.json", sha256: "sha-projection" };
   const handoffTarget = {
     provider: "github",
-    kind: "pull_request",
     number: 99,
     url: "https://github.com/example-owner/example-repo/pull/99",
     repo: "example-owner/example-repo",
@@ -100,7 +99,7 @@ export function reviewReadyPolicySnapshot({ runId = "run_policy_ready", state = 
         execution_epoch: 1,
         recorded_from_state: "handoff_ready",
         last_intent: {
-          artifact_ref: { path: "artifacts/pr/projection-intent.json", sha256: "sha-projection-intent" },
+          artifact_ref: { path: "artifacts/scm-handoff/intent.json", sha256: "sha-projection-intent" },
           recorded_at: "2026-05-16T13:56:30.000Z",
           actor: "github-pr-transport-adapter",
           idempotency_key: "handoff_target:policy:intent",

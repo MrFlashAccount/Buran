@@ -17,7 +17,7 @@ test("workflow policy exposes review-ready gates and allows the next stacked sli
     ["implementation_handoff", "PASS"],
     ["verification", "PASS"],
     ["independent_review", "PASS"],
-    ["pr_projection", "PASS"],
+    ["scm_handoff", "PASS"],
     ["review_ready_terminal_state", "PASS"],
   ]);
   assert.doesNotThrow(() => assertNextSliceAllowed(reviewReadyPolicySnapshot()));
@@ -59,8 +59,8 @@ test("workflow policy blocks stale handoff_target data that diverges from the pr
   const policy = evaluateReviewReadyPolicy(staleHandoff);
 
   assert.equal(policy.allowed_to_start_next_slice, false);
-  assert.ok(policy.blockers.some((blocker) => blocker.gate === "pr_projection"));
-  const projectionGate = policy.gates.find((gate) => gate.name === "pr_projection");
+  assert.ok(policy.blockers.some((blocker) => blocker.gate === "scm_handoff"));
+  const projectionGate = policy.gates.find((gate) => gate.name === "scm_handoff");
   assert.equal(projectionGate.status, "BLOCKED");
   assert.match(projectionGate.evidence.parity_errors.join("\n"), /handoff_target\.number must match/);
   assert.match(projectionGate.evidence.parity_errors.join("\n"), /handoff_target\.repo must match/);
@@ -73,8 +73,8 @@ test("workflow policy blocks missing mirrored projection results", () => {
   const policy = evaluateReviewReadyPolicy(missingMirror);
 
   assert.equal(policy.allowed_to_start_next_slice, false);
-  assert.ok(policy.blockers.some((blocker) => blocker.gate === "pr_projection"));
-  const projectionGate = policy.gates.find((gate) => gate.name === "pr_projection");
+  assert.ok(policy.blockers.some((blocker) => blocker.gate === "scm_handoff"));
+  const projectionGate = policy.gates.find((gate) => gate.name === "scm_handoff");
   assert.equal(projectionGate.status, "BLOCKED");
   assert.ok(projectionGate.evidence.parity_errors.includes("projection_ledger.handoff_target.last_result.handoff_target must be present."));
 });
@@ -98,8 +98,8 @@ test("workflow policy blocks matching mirrored SCM handoff data that violates th
   });
 
   assert.equal(policy.allowed_to_start_next_slice, false);
-  assert.ok(policy.blockers.some((blocker) => blocker.gate === "pr_projection"));
-  const projectionGate = policy.gates.find((gate) => gate.name === "pr_projection");
+  assert.ok(policy.blockers.some((blocker) => blocker.gate === "scm_handoff"));
+  const projectionGate = policy.gates.find((gate) => gate.name === "scm_handoff");
   assert.equal(projectionGate.status, "BLOCKED");
   assert.match(projectionGate.evidence.parity_errors.join("\n"), /handoff_target\.repo must match scm_target\.repo/);
   assert.match(projectionGate.evidence.parity_errors.join("\n"), /handoff_target\.issue_number must match scm_target\.issue_number/);
@@ -132,7 +132,7 @@ test("workflow policy validates mirrored handoff URL schema, host, repo, and num
   ]) {
     const policy = policyForMirroredHandoffOverride({ url });
     assert.equal(policy.allowed_to_start_next_slice, false, name);
-    const projectionGate = policy.gates.find((gate) => gate.name === "pr_projection");
+    const projectionGate = policy.gates.find((gate) => gate.name === "scm_handoff");
     assert.equal(projectionGate.status, "BLOCKED", name);
     assert.match(projectionGate.evidence.parity_errors.join("\n"), pattern, name);
   }
@@ -147,7 +147,7 @@ test("workflow policy blocks mirrored SCM handoff local contract field mismatche
   ]) {
     const policy = policyForMirroredHandoffOverride(override);
     assert.equal(policy.allowed_to_start_next_slice, false, name);
-    const projectionGate = policy.gates.find((gate) => gate.name === "pr_projection");
+    const projectionGate = policy.gates.find((gate) => gate.name === "scm_handoff");
     assert.equal(projectionGate.status, "BLOCKED", name);
     assert.match(projectionGate.evidence.parity_errors.join("\n"), pattern, name);
   }
@@ -163,7 +163,7 @@ test("workflow policy blocks mirrored projection binding mismatches beyond numbe
   const policy = evaluateReviewReadyPolicy(wrongHead);
 
   assert.equal(policy.allowed_to_start_next_slice, false);
-  assert.ok(policy.blockers.some((blocker) => blocker.gate === "pr_projection"));
-  const projectionGate = policy.gates.find((gate) => gate.name === "pr_projection");
+  assert.ok(policy.blockers.some((blocker) => blocker.gate === "scm_handoff"));
+  const projectionGate = policy.gates.find((gate) => gate.name === "scm_handoff");
   assert.match(projectionGate.evidence.parity_errors.join("\n"), /handoff_target\.head_branch must match/);
 });

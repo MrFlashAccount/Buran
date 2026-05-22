@@ -1,4 +1,5 @@
-import { buildScmHandoffPlan, buildScmHandoffResult, projectionContractError } from "../../../core/modules/scm-handoff/services/local-journal-scm-handoff-adapter.js";
+import { projectionContractError } from "../../../core/modules/scm-handoff/errors.js";
+import { buildScmHandoffPlan, buildScmHandoffResult } from "../../../core/modules/scm-handoff/services/scm-handoff-projection.js";
 import { sanitizeProjectionDurableValue } from "../../../core/modules/scm-handoff/contract.js";
 import { assertScmHandoffPort } from "../../../core/modules/scm-handoff/ports/scm-handoff-port.js";
 import { isRecord, nonEmptyString } from "../../../shared/primitives.js";
@@ -8,7 +9,10 @@ import { createGitHubCliClient } from "./github-cli-client.js";
 
 /** Projection mode recorded for GitHub-backed PR handoff transport results. */
 export const GITHUB_PR_TRANSPORT_MODE = "github_transport";
-/** Alias retained for provider-neutral SCM handoff call sites that still consume the GitHub mode. */
+/**
+ * Alias retained for provider-neutral SCM handoff call sites that still consume the GitHub mode.
+ * Owner: Buran architecture migration. Expiry: 2026-06-30. Removal: delete after downstream callers use GITHUB_PR_TRANSPORT_MODE or profile-local mode wiring.
+ */
 export const GITHUB_SCM_HANDOFF_MODE = GITHUB_PR_TRANSPORT_MODE;
 /** Public adapter id for the GitHub PR transport profile. */
 export const GITHUB_PR_TRANSPORT_ADAPTER = "github-pr-transport-adapter";
@@ -183,8 +187,16 @@ export class GitHubScmHandoffAdapter {
  * @param {object} [options] `GitHubScmHandoffAdapter` constructor options.
  * @returns {GitHubScmHandoffAdapter} Port-checked adapter instance.
  */
-export function createGithubPrTransportAdapter(options = {}) {
+export function createGithubScmHandoffAdapter(options = {}) {
   return assertScmHandoffPort(new GitHubScmHandoffAdapter(options));
+}
+
+/**
+ * Bounded public API alias for historical GitHub PR transport consumers.
+ * Owner: Buran architecture migration. Expiry: 2026-06-30. Removal: delete after direct consumers import createGithubScmHandoffAdapter.
+ */
+export function createGithubPrTransportAdapter(options = {}) {
+  return createGithubScmHandoffAdapter(options);
 }
 
 /**
@@ -193,17 +205,25 @@ export function createGithubPrTransportAdapter(options = {}) {
  * @param {object} [options] CLI client, environment, host, mode, adapter id, and enablement options.
  * @returns {GitHubScmHandoffAdapter} Port-checked GitHub CLI adapter; external writes occur only when enabled.
  */
-export function createGithubCliPrProjectionAdapter(options = {}) {
+export function createGithubCliScmHandoffAdapter(options = {}) {
   const actor = options.adapter || GITHUB_PR_TRANSPORT_ADAPTER;
   const client = options.client || createGitHubCliClient(options);
   const integration = new GitHubIntegration({ ...options, client, actor });
-  return createGithubPrTransportAdapter({
+  return createGithubScmHandoffAdapter({
     integration,
     adapter: actor,
     mode: options.mode || GITHUB_PR_TRANSPORT_MODE,
     externalSideEffects: Boolean(options.enabled),
     githubHost: options.githubHost || options.env?.GH_HOST || DEFAULT_GITHUB_HOST,
   });
+}
+
+/**
+ * Bounded public API alias for historical GitHub CLI PR projection consumers.
+ * Owner: Buran architecture migration. Expiry: 2026-06-30. Removal: delete after direct consumers import createGithubCliScmHandoffAdapter.
+ */
+export function createGithubCliPrProjectionAdapter(options = {}) {
+  return createGithubCliScmHandoffAdapter(options);
 }
 
 export { createGithubCliProjectPr, GitHubIntegration };

@@ -140,7 +140,7 @@ flowchart TB
 - **Implementation runner**: applies the approved packet. It may make implementation decisions only inside the approved envelope.
 - **Verification gate**: records test/lint/build/manual check outcomes and blocks handoff projection unless status is `PASS`.
 - **Internal review loop**: runs review, records findings, applies fixes, and blocks handoff projection unless status is `PASS`.
-- **Handoff coordinator**: projects the configured `handoff_target` only after verification and review pass; `pr_ready` is the current GitHub-profile state name for gate completion, not proof that a pull request already exists.
+- **Handoff coordinator**: projects the configured `handoff_target` only after verification and review pass; `handoff_ready` is the provider-neutral gate-completion state before `ready_for_manual_review`.
 - **Projection adapter**: writes provider-specific SCM/tracker/review updates from local state and can repair projections idempotently.
 
 ## Domain model and language

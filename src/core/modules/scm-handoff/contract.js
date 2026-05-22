@@ -14,8 +14,9 @@
 import path from "node:path";
 
 import { isRecord, nonEmptyString } from "../../../shared/primitives.js";
+import { isSuccessfulProjectionResultStatus } from "./status.js";
 
-export const SUCCESSFUL_PROJECTION_RESULT_STATUSES = new Set(["projected_local", "projected", "created", "updated"]);
+export { isSuccessfulProjectionResultStatus } from "./status.js";
 
 const SECRET_VALUE_PATTERNS = [
   /github_pat_[A-Za-z0-9_]{20,}/g,
@@ -99,9 +100,6 @@ export function sanitizeProjectionDurableValue(value, { depth = 0 } = {}) {
   return output;
 }
 
-export function isSuccessfulProjectionResultStatus(status) {
-  return SUCCESSFUL_PROJECTION_RESULT_STATUSES.has(nonEmptyString(status));
-}
 
 export function isValidProjectionUrl(value) {
   const text = nonEmptyString(value);

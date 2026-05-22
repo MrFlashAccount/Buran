@@ -1,5 +1,5 @@
-/** Provider-neutral port for read-only workspace preparation inspection. */
-export const WORKSPACE_PREPARATION_INSPECTOR_PORT = "buran.core.workspaces.workspacePreparationInspector";
+/** Provider-neutral core port for read-only workspace preparation inspection. */
+export const WORKSPACE_PREPARATION_INSPECTOR_PORT = "buran.core.workspacePreparationInspector";
 
 /**
  * Public port descriptor for workspace preparation inspectors.
@@ -18,7 +18,7 @@ export class WorkspacePreparationInspectorPort {
 /**
  * Assert that an object implements the workspace-preparation inspector port.
  *
- * @param {object} inspector Candidate inspector with an `inspect` method.
+ * @param {object} inspector Candidate inspector with an `inspect(context)` method.
  * @returns {object} The original inspector when valid.
  */
 export function assertWorkspacePreparationInspector(inspector) {

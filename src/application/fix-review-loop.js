@@ -6,7 +6,7 @@ import { TERMINAL_STATES } from "../core/modules/execution-runs/constants.js";
 import { IMPLEMENTATION_DISPATCH_ADAPTER, buildImplementationDispatchIntent, executeImplementationDispatch, implementationDispatchStatusSummary, isUnavailableImplementationDispatchResult, sanitizeImplementationDispatchEvidence, validateImplementationDispatchResultReport } from "../gates/implementation-contract.js";
 import { executeInternalReviewGate, sanitizeRecordedInternalReviewReport } from "../gates/internal-review-adapter.js";
 import { sanitizePublicReportForOutput } from "../observability/index.js";
-import { buildRecordedScmHandoff, createLocalScmHandoffAdapter } from "../core/modules/scm-handoff/services/local-journal-scm-handoff-adapter.js";
+import { buildRecordedScmHandoff } from "../core/modules/scm-handoff/services/scm-handoff-projection.js";
 import { executeVerificationGate } from "../gates/verification-adapter.js";
 import { evaluateReviewReadyPolicy } from "../stack-workflow/review-ready-policy.js";
 import { assertRegistryRepository } from "../core/modules/execution-runs/ports/registry-repository.js";
@@ -539,7 +539,7 @@ export async function runFixLoopStage({ registryRoot, runId, current, previousSt
  * @param {string} [params.actor=RUNNER_ACTOR] Actor name recorded on state transitions and artifacts.
  * @param {{adapter?: string, execute(options: object): Promise<object>}} [params.implementationDispatchAdapter=createUnavailableImplementationDispatchAdapter()]
  * Implementation-dispatch adapter invoked from `running` only when no current result artifact can be safely reused.
- * @param {{plan(snapshot: object, options?: object): object, execute(snapshot: object, plan: object, options?: object): Promise<object>, externalSideEffects?: boolean}} [params.scmHandoffAdapter=createLocalScmHandoffAdapter()]
+ * @param {{plan(snapshot: object, options?: object): object, execute(snapshot: object, plan: object, options?: object): Promise<object>, externalSideEffects?: boolean}} params.scmHandoffAdapter
  * Projection adapter used when the run reaches `handoff_ready`.
  * @returns {Promise<object>} Sanitized public runner report describing completed work, blockers, and current state.
  * @throws {Error} When required identifiers are missing or an unexpected storage/adapter error occurs.

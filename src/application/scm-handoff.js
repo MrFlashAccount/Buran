@@ -1,26 +1,15 @@
-/** Provider-neutral PR/SCM handoff coordination for local mission orchestration. */
-import { promises as fs } from "node:fs";
-import path from "node:path";
-
-import { TERMINAL_STATES } from "../core/modules/execution-runs/constants.js";
-import { IMPLEMENTATION_DISPATCH_ADAPTER, buildImplementationDispatchIntent, executeImplementationDispatch, implementationDispatchStatusSummary, isUnavailableImplementationDispatchResult, sanitizeImplementationDispatchEvidence, validateImplementationDispatchResultReport } from "../gates/implementation-contract.js";
-import { executeInternalReviewGate, sanitizeRecordedInternalReviewReport } from "../gates/internal-review-adapter.js";
+/** Provider-neutral SCM handoff coordination for local mission orchestration. */
 import { sanitizePublicReportForOutput } from "../observability/index.js";
-import { buildRecordedScmHandoff, createLocalJournalScmHandoffAdapter } from "../core/modules/scm-handoff/services/local-journal-scm-handoff-adapter.js";
+import { buildRecordedScmHandoff } from "../core/modules/scm-handoff/services/scm-handoff-projection.js";
 import { assertScmHandoffPort } from "../core/modules/scm-handoff/ports/scm-handoff-port.js";
-import { executeVerificationGate } from "../gates/verification-adapter.js";
-import { evaluateReviewReadyPolicy } from "../stack-workflow/review-ready-policy.js";
 import { assertRegistryRepository } from "../core/modules/execution-runs/ports/registry-repository.js";
-import { canonicalJson, isRecord, nonEmptyString, sha256Hex } from "../shared/primitives.js";
-import { hasActiveLease } from "./mission-context.js";
-import { buildIssue, buildRunnerReport, buildStep, implementationBoundaryMessage, internalReviewTransition, internalReviewTransitionReason, leaseRequiredMessage, projectionProblemCode, projectionTransitionReason, unsupportedStageMessage, verificationTransition, verificationTransitionReason } from "./final-report.js";
+import { isRecord, nonEmptyString } from "../shared/primitives.js";
+import { buildIssue, buildRunnerReport, buildStep, projectionProblemCode, projectionTransitionReason } from "./final-report.js";
 
 
 function toHandoffTarget(handoffTarget) {
   if (!isRecord(handoffTarget)) return null;
   return {
-    provider: "github",
-    kind: "pull_request",
     number: handoffTarget.number,
     url: handoffTarget.url,
     repo: handoffTarget.repo,
@@ -58,9 +47,9 @@ function projectionProblemFromError(error) {
   return buildProjectionProblem("record_failed", `SCM handoff projection handoff could not be recorded locally: ${message}`);
 }
 
-export async function runPrReadyStage({ registryRoot, runId, current, previousState, stepsTaken, blockers, warnings, workspacePreparation, implementationDispatch, verification, internalReview, clock, actor, scmHandoffAdapter, registryRepository } = {}) {
+export async function runScmHandoffStage({ registryRoot, runId, current, previousState, stepsTaken, blockers, warnings, workspacePreparation, implementationDispatch, verification, internalReview, clock, actor, scmHandoffAdapter, registryRepository } = {}) {
   const registry = assertRegistryRepository(registryRepository);
-  const handoffAdapter = assertScmHandoffPort(scmHandoffAdapter || createLocalJournalScmHandoffAdapter());
+  const handoffAdapter = assertScmHandoffPort(scmHandoffAdapter);
   let projection = null;
   let plannedProjection;
   let intentArtifactRef = null;
@@ -192,7 +181,7 @@ export async function runPrReadyStage({ registryRoot, runId, current, previousSt
     actor,
     evidence: {
       reason: projectionTransitionReason(),
-      pr_projection: {
+      scm_handoff: {
         adapter: plannedProjection.adapter,
         mode: plannedProjection.mode,
         execution_epoch: plannedProjection.executionEpoch,
@@ -210,7 +199,7 @@ export async function runPrReadyStage({ registryRoot, runId, current, previousSt
     status: "completed",
     fromState: "handoff_ready",
     toState: current.state,
-    detail: "Recorded SCM handoff projection handoff advanced the run to ready_for_manual_review.",
+    detail: "Recorded SCM handoff projection advanced the run to ready_for_manual_review.",
     sequence: transitioned.event.sequence,
     artifactPath: projection.result_artifact_ref.path,
     artifactSha256: projection.result_artifact_ref.sha256,

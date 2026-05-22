@@ -17,8 +17,9 @@ import { createFilesystemWorkspaceLeaseService } from "../integrations/worktree/
 import { createFilesystemWorkspacePreparationInspector } from "../integrations/worktree/filesystem/workspace-preparation-inspector.js";
 import { assertRegistryRepository } from "../core/modules/execution-runs/ports/registry-repository.js";
 import { assertWorkspaceLeaseService } from "../core/modules/workspace-leases/ports/workspace-lease-service.js";
-import { createLocalJournalScmHandoffAdapter } from "../core/modules/scm-handoff/services/local-journal-scm-handoff-adapter.js";
+import { createLocalJournalScmHandoffAdapter } from "../integrations/scm/local-journal/local-journal-scm-handoff-adapter.js";
 import { assertScmHandoffPort } from "../core/modules/scm-handoff/ports/scm-handoff-port.js";
+import { createWorkspacePreparationInspectorContract } from "../core/ports/workspace-preparation-inspector.js";
 
 /**
  * Runtime object exposing the concrete adapters used by local Buran execution.
@@ -37,7 +38,7 @@ export class LocalBuranRuntime {
       registryRepository: this.registryRepository,
       leaseRecordStore: this.leaseRecordStore,
     }));
-    this.workspacePreparationInspector = workspacePreparationInspector || createFilesystemWorkspacePreparationInspector();
+    this.workspacePreparationInspector = createWorkspacePreparationInspectorContract(workspacePreparationInspector || createFilesystemWorkspacePreparationInspector());
     this.scmHandoffAdapter = assertScmHandoffPort(scmHandoffAdapter || createLocalJournalScmHandoffAdapter());
   }
 }

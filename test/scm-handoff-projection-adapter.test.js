@@ -1,25 +1,26 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { buildScmHandoffPlan } from "../src/core/modules/scm-handoff/services/local-journal-scm-handoff-adapter.js";
+import { buildScmHandoffPlan } from "../src/core/modules/scm-handoff/services/scm-handoff-projection.js";
 
 function projectionSnapshot(baseBranch) {
   return {
     run_id: "run_projection_base_branch_identity",
     task_id: "projection-base-branch-identity",
-    state: "pr_ready",
+    state: "handoff_ready",
     execution: { current_epoch: 1 },
     gates: {
       verification: { status: "PASS", current_epoch: 1, current_attempt: 1, artifact_refs: [] },
       internal_review: { status: "PASS", current_epoch: 1, current_attempt: 1, artifact_refs: [] },
     },
-    github: {
+    scm_target: {
+      provider: "github",
       repo: "example-owner/example-repo",
       issue_number: 17,
       intended_branch: "feature/base-sensitive",
       base_branch: baseBranch,
     },
-    projections: {},
+    projection_ledger: {},
   };
 }
 

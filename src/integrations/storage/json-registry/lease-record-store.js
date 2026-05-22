@@ -2,7 +2,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 
 import { createLeaseRecordStoreContract } from "../../../core/modules/workspace-leases/ports/lease-record-store.js";
-import { leaseRecordsDir } from "../../../workspace-leases/contract.js";
+import { getLeaseRecordPath, leaseRecordsDir } from "./path-layout.js";
 import { removeLeaseRecordPath, writeLeaseRecordExclusive } from "./lease-records.js";
 
 async function readLeaseRecord(filePath) {
@@ -47,6 +47,7 @@ export function createJsonLeaseRecordStore() {
     },
     removeLeaseRecordPath,
     writeLeaseRecordExclusive,
+    getLeaseRecordPath,
   });
 }
 

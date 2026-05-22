@@ -21,7 +21,7 @@ const oldTopLevelModules = new Set([
   "locks.js",
   "observability.js",
   "packet-sufficiency.js",
-  "pr-projection-adapter.js",
+  "scm-handoff-projection-adapter.js",
   "projection-contract.js",
   "recovery.js",
   "registry-store.js",
@@ -36,6 +36,7 @@ const oldTopLevelModules = new Set([
 const domainVocabulary = /\b(buran|packet|registry|run|runs|gate|github|projection|workflow|lease|state-machine|implementation-dispatch)\b/i;
 const removedCompatibilityModules = new Set([
   "src/application/workspace-preparation-inspector.js",
+  "src/integrations/integration.js",
   "src/core/modules/scm-handoff/value-objects/github-pr-handoff-target.js",
   "src/execution-runs/constants.js",
   "src/execution-runs/registry/index.js",
@@ -47,6 +48,7 @@ const removedCompatibilityModules = new Set([
   "src/workflow-boundary/scm-handoff/index.js",
   "src/workflow-boundary/scm-handoff/local-journal-adapter.js",
   "src/workflow-boundary/scm-handoff/port.js",
+  "src/workspace-leases/contract.js",
   "src/workspace-leases/lease-record-store.js",
   "src/workspace-leases/service.js",
 ]);
@@ -61,6 +63,14 @@ const forbiddenCompatibilitySourcePatterns = [
   "deprecated wrapper",
 ].map((text) => new RegExp(text));
 const coreProviderVocabulary = /GitHub|Github|github-pr/;
+const staleHandoffVocabulary = /\b(pr_ready|runPrReadyStage|pr_projection)\b|github\.pr|projections\.github_pr/;
+const staleScmHandoffArtifactPathPatterns = [
+  /artifacts\/(pr|handoff)\//,
+  /handoff\/projection-(intent|result)-/,
+];
+const providerSpecificPullRequestKindPattern = /kind:\s*["']pull_request["']/;
+const coreModuleSubstanceDirs = new Set(["entities", "value-objects", "policies", "services"]);
+const shallowCoreModuleAllowlist = new Map();
 
 function shouldSkipDirectory(parentDir, entryName) {
   if (skippedDirNames.has(entryName)) return true;
@@ -130,7 +140,35 @@ async function validateDocumentedRepoPaths() {
   }
 }
 
+async function hasJsFiles(dir) {
+  const files = await listFiles(dir, (file) => file.endsWith(".js")).catch(() => []);
+  return files.length > 0;
+}
+
+async function validateCoreModulesHaveSubstance() {
+  const modulesRoot = path.join(root, "src", "core", "modules");
+  const moduleEntries = await fs.readdir(modulesRoot, { withFileTypes: true }).catch(() => []);
+  for (const entry of moduleEntries) {
+    if (!entry.isDirectory()) continue;
+    const moduleRel = `src/core/modules/${entry.name}`;
+    const moduleDir = path.join(modulesRoot, entry.name);
+    const childEntries = await fs.readdir(moduleDir, { withFileTypes: true }).catch(() => []);
+    const hasPortFiles = await hasJsFiles(path.join(moduleDir, "ports"));
+    const hasSubstance = await Promise.all(childEntries
+      .filter((child) => child.isDirectory() && coreModuleSubstanceDirs.has(child.name))
+      .map((child) => hasJsFiles(path.join(moduleDir, child.name))))
+      .then((results) => results.some(Boolean));
+    if (hasPortFiles && !hasSubstance && !shallowCoreModuleAllowlist.has(moduleRel)) {
+      failures.push(`${moduleRel} is a shallow core module: ports exist but no entity, value object, policy, or service implementation`);
+    }
+  }
+  for (const [moduleRel, reason] of shallowCoreModuleAllowlist) {
+    if (!reason || !reason.trim()) failures.push(`${moduleRel} shallow core module allowlist entry is missing a documented reason`);
+  }
+}
+
 await validateDocumentedRepoPaths();
+await validateCoreModulesHaveSubstance();
 
 for (const removedPath of removedCompatibilityModules) {
   if (await documentedPathExists(removedPath)) failures.push(`removed compatibility module still exists: ${removedPath}`);
@@ -171,6 +209,9 @@ for (const file of jsFiles) {
     if (/^src\/(core\/modules\/scm-handoff|workflow-boundary\/scm-handoff)\//.test(fileRel) && /^src\/integrations\/scm\/github\//.test(resolved)) {
       failures.push(`${fileRel} imports GitHub integration from provider-neutral SCM handoff boundary ${resolved}`);
     }
+    if (/^src\/integrations\/scm\/github\//.test(fileRel) && /^src\/integrations\/scm\/local-journal\//.test(resolved)) {
+      failures.push(`${fileRel} imports local-journal implementation ${resolved}; GitHub adapters must depend on core SCM handoff surfaces only`);
+    }
     if (/^src\/integrations\//.test(fileRel) && !/^src\/integrations\/storage\/json-registry\//.test(fileRel)) {
       if (/^src\/integrations\/storage\/json-registry\/store\.js$/.test(resolved)) {
         failures.push(`${fileRel} imports JSON registry store internals ${resolved}`);
@@ -183,8 +224,8 @@ for (const file of jsFiles) {
   }
 }
 
-const coreModuleFiles = await listFiles(path.join(root, "src", "core", "modules"), (file) => file.endsWith(".js") || file.endsWith(".md"));
-for (const file of coreModuleFiles) {
+const providerNeutralCoreFiles = await listFiles(path.join(root, "src", "core"), (file) => file.endsWith(".js") || file.endsWith(".md"));
+for (const file of providerNeutralCoreFiles) {
   const fileRel = rel(file);
   const source = await fs.readFile(file, "utf8");
   if (coreProviderVocabulary.test(source)) failures.push(`${fileRel} contains provider-specific GitHub vocabulary in canonical core`);
@@ -192,12 +233,20 @@ for (const file of coreModuleFiles) {
 
 const sourceContractFiles = await listFiles(root, (file) => {
   const fileRel = rel(file);
-  return (file.endsWith(".js") || file.endsWith(".md")) && /^(src|test|scripts)\//.test(fileRel) && fileRel !== "scripts/boundary-check.js";
+  return (file.endsWith(".js") || file.endsWith(".md")) && /^(ARCHITECTURE\.md$|docs\/|src\/|test\/|scripts\/)/.test(fileRel) && fileRel !== "scripts/boundary-check.js";
 });
 for (const file of sourceContractFiles) {
+  const fileRel = rel(file);
   const source = await fs.readFile(file, "utf8");
   for (const pattern of forbiddenCompatibilitySourcePatterns) {
     if (pattern.test(source)) failures.push(`${rel(file)} contains removed compatibility/deprecated-wrapper marker ${pattern}`);
+  }
+  if (staleHandoffVocabulary.test(source)) failures.push(`${rel(file)} contains stale PR-ready/projection vocabulary`);
+  for (const pattern of staleScmHandoffArtifactPathPatterns) {
+    if (pattern.test(source)) failures.push(`${rel(file)} contains stale SCM handoff artifact path ${pattern}`);
+  }
+  if (!fileRel.startsWith("src/integrations/scm/github/") && providerSpecificPullRequestKindPattern.test(source)) {
+    failures.push(`${rel(file)} contains provider-specific pull_request target kind outside GitHub integration profile`);
   }
 }
 

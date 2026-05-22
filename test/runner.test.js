@@ -23,6 +23,7 @@ import { createJsonLeaseRecordStore } from "../src/integrations/storage/json-reg
 import { createJsonRegistryRecoveryStore } from "../src/integrations/storage/json-registry/recovery-store.js";
 import { createFilesystemWorkspaceLeaseService } from "../src/integrations/worktree/filesystem/locks.js";
 import { createFilesystemWorkspacePreparationInspector } from "../src/integrations/worktree/filesystem/workspace-preparation-inspector.js";
+import { createLocalJournalScmHandoffAdapter } from "../src/integrations/scm/local-journal/local-journal-scm-handoff-adapter.js";
 
 /**
  * Runner mission tests covering queueing, verification execution, review handoff,
@@ -37,7 +38,8 @@ const registryRecoveryStore = createJsonRegistryRecoveryStore();
 const acquireWorkspaceLease = (registryRoot, runId, options = {}) => acquireWorkspaceLeaseWithPorts(registryRoot, runId, { ...options, registryRepository, leaseRecordStore });
 const recoverRegistry = (registryRoot, options = {}) => recoverRegistryCore(registryRoot, { ...options, registryRepository: options.registryRepository || registryRepository, workspaceLeaseService: options.workspaceLeaseService || workspaceLeaseService, registryRecoveryStore: options.registryRecoveryStore || registryRecoveryStore });
 const workspacePreparationInspector = createFilesystemWorkspacePreparationInspector();
-const runLocalMission = (options) => runLocalMissionCore({ ...options, registryRepository: options?.registryRepository || registryRepository, workspaceLeaseService: options?.workspaceLeaseService || workspaceLeaseService, workspacePreparationInspector: options?.workspacePreparationInspector || workspacePreparationInspector });
+const createTestScmHandoffAdapter = () => createLocalJournalScmHandoffAdapter();
+const runLocalMission = (options) => runLocalMissionCore({ ...options, registryRepository: options?.registryRepository || registryRepository, workspaceLeaseService: options?.workspaceLeaseService || workspaceLeaseService, workspacePreparationInspector: options?.workspacePreparationInspector || workspacePreparationInspector, scmHandoffAdapter: options?.scmHandoffAdapter || createTestScmHandoffAdapter() });
 
 
 test("run local mission accepts fake lease and workspace preparation seams", async () => {
@@ -71,7 +73,7 @@ test("run local mission accepts fake lease and workspace preparation seams", asy
     async recover(_root, snapshots) { return { snapshots, findings: [], active_lease_record_paths: [] }; },
   };
   const fakeWorkspacePreparationInspector = {
-    async inspect(workspacePath, { intendedBranch } = {}) {
+    async inspect({ workspacePath, intendedBranch } = {}) {
       calls.inspect += 1;
       assert.equal(workspacePath, "/virtual/workspace");
       return {
@@ -93,6 +95,7 @@ test("run local mission accepts fake lease and workspace preparation seams", asy
     registryRepository,
     workspaceLeaseService: fakeLeaseService,
     workspacePreparationInspector: fakeWorkspacePreparationInspector,
+    scmHandoffAdapter: createTestScmHandoffAdapter(),
     clock: () => new Date("2026-05-16T13:53:00.000Z"),
   });
 
@@ -600,6 +603,7 @@ test("run local report wrapper forwards stack prerequisites and formats side-eff
   const result = await runLocalMissionReport({ registryRepository,
     workspaceLeaseService,
     workspacePreparationInspector,
+    scmHandoffAdapter: createTestScmHandoffAdapter(),
     registryRoot,
     runId: nextRun.run.run_id,
     stackPrerequisite: {
@@ -641,7 +645,7 @@ test("workflow policy remains blocked after recovery when durable gates are inco
   assert.equal(policy.status, "blocked");
   assert.equal(policy.allowed_to_start_next_slice, false);
   assert.ok(policy.blockers.some((blocker) => blocker.gate === "implementation_handoff"));
-  assert.ok(policy.blockers.some((blocker) => blocker.gate === "pr_projection"));
+  assert.ok(policy.blockers.some((blocker) => blocker.gate === "scm_handoff"));
 });
 
 test("local runner stages queued run into waiting_for_lock and reruns idempotently without a lease", async () => {
@@ -2757,7 +2761,7 @@ test("local runner records a local SCM handoff projection handoff and advances h
   const tempDir = await makeTempDir();
   const registryRoot = path.join(tempDir, "registry");
   const runId = await prepareHandoffReadyRun(registryRoot, tempDir, {
-    runId: "run_runner_pr_projection_pass",
+    runId: "run_runner_scm_handoff_pass",
   });
 
   const result = await runLocalMission({
@@ -2802,7 +2806,7 @@ test("transport-backed SCM handoff projection reuses a sanitized recorded result
   const intendedBranch = "feature/glpat-abcdefghijklmnopqrstuvwxyz123456/Users/user/private";
   const baseBranch = "develop/github_pat_abcdefghijklmnopqrstuvwxyz123456";
   const runId = await prepareHandoffReadyRun(registryRoot, tempDir, {
-    runId: "run_runner_pr_projection_transport",
+    runId: "run_runner_scm_handoff_transport",
     repo,
     intendedBranch,
     baseBranch,
@@ -3355,7 +3359,7 @@ test("transport-backed SCM handoff projection blocks live transport without arti
 
 test("transport-backed SCM handoff projection preserves contract-valid repo and branch values until durable sanitization", async () => {
   const snapshot = {
-    run_id: "run_runner_pr_projection_transport_sanitized_contract",
+    run_id: "run_runner_scm_handoff_transport_sanitized_contract",
     task_id: "task github_pat_abcdefghijklmnopqrstuvwxyz123456 /Users/user/private/notes.md",
     state: "handoff_ready",
     execution: { current_epoch: 1 },
@@ -3449,7 +3453,7 @@ test("local runner records sanitized projection payloads and safe idempotency ke
   const intendedBranch = "feature/glpat-abcdefghijklmnopqrstuvwxyz123456/Users/user/private";
   const baseBranch = "develop/github_pat_abcdefghijklmnopqrstuvwxyz123456";
   const runId = await prepareHandoffReadyRun(registryRoot, tempDir, {
-    runId: "run_runner_pr_projection_sanitized_recording",
+    runId: "run_runner_scm_handoff_sanitized_recording",
     repo,
     intendedBranch,
     baseBranch,
@@ -3508,8 +3512,8 @@ test("local runner preserves structured GitHub transport blocker classifications
   const cases = [
     {
       name: "disabled",
-      runId: "run_runner_pr_projection_cli_disabled",
-      expectedCode: "pr_projection_github_transport_disabled",
+      runId: "run_runner_scm_handoff_cli_disabled",
+      expectedCode: "scm_handoff_github_transport_disabled",
       projectPr: () => createGithubCliProjectPr({
         enabled: false,
         allowedRepos: ["example-owner/example-repo"],
@@ -3517,8 +3521,8 @@ test("local runner preserves structured GitHub transport blocker classifications
     },
     {
       name: "repo not allowed",
-      runId: "run_runner_pr_projection_cli_repo_not_allowed",
-      expectedCode: "pr_projection_github_repo_not_allowed",
+      runId: "run_runner_scm_handoff_cli_repo_not_allowed",
+      expectedCode: "scm_handoff_github_repo_not_allowed",
       repo: "other-owner/other-repo",
       projectPr: () => createGithubCliProjectPr({
         enabled: true,
@@ -3527,8 +3531,8 @@ test("local runner preserves structured GitHub transport blocker classifications
     },
     {
       name: "gh unavailable",
-      runId: "run_runner_pr_projection_cli_unavailable",
-      expectedCode: "pr_projection_github_unavailable",
+      runId: "run_runner_scm_handoff_cli_unavailable",
+      expectedCode: "scm_handoff_github_unavailable",
       projectPr: () => createGithubCliProjectPr({
         enabled: true,
         allowedRepos: ["example-owner/example-repo"],
@@ -3541,8 +3545,8 @@ test("local runner preserves structured GitHub transport blocker classifications
     },
     {
       name: "gh auth failure",
-      runId: "run_runner_pr_projection_cli_auth_failed",
-      expectedCode: "pr_projection_github_auth_failed",
+      runId: "run_runner_scm_handoff_cli_auth_failed",
+      expectedCode: "scm_handoff_github_auth_failed",
       projectPr: () => createGithubCliProjectPr({
         enabled: true,
         allowedRepos: ["example-owner/example-repo"],
@@ -3555,8 +3559,8 @@ test("local runner preserves structured GitHub transport blocker classifications
     },
     {
       name: "gh timeout",
-      runId: "run_runner_pr_projection_cli_timeout",
-      expectedCode: "pr_projection_github_timeout",
+      runId: "run_runner_scm_handoff_cli_timeout",
+      expectedCode: "scm_handoff_github_timeout",
       projectPr: () => createGithubCliProjectPr({
         enabled: true,
         allowedRepos: ["example-owner/example-repo"],
@@ -3603,7 +3607,7 @@ test("transport-backed SCM handoff projection blocks on invalid transport result
   const tempDir = await makeTempDir();
   const registryRoot = path.join(tempDir, "registry");
   const runId = await prepareHandoffReadyRun(registryRoot, tempDir, {
-    runId: "run_runner_pr_projection_transport_invalid",
+    runId: "run_runner_scm_handoff_transport_invalid",
   });
   const scmHandoffAdapter = createGithubPrTransportAdapter({
     externalSideEffects: false,
@@ -3629,7 +3633,7 @@ test("transport-backed SCM handoff projection blocks on invalid transport result
   const events = await readEventsFile(paths.eventsPath);
   assert.equal(result.outcome, "blocked");
   assert.equal(result.current_state, "handoff_ready");
-  assert.equal(result.projection.problem.code, "pr_projection_invalid_transport_result");
+  assert.equal(result.projection.problem.code, "scm_handoff_invalid_transport_result");
   assert.deepEqual(result.steps_taken.map((step) => [step.action, step.status, step.to_state]), [
     ["projection_intent_recorded", "completed", "handoff_ready"],
     ["projection_result_recorded", "blocked", "handoff_ready"],
@@ -3643,7 +3647,7 @@ test("transport-backed SCM handoff projection redacts invalid transport status i
   const tempDir = await makeTempDir();
   const registryRoot = path.join(tempDir, "registry");
   const runId = await prepareHandoffReadyRun(registryRoot, tempDir, {
-    runId: "run_runner_pr_projection_transport_invalid_status",
+    runId: "run_runner_scm_handoff_transport_invalid_status",
   });
   const rawSecretStatus = "ghp_abcdefghijklmnopqrstuvwxyz123456 /Users/user/private/notes.txt";
   const scmHandoffAdapter = createGithubPrTransportAdapter({
@@ -3675,7 +3679,7 @@ test("transport-backed SCM handoff projection redacts invalid transport status i
 
   assert.equal(result.outcome, "blocked");
   assert.equal(result.current_state, "handoff_ready");
-  assert.equal(result.projection.problem.code, "pr_projection_invalid_transport_result");
+  assert.equal(result.projection.problem.code, "scm_handoff_invalid_transport_result");
   assert.match(result.projection.problem.message, /\[REDACTED_SECRET\]/);
   assert.match(result.projection.problem.message, /<absolute_path>\/notes\.txt/);
   assert.doesNotMatch(leakedFields, /ghp_abcdefghijklmnopqrstuvwxyz123456/);
@@ -3690,7 +3694,7 @@ test("registry recovery replays projection semantics and preserves ready_for_man
   const tempDir = await makeTempDir();
   const registryRoot = path.join(tempDir, "registry");
   const runId = await prepareHandoffReadyRun(registryRoot, tempDir, {
-    runId: "run_runner_pr_projection_recovery",
+    runId: "run_runner_scm_handoff_recovery",
   });
 
   await runLocalMission({
@@ -3712,7 +3716,7 @@ test("local runner reuses a recorded SCM handoff projection handoff without dupl
   const tempDir = await makeTempDir();
   const registryRoot = path.join(tempDir, "registry");
   const runId = await prepareHandoffReadyRun(registryRoot, tempDir, {
-    runId: "run_runner_pr_projection_resume",
+    runId: "run_runner_scm_handoff_resume",
   });
 
   await runLocalMission({
@@ -3754,7 +3758,7 @@ test("local runner blocks handoff_ready when the recorded SCM handoff projection
   const tempDir = await makeTempDir();
   const registryRoot = path.join(tempDir, "registry");
   const runId = await prepareHandoffReadyRun(registryRoot, tempDir, {
-    runId: "run_runner_pr_projection_corrupt",
+    runId: "run_runner_scm_handoff_corrupt",
   });
 
   const first = await runLocalMission({
@@ -3783,7 +3787,7 @@ test("local runner blocks handoff_ready when the recorded SCM handoff projection
 
   assert.equal(retried.outcome, "blocked");
   assert.equal(retried.current_state, "handoff_ready");
-  assert.equal(retried.projection.problem.code, "pr_projection_artifact_corrupt");
+  assert.equal(retried.projection.problem.code, "scm_handoff_artifact_corrupt");
   assert.deepEqual(retried.steps_taken.map((step) => [step.action, step.status, step.to_state]), [
     ["projection_intent_recorded", "noop", "handoff_ready"],
     ["projection_result_recorded", "blocked", "handoff_ready"],
@@ -3796,7 +3800,7 @@ test("local runner blocks handoff_ready when base branch is missing from the loc
   const tempDir = await makeTempDir();
   const registryRoot = path.join(tempDir, "registry");
   const runId = await prepareHandoffReadyRun(registryRoot, tempDir, {
-    runId: "run_runner_pr_projection_missing_base_branch",
+    runId: "run_runner_scm_handoff_missing_base_branch",
     baseBranch: "",
   });
 
@@ -3810,7 +3814,7 @@ test("local runner blocks handoff_ready when base branch is missing from the loc
   const events = await readEventsFile(paths.eventsPath);
   assert.equal(result.outcome, "blocked");
   assert.equal(result.current_state, "handoff_ready");
-  assert.equal(result.projection.problem.code, "pr_projection_missing_base_branch");
+  assert.equal(result.projection.problem.code, "scm_handoff_missing_base_branch");
   assert.deepEqual(result.steps_taken.map((step) => [step.action, step.status, step.to_state]), [
     ["projection_result_recorded", "blocked", "handoff_ready"],
   ]);

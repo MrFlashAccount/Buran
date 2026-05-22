@@ -4,7 +4,7 @@ import { appendScmHandoffTargetValidationErrors } from "../contract.js";
 /**
  * Value object for a validated projected SCM handoff target.
  *
- * The value must satisfy the provider-neutral handoff target schema from `scm-handoff/contract.js`: PR/target number,
+ * The value must satisfy the provider-neutral handoff target schema from `scm-handoff/contract.js`: handoff target number,
  * URL, repo, issue number parity field, head/base branches, state, draft flag, and title. Construction freezes a
  * shallow copy so callers can safely serialize it without mutating the original input.
  */

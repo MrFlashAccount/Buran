@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { SCHEMA_VERSION } from "../src/core/modules/execution-runs/constants.js";
-import { buildLocalScmHandoffProjection } from "../src/core/modules/scm-handoff/services/local-journal-scm-handoff-adapter.js";
+import { buildLocalScmHandoffProjection } from "../src/integrations/scm/local-journal/local-journal-scm-handoff-adapter.js";
 import { acquireWorkspaceLease as acquireWorkspaceLeaseWithPorts } from "../src/integrations/worktree/filesystem/locks.js";
 import { recoverRegistry as recoverRegistryCore } from "../src/execution-runs/recovery/index.js";
 import { createJsonRegistryRepository } from "../src/integrations/storage/json-registry/repository.js";
@@ -315,7 +315,7 @@ test("internal review gate results open handoff_ready on PASS and blocked_needs_
   assert.equal(blockedNeedsHuman.run.gates.internal_review.status, "BLOCKED");
 });
 
-test("projection result recording rejects semantically invalid successful PR handoff payloads", async () => {
+test("projection result recording rejects semantically invalid successful SCM handoff payloads", async () => {
   const tempDir = await makeTempDir();
   const registryRoot = path.join(tempDir, "registry");
   const runId = await prepareHandoffReadyRun(registryRoot, { runId: "run_gate_projection_validation" });

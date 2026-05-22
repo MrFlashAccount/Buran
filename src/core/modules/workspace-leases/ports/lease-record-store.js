@@ -12,6 +12,7 @@ export const LEASE_RECORD_STORE_METHODS = Object.freeze([
   "listLeaseRecords",
   "removeLeaseRecordPath",
   "writeLeaseRecordExclusive",
+  "getLeaseRecordPath",
 ]);
 
 /**
@@ -33,7 +34,8 @@ export function assertLeaseRecordStore(store) {
  * Create a frozen, bound lease-record store contract.
  *
  * @param {object} store Object implementing `listLeaseRecords(registryRoot)`,
- * `removeLeaseRecordPath(recordPath)`, and `writeLeaseRecordExclusive(recordPath, record)`.
+ * `removeLeaseRecordPath(recordPath)`, `writeLeaseRecordExclusive(recordPath, record)`,
+ * and `getLeaseRecordPath(registryRoot, lockKey)`.
  * @returns {Readonly<object>} Bound contract exposing only the port methods.
  */
 export function createLeaseRecordStoreContract(store) {

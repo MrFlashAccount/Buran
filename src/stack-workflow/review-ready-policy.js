@@ -242,7 +242,7 @@ export function evaluateReviewReadyPolicy(snapshot, { currentSlice = "", nextSli
       : "Fresh current-epoch independent internal-review PASS with artifact evidence is required.", {
         gate: snapshot?.gates?.internal_review || null,
       }),
-    gate("pr_projection", projectionReady, projectionReady
+    gate("scm_handoff", projectionReady, projectionReady
       ? "SCM handoff projection result is recorded and mirrored into handoff_target."
       : "A successful current-epoch SCM handoff projection result that matches handoff_target is required before starting the next slice.", {
         projection: snapshot?.projection_ledger?.handoff_target || null,

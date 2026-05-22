@@ -92,7 +92,7 @@ These scenarios summarize the behavior the current branch already proves through
 - And that path points under the run's `artifacts/` directory to a valid `internal-review-verdict.v1` JSON artifact
 - When internal review runs
 - Then Buran records an `internal-review-report.v1` artifact that includes the sanitized reviewer result and verdict artifact reference
-- And routes `PASS` verdicts to `pr_ready`, `FAIL` verdicts to `fix_loop`, and `BLOCKED` verdicts to `blocked_needs_human`
+- And routes `PASS` verdicts to `handoff_ready`, `FAIL` verdicts to `fix_loop`, and `BLOCKED` verdicts to `blocked_needs_human`
 
 ### Scenario: missing or invalid independent verdict evidence stays blocked
 - Given a run in `internal_review` whose packet omits `review.verdict_artifact_path`, points outside `artifacts/`, or references a missing/invalid verdict artifact
@@ -109,15 +109,15 @@ These scenarios summarize the behavior the current branch already proves through
 ## 6. Handoff projection
 
 ### Scenario: local fake handoff completes the slice
-- Given a run in `pr_ready` with passing current-epoch verification and internal review
+- Given a run in `handoff_ready` with passing current-epoch verification and internal review
 - When the default projection path runs
 - Then Buran records projection intent and result artifacts locally
-- And mirrors the projection summary into provider projection fields; current GitHub-profile persisted fields are `github.pr` / `projections.github_pr`
+- And mirrors the projection summary into provider-neutral projection ledger fields; any provider-specific mirrors remain adapter/profile views
 - And transitions to `ready_for_manual_review`
 - And no remote provider write occurs
 
 ### Scenario: transport-backed projection remains contract-safe
-- Given an injected PR transport adapter
+- Given an injected SCM handoff transport adapter
 - When it returns a valid result
 - Then Buran records the projection intent before any transport call
 - And records the projection result locally first-class
@@ -125,9 +125,9 @@ These scenarios summarize the behavior the current branch already proves through
 - And can resume the recorded result idempotently without calling the transport again
 
 ### Scenario: current GitHub CLI PR transport is opt-in and stacked
-- Given GitHub PR transport is disabled or the repo is not allowlisted
-- When a `pr_ready` run tries to project remotely
-- Then Buran blocks in `pr_ready` without calling `gh`
+- Given GitHub handoff transport is disabled or the repo is not allowlisted
+- When a `handoff_ready` run tries to project remotely
+- Then Buran blocks in `handoff_ready` without calling `gh`
 - Given transport is enabled for an allowlisted repo
 - When recorded projection idempotency keys and current-epoch verification/internal-review `PASS` evidence are present
 - And the exact head/base pair has no open PR
@@ -138,7 +138,7 @@ These scenarios summarize the behavior the current branch already proves through
 ### Scenario: invalid projection results do not advance the run
 - Given an injected handoff transport adapter that returns an invalid or corrupt result
 - When projection recording is attempted
-- Then Buran blocks in `pr_ready`
+- Then Buran blocks in `handoff_ready`
 - And reports a structured projection problem instead of pretending handoff succeeded
 
 ## 6. Stack workflow enforcement

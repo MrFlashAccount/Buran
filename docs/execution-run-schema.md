@@ -85,7 +85,7 @@ Required fields:
 | `gates.internal_review` | Current internal-review gate head: status, epoch, attempt, refs, actor, and idempotency summary. |
 | `artifacts.recorded.by_path` | Immutable recorded-artifact heads keyed by relative artifact path, with epoch/attempt provenance. |
 | `artifacts` | Named artifact references and recorded-artifact content hashes. |
-| `projections` | Last known provider projection results, including local fake handoff metadata when no network write is allowed. Current GitHub/TaskFlow fields are adapter/profile persisted views. |
+| `projection_ledger` | Provider-neutral projection intent/result ledger, including local fake handoff metadata when no network write is allowed. Provider-specific mirrors are adapter/profile persisted views only. |
 | `created_at` / `updated_at` | Timestamps. |
 | `terminal_reason` | Required for terminal blocked/failed states. |
 
@@ -150,8 +150,8 @@ Minimum expected artifacts:
 - `verification.json` — verification commands/checks, outcomes, evidence, and the embedded `verification-policy.v1` artifact field.
 - `internal-review/<hash>.json` — immutable local `internal-review-report.v1` findings, sanitized packet review context, sanitized independent reviewer result when supplied, and final review status. The report records `packet_review.verdict_artifact_path` from the approved packet's `review.verdict_artifact_path` and, when a verdict artifact is accepted, `reviewer_result.artifact_ref` with the immutable verdict path and hash.
 - `internal-review/<verdict-name>.json` or another safe path under `artifacts/` referenced by `review.verdict_artifact_path` — independent reviewer verdict input with `schema_version: internal-review-verdict.v1`. The verdict JSON object must contain `status` (`PASS`, `FAIL`, or `BLOCKED`) and may include `reviewer`/`actor`, `summary`, `findings[]`, `evidence[]`, and `problem`. The adapter sanitizes this payload before copying it into the internal-review report; private prompt, transcript, stdout/stderr, output, log, and session-like fields are not retained in public reports or immutable review reports. Absolute paths, paths escaping the run directory, paths outside `artifacts/`, invalid JSON, unsupported statuses, or another `schema_version` block the gate instead of producing a PASS/FAIL.
-- `pr/projection-intent-<hash>.json` — immutable local `handoff_target` projection intent derived from the approved local contract. The `pr/` path name is a current GitHub-profile persisted artifact location.
-- `pr/projection-result-<hash>.json` — immutable local `handoff_target` projection result mirrored into provider projection fields only after a semantically valid successful projection record. Current `github.pr` / `projections.github_pr` mirrors are GitHub-profile persisted views.
+- `artifacts/scm-handoff/intent-<hash>.json` — immutable local `handoff_target` projection intent derived from the approved local contract.
+- `artifacts/scm-handoff/result-<hash>.json` — immutable local `handoff_target` projection result mirrored into provider projection ledger fields only after a semantically valid successful projection record. Provider-specific mirrors are adapter/profile views, not core registry authority.
 
 Implementation-dispatch `problem` uses a small safe shape: `code` plus generic `message`; extra raw adapter fields are intentionally not copied into immutable artifacts or public runner reports. `BLOCKED` keeps the run in `running`; `FAILED` transitions `running -> failed_execution`; only `COMPLETED` with durable evidence transitions to `verification`.
 
@@ -167,7 +167,7 @@ When implementation dispatch blocks or fails, the public runner report records a
 
 Verification and review command records describe allowed adapters/gates from the approved packet and Buran policy. They must not become a general-purpose arbitrary script execution surface.
 
-Internal review is completed by durable independent reviewer evidence, not by packet prose. The packet may provide `review.verdict_artifact_path` (or the legacy-compatible camelCase/result aliases accepted by the adapter) to identify an `internal-review-verdict.v1` artifact relative to the run directory and stored under `artifacts/`. If present and valid, the verdict artifact status becomes the internal-review gate status: `PASS` advances toward `pr_ready`, `FAIL` enters `fix_loop`, and `BLOCKED` enters `blocked_needs_human`. If no verdict artifact path is supplied, or the artifact is missing, corrupt, outside `artifacts/`, or schema/status-incompatible, the internal-review gate records `BLOCKED` with a structured problem such as `independent_internal_review_required`, `review_artifact_missing`, `review_artifact_invalid`, or `review_artifact_path_invalid`.
+Internal review is completed by durable independent reviewer evidence, not by packet prose. The packet may provide `review.verdict_artifact_path` (or the legacy-compatible camelCase/result aliases accepted by the adapter) to identify an `internal-review-verdict.v1` artifact relative to the run directory and stored under `artifacts/`. If present and valid, the verdict artifact status becomes the internal-review gate status: `PASS` advances toward `handoff_ready`, `FAIL` enters `fix_loop`, and `BLOCKED` enters `blocked_needs_human`. If no verdict artifact path is supplied, or the artifact is missing, corrupt, outside `artifacts/`, or schema/status-incompatible, the internal-review gate records `BLOCKED` with a structured problem such as `independent_internal_review_required`, `review_artifact_missing`, `review_artifact_invalid`, or `review_artifact_path_invalid`.
 
 Recorded internal-review results are reusable only with intact independent verdict evidence. On resume, the report must still be `internal-review-report.v1`, the stored gate status must match `reviewer_result.status`, and `reviewer_result.artifact_ref` must point to an existing `internal-review-verdict.v1` artifact whose hash and status still match. Legacy PASS records without verdict artifact evidence, missing verdict artifacts, hash mismatches, invalid verdict JSON, or schema/status mismatches are treated as stale recorded results and do not advance the run.
 
@@ -216,7 +216,7 @@ Recovery order:
 7. Rebuild active-run and workspace-lease indexes.
 8. Reclaim expired lease records by marking the owning run lease as `stale_recovered`, appending `recovery.lease_stale_reclaimed`, deleting local lease records, and reporting the finding. Recovery only reclaims when TTL has elapsed; it does not guess active ownership.
 9. Remove terminal/orphan lease records from the local lease-record directory.
-10. Semantically replay `projection.intent_recorded` / `projection.result_recorded` so provider projection mirrors, including current `github.pr` and `projections.github_pr` persisted fields, are rebuilt from local event truth before `ready_for_manual_review` is trusted.
+10. Semantically replay `projection.intent_recorded` / `projection.result_recorded` so provider projection ledger entries and any adapter-owned mirrors are rebuilt from local event truth before `ready_for_manual_review` is trusted.
 11. Quarantine corrupt, malformed, incomplete, unknown-event, missing-artifact, hash-mismatch, conflicting-idempotency, stale/wrong-state gate, or other ambiguous run folders instead of guessing.
 
 Slice 2 quarantine layout:

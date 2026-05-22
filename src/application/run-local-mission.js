@@ -4,8 +4,6 @@
 import { TERMINAL_STATES } from "../core/modules/execution-runs/constants.js";
 import { createUnavailableImplementationDispatchAdapter } from "../gates/implementation-contract.js";
 import { assertWorkspaceLeaseService } from "../core/modules/workspace-leases/ports/workspace-lease-service.js";
-import { createLocalJournalScmHandoffAdapter } from "../core/modules/scm-handoff/services/local-journal-scm-handoff-adapter.js";
-import { assertScmHandoffPort } from "../core/modules/scm-handoff/ports/scm-handoff-port.js";
 import { evaluateReviewReadyPolicy } from "../stack-workflow/review-ready-policy.js";
 import { assertRegistryRepository } from "../core/modules/execution-runs/ports/registry-repository.js";
 import { nonEmptyString } from "../shared/primitives.js";
@@ -14,7 +12,7 @@ import { RUNNER_ACTOR } from "./mission-context.js";
 import { buildIssue, buildRunnerReport, buildStep, leaseRequiredMessage } from "./final-report.js";
 import { runImplementationDispatchStage } from "./mission-phase-runner.js";
 import { runVerificationStage, runInternalReviewStage } from "./gate-pipeline.js";
-import { runPrReadyStage } from "./scm-handoff.js";
+import { runScmHandoffStage } from "./scm-handoff.js";
 import { runFixLoopStage } from "./fix-review-loop.js";
 
 export async function runLocalMission({ registryRoot, runId, workspaceId = "", workspacePath = "", ttlMs = "", clock = () => new Date(), actor = RUNNER_ACTOR, implementationDispatchAdapter = createUnavailableImplementationDispatchAdapter(), scmHandoffAdapter, registryRepository, workspaceLeaseService, workspacePreparationInspector, stackPrerequisite = null } = {}) {
@@ -22,7 +20,6 @@ export async function runLocalMission({ registryRoot, runId, workspaceId = "", w
   if (!runId) throw new Error("runId is required for local mission runner");
   const registry = assertRegistryRepository(registryRepository);
   const leases = assertWorkspaceLeaseService(workspaceLeaseService);
-  const handoffAdapter = assertScmHandoffPort(scmHandoffAdapter || createLocalJournalScmHandoffAdapter());
 
   const stepsTaken = [];
   const blockers = [];
@@ -263,7 +260,7 @@ export async function runLocalMission({ registryRoot, runId, workspaceId = "", w
   }
 
   if (current.state === "handoff_ready") {
-    return withWorkflowPolicy(await runPrReadyStage({
+    return withWorkflowPolicy(await runScmHandoffStage({
       registryRoot,
       runId,
       current,
@@ -277,7 +274,7 @@ export async function runLocalMission({ registryRoot, runId, workspaceId = "", w
       internalReview,
       clock,
       actor,
-      scmHandoffAdapter: handoffAdapter,
+      scmHandoffAdapter,
       registryRepository: registry,
     }));
   }

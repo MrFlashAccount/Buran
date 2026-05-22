@@ -1,6 +1,8 @@
 /** Canonical JSON registry path layout helpers. */
 import path from "node:path";
 
+import { sha256Hex } from "../../../shared/primitives.js";
+
 /**
  * Returns canonical registry-level file and directory paths.
  *
@@ -38,4 +40,13 @@ export function getRunPaths(registryRoot, runId) {
 
 export function leaseRecordsDir(registryRoot) {
   return path.join(registryRoot, "leases");
+}
+
+
+function leaseRecordFileName(lockKey) {
+  return `${sha256Hex(lockKey)}.json`;
+}
+
+export function getLeaseRecordPath(registryRoot, lockKey) {
+  return path.join(leaseRecordsDir(registryRoot), leaseRecordFileName(lockKey));
 }

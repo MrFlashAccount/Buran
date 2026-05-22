@@ -1,7 +1,7 @@
-import { projectionContractError } from "../../../core/modules/scm-handoff/services/local-journal-scm-handoff-adapter.js";
+import { projectionContractError } from "../../../core/modules/scm-handoff/errors.js";
 import { sanitizeProjectionDurableValue } from "../../../core/modules/scm-handoff/contract.js";
 import { isRecord, nonEmptyString } from "../../../shared/primitives.js";
-import { createIntegrationDescriptor } from "../../integration.js";
+import { createIntegrationDescriptor } from "../../../core/ports/integration.js";
 import { createGitHubCliClient, GitHubCliClient } from "./github-cli-client.js";
 import { normalizeAllowedRepos } from "./config.js";
 

@@ -17,7 +17,7 @@ Implementation checklist for the approved source-layout refactor. This is a migr
 | `src/locks.js` | `src/workspace-leases/contract.js`, `src/integrations/worktree/filesystem/locks.js` | Lease semantics separated from filesystem-backed lock adapter. |
 | `src/observability.js` | `src/observability/{index.js,public-output.js,redaction.js}` | Public output/report summaries split from reusable privacy redaction helpers. |
 | `src/packet-sufficiency.js` | `src/approved-packets/sufficiency.js` | Approved packet validation context. |
-| `src/pr-projection-adapter.js` | `src/core/modules/scm-handoff/services/local-journal-scm-handoff-adapter.js` | Provider-neutral local PR/SCM projection journal. |
+| `src/scm-handoff-projection-adapter.js` | `src/core/modules/scm-handoff/services/local-journal-scm-handoff-adapter.js` | Provider-neutral local PR/SCM projection journal. |
 | `src/projection-contract.js` | `src/core/modules/scm-handoff/contract.js` | Generic PR/SCM projection contract. |
 | `src/recovery.js` | `src/execution-runs/recovery/index.js`, `src/execution-runs/recovery/reporting.js` | Public recovery report formatting extracted; replay/apply semantics kept co-located to avoid event-order drift. |
 | `src/registry-store.js` | `src/integrations/storage/json-registry/{store.js,path-layout.js,atomic-read-write.js,event-journal.js,indexes-snapshots.js,lease-records.js,fs-atomic.js}` | Store facade split from paths, atomic writes, event journal, indexes/snapshot hashing, and lease-record file helpers. |

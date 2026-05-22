@@ -1,4 +1,5 @@
 import { isRecord, nonEmptyString } from "../../../../shared/primitives.js";
+import { SUCCESSFUL_PROJECTION_RESULT_STATUSES } from "../status.js";
 
 /**
  * Read model for the latest SCM handoff projection ledger entries on a run snapshot.
@@ -17,7 +18,7 @@ export class ScmHandoffProjection {
   get adapter() { return nonEmptyString(this.result?.adapter || this.intent?.adapter); }
   get mode() { return nonEmptyString(this.result?.mode || this.intent?.mode); }
   get status() { return nonEmptyString(this.result?.status); }
-  isSuccessful(successStatuses = new Set(["projected_local", "projected", "created", "updated"])) {
+  isSuccessful(successStatuses = SUCCESSFUL_PROJECTION_RESULT_STATUSES) {
     return successStatuses.has(this.status);
   }
   toResult() { return this.result; }

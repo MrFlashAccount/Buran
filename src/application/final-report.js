@@ -114,9 +114,9 @@ export function internalReviewTransitionReason(status) {
 }
 
 export function projectionTransitionReason() {
-  return "PR handoff recorded";
+  return "SCM handoff recorded";
 }
 
 export function projectionProblemCode(suffix) {
-  return `pr_projection_${suffix}`;
+  return `scm_handoff_${suffix}`;
 }

@@ -9,9 +9,10 @@ import { runBuranCli } from "../src/entrypoints/cli.js";
 import { SCHEMA_VERSION } from "../src/core/modules/execution-runs/constants.js";
 import { intakePacketListFile, validatePacketListFile } from "../src/application/commands.js";
 import { validateRunSnapshot } from "../src/execution-runs/schema/index.js";
-import { acquireWorkspaceLease as acquireWorkspaceLeaseWithPorts, getLeaseRecordPath } from "../src/integrations/worktree/filesystem/locks.js";
+import { acquireWorkspaceLease as acquireWorkspaceLeaseWithPorts } from "../src/integrations/worktree/filesystem/locks.js";
+import { getLeaseRecordPath } from "../src/integrations/storage/json-registry/path-layout.js";
 import { normalizeObservabilityConfig, sanitizeForObservability, sanitizePathForOutput, sanitizePublicReportForOutput } from "../src/observability/index.js";
-import { buildLocalScmHandoffProjection } from "../src/core/modules/scm-handoff/services/local-journal-scm-handoff-adapter.js";
+import { buildLocalScmHandoffProjection } from "../src/integrations/scm/local-journal/local-journal-scm-handoff-adapter.js";
 import { recoverRegistry as recoverRegistryCore } from "../src/execution-runs/recovery/index.js";
 import { writeJsonAtomic } from "../src/integrations/storage/json-registry/fs-atomic.js";
 import { createJsonRegistryRepository } from "../src/integrations/storage/json-registry/repository.js";
@@ -110,7 +111,6 @@ function projectionReadySnapshot() {
     },
     handoff_target: {
       provider: "github",
-      kind: "pull_request",
       number: 123456,
       url: "local://scm-handoff/example/target/123456",
       repo: "example-owner/example-repo",
@@ -197,7 +197,7 @@ function projectionReadySnapshot() {
         execution_epoch: 1,
         recorded_from_state: "handoff_ready",
         last_intent: {
-          artifact_ref: { path: "artifacts/pr/projection-intent-abc123.json", sha256: "d".repeat(64) },
+          artifact_ref: { path: "artifacts/scm-handoff/intent-abc123.json", sha256: "d".repeat(64) },
           recorded_at: "2026-05-16T13:57:00.000Z",
           actor: "runner-test",
           idempotency_key: "run:projection:intent",
@@ -207,7 +207,7 @@ function projectionReadySnapshot() {
         },
         last_result: {
           status: "projected_local",
-          artifact_ref: { path: "artifacts/pr/projection-result-abc123.json", sha256: "e".repeat(64) },
+          artifact_ref: { path: "artifacts/scm-handoff/result-abc123.json", sha256: "e".repeat(64) },
           recorded_at: "2026-05-16T13:57:00.000Z",
           actor: "runner-test",
           idempotency_key: "run:projection:result",
@@ -217,7 +217,6 @@ function projectionReadySnapshot() {
           sequence: 6,
           handoff_target: {
             provider: "github",
-            kind: "pull_request",
             number: 123456,
             url: "local://scm-handoff/example/target/123456",
             repo: "example-owner/example-repo",
@@ -565,7 +564,6 @@ test("state machine requires a recorded SCM handoff projection result before rea
       },
       handoff_target: {
         provider: "github",
-        kind: "pull_request",
         number: 123456,
         url: "local://scm-handoff/example/target/123456",
         repo: "example-owner/example-repo",
@@ -593,13 +591,12 @@ test("state machine requires a recorded SCM handoff projection result before rea
             idempotency_key: "run:projection:result",
             intent_idempotency_key: "run:projection:intent",
             status: "projected_local",
-            artifact_ref: { path: "artifacts/pr/projection-result-abc123.json", sha256: "a".repeat(64) },
+            artifact_ref: { path: "artifacts/scm-handoff/result-abc123.json", sha256: "a".repeat(64) },
             recorded_at: "2026-05-16T13:57:00.000Z",
             actor: "runner-test",
             sequence: 7,
             handoff_target: {
               provider: "github",
-              kind: "pull_request",
               number: 123456,
               url: "local://scm-handoff/example/target/123456",
               repo: "example-owner/example-repo",
@@ -643,11 +640,11 @@ test("state machine requires a recorded SCM handoff projection result before rea
           title: "Buran handoff for feature",
         },
       },
-      projections: {
-        github_pr: {
+      projection_ledger: {
+        handoff_target: {
           execution_epoch: 1,
-          projection_name: "github_pr",
-          projection_target: "github.pr",
+          projection_name: "handoff_target",
+          projection_target: "handoff_target",
           adapter: "local-scm-handoff",
           mode: "local_fake",
           recorded_from_state: "handoff_ready",
@@ -657,11 +654,11 @@ test("state machine requires a recorded SCM handoff projection result before rea
             idempotency_key: "run:projection:result",
             intent_idempotency_key: "run:projection:intent",
             status: "failed_remote_write",
-            artifact_ref: { path: "artifacts/pr/projection-result-abc123.json", sha256: "a".repeat(64) },
+            artifact_ref: { path: "artifacts/scm-handoff/result-abc123.json", sha256: "a".repeat(64) },
             recorded_at: "2026-05-16T13:57:00.000Z",
             actor: "runner-test",
             sequence: 7,
-            github_pr: {},
+            handoff_target: {},
           },
         },
       },
@@ -693,11 +690,11 @@ test("state machine requires a recorded SCM handoff projection result before rea
           title: "Buran handoff for feature",
         },
       },
-      projections: {
-        github_pr: {
+      projection_ledger: {
+        handoff_target: {
           execution_epoch: 1,
-          projection_name: "github_pr",
-          projection_target: "github.pr",
+          projection_name: "handoff_target",
+          projection_target: "handoff_target",
           adapter: "local-scm-handoff",
           mode: "local_fake",
           recorded_from_state: "handoff_ready",
@@ -707,11 +704,11 @@ test("state machine requires a recorded SCM handoff projection result before rea
             idempotency_key: "run:projection:result",
             intent_idempotency_key: "run:projection:intent",
             status: "projected_local",
-            artifact_ref: { path: "artifacts/pr/projection-result-abc123.json", sha256: "a".repeat(64) },
+            artifact_ref: { path: "artifacts/scm-handoff/result-abc123.json", sha256: "a".repeat(64) },
             recorded_at: "2026-05-16T13:57:00.000Z",
             actor: "runner-test",
             sequence: 7,
-            github_pr: {
+            handoff_target: {
               number: 123456,
               url: "",
               repo: "example-owner/example-repo",

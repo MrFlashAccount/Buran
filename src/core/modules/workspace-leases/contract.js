@@ -1,8 +1,8 @@
 /** Workspace lease contract semantics shared by filesystem lock adapters. */
 import path from "node:path";
 
-import { SCHEMA_VERSION } from "../core/modules/execution-runs/constants.js";
-import { nonEmptyString, safeIdPart, sha256Hex, toStringArray } from "../shared/primitives.js";
+import { SCHEMA_VERSION } from "../execution-runs/constants.js";
+import { nonEmptyString, safeIdPart, toStringArray } from "../../../shared/primitives.js";
 
 export const DEFAULT_LEASE_TTL_MS = 4 * 60 * 60 * 1000;
 export const LEASE_STATUSES = Object.freeze({
@@ -12,18 +12,6 @@ export const LEASE_STATUSES = Object.freeze({
   RELEASED: "released",
   STALE_RECOVERED: "stale_recovered",
 });
-
-export function leaseRecordsDir(registryRoot) {
-  return path.join(registryRoot, "leases");
-}
-
-function leaseRecordFileName(lockKey) {
-  return `${sha256Hex(lockKey)}.json`;
-}
-
-export function getLeaseRecordPath(registryRoot, lockKey) {
-  return path.join(leaseRecordsDir(registryRoot), leaseRecordFileName(lockKey));
-}
 
 function normalizeTtlMs(value) {
   if (Number.isSafeInteger(value) && value > 0) return value;

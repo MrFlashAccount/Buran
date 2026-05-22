@@ -16,9 +16,11 @@ This file maps the implemented source layout and canonical runtime surfaces.
 | Path | Responsibility |
 | --- | --- |
 | `src/core/modules/execution-runs/` | Canonical execution-run entity, registry port, constants, transition/event builders, and state-machine authority. |
-| `src/core/modules/scm-handoff/` | Canonical provider-neutral handoff target value object, projection contract helpers, SCM handoff port, projection entity, and no-network local journal adapter. |
-| `src/core/modules/workspace-leases/` | Lease entity and lease-service port. |
-| `src/core/modules/workspaces/` | Workspace preparation/inspection port. |
+| `src/core/modules/scm-handoff/` | Canonical provider-neutral handoff target value object, projection contract helpers, SCM handoff port, projection entity, status/error authority, and projection service. |
+| `src/core/modules/workspace-leases/` | Lease request/status contract, policy decisions, lease entity, and lease-service/record-store ports. |
+| `src/core/ports/` | Provider-neutral cross-module/application seam ports and descriptor helpers that do not have enough domain rules to justify a core module. |
+| `src/core/ports/integration.js` | Metadata validation/default helpers used by concrete integrations for composition/debug visibility; not a domain entity or lifecycle base class. |
+| `src/core/ports/workspace-preparation-inspector.js` | Workspace preparation/inspection port; intentionally not a `modules/workspaces` module because no workspace entity/policy/value object exists in this slice. |
 | `src/core/README.md` | Core dependency rules. |
 
 ## Execution-run application support
@@ -42,7 +44,7 @@ This file maps the implemented source layout and canonical runtime surfaces.
 | `src/application/final-report.js` | Runner reports and problem formatting. |
 | `src/gates/` | Implementation, verification, and internal-review artifact/gate contracts. |
 | `src/stack-workflow/review-ready-policy.js` | Review-ready stack progression policy. |
-| `src/workspace-leases/contract.js` | Lease request/status/path semantics. |
+| `src/application/recorded-artifacts.js` | Shared containment helper for recorded artifact references. |
 | `src/observability/` | Redaction, public report sanitization, summaries, and observability path helpers. |
 | `src/shared/primitives.js` | Generic helpers only; no Buran domain vocabulary. |
 
@@ -53,6 +55,7 @@ This file maps the implemented source layout and canonical runtime surfaces.
 | `src/integrations/storage/json-registry/` | Concrete JSON/filesystem registry adapter. |
 | `src/integrations/worktree/filesystem/` | Concrete filesystem workspace lease and inspection adapters. |
 | `src/integrations/scm/github/` | Optional GitHub-specific SCM handoff adapter/client/profile; live writes only when explicitly enabled by the embedding caller. |
+| `src/integrations/scm/local-journal/` | Default no-network local SCM handoff adapter. |
 | `src/integrations/implementation/codex/CONTEXT.md` | Reserved implementation integration note; core does not depend on it. |
 
 ## Boundary checks
@@ -63,7 +66,8 @@ This file maps the implemented source layout and canonical runtime surfaces.
 - provider-neutral SCM handoff contexts do not import concrete GitHub integrations;
 - integrations do not import application/composition/entrypoints;
 - removed wrapper paths are absent and not imported by runtime/tests;
-- canonical core modules do not contain GitHub-specific public vocabulary;
+- provider-neutral core does not contain provider-specific public vocabulary;
+- shallow core module shells are rejected when a core module folder contains only ports and no entity, value object, policy, or service implementation;
 - documented paths in this module map exist.
 
 ## Test map
@@ -76,7 +80,7 @@ This file maps the implemented source layout and canonical runtime surfaces.
 | `test/registry-store.test.js` | Registry write ordering, transitions, rebuilds, and recovery interactions. |
 | `test/runner.test.js` | End-to-end local runner behavior across lease, verification, review, and SCM handoff stages. |
 | `test/scm-handoff-architecture.test.js` | Provider-neutral SCM handoff core exports and port shape. |
-| `test/pr-projection-adapter.test.js` | Handoff projection identity/collision protection. |
+| `test/scm-handoff-projection-adapter.test.js` | Handoff projection identity/collision protection. |
 
 ## Current runtime flow
 
@@ -96,4 +100,4 @@ recover -> replay + rebuild + quarantine when state is ambiguous
 - no autonomous `work_item` discovery;
 - no direct implementation/fix worker execution in the runner;
 - no default remote provider write path;
-- no persisted schema migration for legacy `github`, `github.pr`, `handoff_target`, or `projection_ledger` fields in this slice.
+- no persisted schema migration for legacy provider-specific mirrors in this slice.
