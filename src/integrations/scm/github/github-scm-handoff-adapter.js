@@ -18,7 +18,8 @@ export const GITHUB_SCM_HANDOFF_MODE = GITHUB_PR_TRANSPORT_MODE;
 export const GITHUB_PR_TRANSPORT_ADAPTER = "github-pr-transport-adapter";
 /** Public adapter id for the GitHub SCM handoff implementation. */
 export const GITHUB_SCM_HANDOFF_ADAPTER = "github-scm-handoff-adapter";
-const SUCCESSFUL_TRANSPORT_STATUSES = new Set(["projected", "created", "updated"]);
+/** GitHub transport can only return remote PR outcomes; local-only projected_local is produced by the local journal adapter. */
+const SUCCESSFUL_GITHUB_PR_TRANSPORT_STATUSES = new Set(["projected", "created", "updated"]);
 
 function publicInvalidTransportStatus(status) {
   const normalized = nonEmptyString(status);
@@ -65,10 +66,10 @@ function normalizeTransportProjectionResult(raw, plan, { githubHost = DEFAULT_GI
   const draftValue = response.draft ?? nestedGithubPr.draft;
   const actor = nonEmptyString(response.actor || nestedGithubPr.actor || plan.actor);
 
-  if (!SUCCESSFUL_TRANSPORT_STATUSES.has(status)) {
+  if (!SUCCESSFUL_GITHUB_PR_TRANSPORT_STATUSES.has(status)) {
     throw projectionContractError(
       "projection_invalid_transport_status",
-      `GitHub PR transport adapter must return one of ${Array.from(SUCCESSFUL_TRANSPORT_STATUSES).join(", ")}; got ${publicInvalidTransportStatus(status)}.`,
+      `GitHub PR transport adapter must return one of ${Array.from(SUCCESSFUL_GITHUB_PR_TRANSPORT_STATUSES).join(", ")}; got ${publicInvalidTransportStatus(status)}.`,
     );
   }
   if (!Number.isSafeInteger(number) || number < 1) {

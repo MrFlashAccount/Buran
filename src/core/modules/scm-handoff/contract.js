@@ -107,7 +107,7 @@ export function isValidProjectionUrl(value) {
   try {
     const parsed = new URL(text);
     if (parsed.protocol === "local:") return parsed.hostname === "scm-handoff" && /\/target\/\d+$/.test(parsed.pathname);
-    if (parsed.protocol === "https:" || parsed.protocol === "http:") return Boolean(parsed.hostname) && /\/pull\/\d+$/.test(parsed.pathname);
+    if (parsed.protocol === "https:" || parsed.protocol === "http:") return Boolean(parsed.hostname);
     return false;
   } catch {
     return false;

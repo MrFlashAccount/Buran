@@ -1,18 +1,11 @@
 /** Fix/review retry-loop coordination for local mission orchestration. */
 import { promises as fs } from "node:fs";
-import path from "node:path";
-
-import { TERMINAL_STATES } from "../core/modules/execution-runs/constants.js";
-import { IMPLEMENTATION_DISPATCH_ADAPTER, buildImplementationDispatchIntent, executeImplementationDispatch, implementationDispatchStatusSummary, isUnavailableImplementationDispatchResult, sanitizeImplementationDispatchEvidence, validateImplementationDispatchResultReport } from "../gates/implementation-contract.js";
-import { executeInternalReviewGate, sanitizeRecordedInternalReviewReport } from "../gates/internal-review-adapter.js";
-import { sanitizePublicReportForOutput } from "../observability/index.js";
-import { buildRecordedScmHandoff } from "../core/modules/scm-handoff/services/scm-handoff-projection.js";
-import { executeVerificationGate } from "../gates/verification-adapter.js";
-import { evaluateReviewReadyPolicy } from "../stack-workflow/review-ready-policy.js";
+import { IMPLEMENTATION_DISPATCH_ADAPTER, executeImplementationDispatch, implementationDispatchStatusSummary, sanitizeImplementationDispatchEvidence, validateImplementationDispatchResultReport } from "../gates/implementation-contract.js";
 import { assertRegistryRepository } from "../core/modules/execution-runs/ports/registry-repository.js";
 import { canonicalJson, isRecord, nonEmptyString, sha256Hex } from "../shared/primitives.js";
 import { hasActiveLease } from "./mission-context.js";
-import { buildIssue, buildRunnerReport, buildStep, implementationBoundaryMessage, internalReviewTransition, internalReviewTransitionReason, leaseRequiredMessage, projectionProblemCode, projectionTransitionReason, sanitizeImplementationDispatchProblem, unsupportedStageMessage, verificationTransition, verificationTransitionReason } from "./final-report.js";
+import { resolveRecordedArtifactPath } from "./recorded-artifacts.js";
+import { buildIssue, buildRunnerReport, buildStep, implementationBoundaryMessage, sanitizeImplementationDispatchProblem } from "./final-report.js";
 
 const MAX_FIX_ATTEMPTS = 2;
 
@@ -86,9 +79,22 @@ async function readReusableFixAttemptResult(runDir, snapshot) {
     maxAttempts: MAX_FIX_ATTEMPTS,
   });
 
+  const resolvedArtifact = resolveRecordedArtifactPath(runDir, summary.path);
+  if (!resolvedArtifact) {
+    return {
+      reusable: false,
+      artifact_ref: artifactRef,
+      problem: fixAttemptResultArtifactProblem(
+        "artifact_unsafe_path",
+        `Recorded fix-attempt result cannot be resumed because artifact ${summary.path} is not a safe recorded artifact path.`,
+        artifactRef,
+      ),
+    };
+  }
+
   let artifactContent;
   try {
-    artifactContent = await fs.readFile(path.join(runDir, summary.path));
+    artifactContent = await fs.readFile(resolvedArtifact.absolutePath);
   } catch (error) {
     if (error?.code === "ENOENT") {
       return {

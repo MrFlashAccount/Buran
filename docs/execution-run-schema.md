@@ -31,9 +31,9 @@ registry/
         verification.json
         internal-review/
           <hash>.json
-        pr/
-          projection-intent-<hash>.json
-          projection-result-<hash>.json
+        scm-handoff/
+          intent-<hash>.json
+          result-<hash>.json
   indexes/
     active-runs.json
     workspace-leases.json

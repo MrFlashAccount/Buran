@@ -112,6 +112,49 @@ function resolveSpec(fromFile, spec) {
   return rel(path.resolve(path.dirname(fromFile), spec));
 }
 
+
+function stripJsComments(source) {
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/\/\/.*$/gm, "");
+}
+
+function importedLocalNames(importClause) {
+  const names = [];
+  const clause = importClause.trim();
+  if (!clause || clause.startsWith("type ")) return names;
+  const namespaceMatch = clause.match(/\*\s+as\s+([A-Za-z_$][\w$]*)/);
+  if (namespaceMatch) names.push(namespaceMatch[1]);
+  const namedMatch = clause.match(/\{([\s\S]*)\}/);
+  if (namedMatch) {
+    for (const rawEntry of namedMatch[1].split(",")) {
+      const entry = rawEntry.trim();
+      if (!entry) continue;
+      const aliasMatch = entry.match(/(?:^|\s)as\s+([A-Za-z_$][\w$]*)$/);
+      const local = aliasMatch ? aliasMatch[1] : entry.match(/([A-Za-z_$][\w$]*)$/)?.[1];
+      if (local) names.push(local);
+    }
+  }
+  const defaultPart = clause.split(",")[0].trim();
+  if (defaultPart && !defaultPart.startsWith("{") && !defaultPart.startsWith("*")) {
+    const defaultName = defaultPart.match(/^([A-Za-z_$][\w$]*)$/)?.[1];
+    if (defaultName) names.push(defaultName);
+  }
+  return names;
+}
+
+function validateImportedBindingsAreUsed(fileRel, source) {
+  const importPattern = /^\s*import\s+([^;]*?)\s+from\s+["'][^"']+["'];/gm;
+  const declarations = [...source.matchAll(importPattern)];
+  if (!declarations.length) return;
+  const body = stripJsComments(source.replace(importPattern, ""));
+  for (const declaration of declarations) {
+    for (const localName of importedLocalNames(declaration[1])) {
+      if (!new RegExp(`\\b${localName.replace(/[$]/g, "\\$")}\\b`).test(body)) failures.push(`${fileRel} imports unused binding ${localName}`);
+    }
+  }
+}
+
 function normalizeDocumentedRepoPath(value) {
   const trimmed = value.trim();
   return trimmed.startsWith("./") ? trimmed.slice(2) : trimmed;
@@ -136,6 +179,15 @@ async function validateDocumentedRepoPaths() {
       const repoPath = normalizeDocumentedRepoPath(match[1]);
       if (!isDocumentedRepoPath(repoPath)) continue;
       if (!await documentedPathExists(repoPath)) failures.push(`${fileRel} references missing repo path ${repoPath}`);
+    }
+  }
+
+  const docFiles = await listFiles(path.join(root, "docs"), (file) => file.endsWith(".md"));
+  for (const file of docFiles) {
+    const fileRel = rel(file);
+    const source = await fs.readFile(file, "utf8").catch(() => "");
+    for (const removedPath of removedCompatibilityModules) {
+      if (source.includes(removedPath)) failures.push(`${fileRel} references removed repo path ${removedPath}`);
     }
   }
 }
@@ -183,6 +235,7 @@ const jsFiles = await listFiles(root, (file) => file.endsWith(".js"));
 for (const file of jsFiles) {
   const fileRel = rel(file);
   const source = await fs.readFile(file, "utf8");
+  validateImportedBindingsAreUsed(fileRel, source);
   for (const spec of importSpecs(source)) {
     const resolved = resolveSpec(file, spec);
     if (resolved.startsWith("src/") && resolved.split("/").length === 2 && oldTopLevelModules.has(path.basename(resolved))) {
@@ -242,6 +295,9 @@ for (const file of sourceContractFiles) {
     if (pattern.test(source)) failures.push(`${rel(file)} contains removed compatibility/deprecated-wrapper marker ${pattern}`);
   }
   if (staleHandoffVocabulary.test(source)) failures.push(`${rel(file)} contains stale PR-ready/projection vocabulary`);
+  if (/^src\/(core\/modules\/execution-runs\/state-machine|execution-runs\/(recovery\/index|schema\/validators))\.js$/.test(fileRel) && /[\[({][^\n\]]*["']projected_local["'][^\n\]]*["']projected["'][^\n\]]*["']created["'][^\n\]]*["']updated["'][^\n\]]*[\])}]/.test(source)) {
+    failures.push(`${fileRel} duplicates SCM handoff projection success statuses; use src/core/modules/scm-handoff/status.js`);
+  }
   for (const pattern of staleScmHandoffArtifactPathPatterns) {
     if (pattern.test(source)) failures.push(`${rel(file)} contains stale SCM handoff artifact path ${pattern}`);
   }

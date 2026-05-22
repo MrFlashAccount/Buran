@@ -1,6 +1,6 @@
 import path from "node:path";
 
-import { ARTIFACT_STAGE_STATE_BY_NAME, GATE_NAMES, GATE_STATE_BY_NAME, GATE_STATUS, SCHEMA_VERSION, TERMINAL_STATES } from "../../core/modules/execution-runs/constants.js";
+import { ARTIFACT_STAGE_STATE_BY_NAME, GATE_STATE_BY_NAME, GATE_STATUS, SCHEMA_VERSION, TERMINAL_STATES } from "../../core/modules/execution-runs/constants.js";
 import {
   buildGateResultSummary,
   buildGateSummary,
@@ -17,7 +17,9 @@ import { assertRegistryRepository } from "../../core/modules/execution-runs/port
 import { assertWorkspaceLeaseService } from "../../core/modules/workspace-leases/ports/workspace-lease-service.js";
 import { assertRegistryRecoveryStore } from "./store.js";
 import { applyTransitionToSnapshot, validateTransition, validateTransitionEvent } from "../../core/modules/execution-runs/state-machine.js";
+import { isSuccessfulProjectionResultStatus } from "../../core/modules/scm-handoff/status.js";
 import { canonicalJson, isRecord, sha256Hex } from "../../shared/primitives.js";
+import { resolveContainedRelativePath } from "../../shared/safe-relative-path.js";
 
 /**
  * Recovery-time registry inspection and quarantine pipeline.
@@ -57,20 +59,19 @@ async function readEventsStrict(store, eventsPath) {
   return parseJsonLinesStrict(raw);
 }
 
-async function verifyArtifactRefs(store, runDir, snapshot, events) {
+export async function verifyArtifactRefs(store, runDir, snapshot, events) {
   const refs = findArtifactRefs(snapshot).concat(findArtifactRefs(events));
   const unique = new Map();
   for (const ref of refs) unique.set(`${ref.path}:${ref.sha256}`, ref);
   const findings = [];
   for (const ref of unique.values()) {
-    const artifactPath = path.resolve(runDir, ref.path);
-    const relativeCheck = path.relative(runDir, artifactPath);
-    if (relativeCheck.startsWith("..") || path.isAbsolute(relativeCheck)) {
+    const resolved = resolveContainedRelativePath(runDir, ref.path);
+    if (!resolved) {
       findings.push({ severity: "error", type: "artifact_path_escape", path: ref.path });
       continue;
     }
     try {
-      const content = await store.readArtifactContent({ runDir, artifactPath, artifactRef: ref });
+      const content = await store.readArtifactContent({ runDir, artifactPath: resolved.absolutePath, artifactRef: ref });
       const actual = sha256Hex(content);
       if (actual !== ref.sha256) {
         findings.push({ severity: "error", type: "artifact_hash_mismatch", path: ref.path, expected: ref.sha256, actual });
@@ -229,7 +230,7 @@ function mergeProjectionSnapshot(snapshot, payload, sequence) {
       handoff_target: nextProjection,
     },
   };
-  if (payload.type === "projection.result_recorded" && ["projected_local", "projected", "created", "updated"].includes(payload.status)) {
+  if (payload.type === "projection.result_recorded" && isSuccessfulProjectionResultStatus(payload.status)) {
     nextSnapshot.handoff_target = payload.handoff_target;
   }
   return nextSnapshot;

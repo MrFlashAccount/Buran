@@ -1,5 +1,5 @@
 /** Public report and argument summary helpers. */
-import { isRecord, nonEmptyString } from "../shared/primitives.js";
+import { isRecord } from "../shared/primitives.js";
 import { pathRef, redactString, sanitizeForObservability, SECRET_VALUE_PATTERNS } from "./redaction.js";
 
 export function summarizeArgs(rawArgs) {

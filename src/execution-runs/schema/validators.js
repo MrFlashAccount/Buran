@@ -1,5 +1,3 @@
-import path from "node:path";
-
 import {
   ARTIFACT_STAGE_NAMES,
   ARTIFACT_STAGE_STATE_BY_NAME,
@@ -13,8 +11,8 @@ import {
 } from "../../core/modules/execution-runs/constants.js";
 import { isKnownState } from "../../core/modules/execution-runs/state-machine.js";
 import { isRecord } from "../../shared/primitives.js";
-import { appendScmHandoffTargetContractErrors, appendScmHandoffTargetValidationErrors } from "../../core/modules/scm-handoff/contract.js";
-import { buildGateSummary } from "./builders.js";
+import { isSafeContainedRelativePath } from "../../shared/safe-relative-path.js";
+import { appendScmHandoffTargetContractErrors, appendScmHandoffTargetValidationErrors, isSuccessfulProjectionResultStatus } from "../../core/modules/scm-handoff/contract.js";
 
 /**
  * Schema validators for durable execution-run snapshots, events, and lease records.
@@ -44,7 +42,7 @@ const GATE_RESULT_STATUS_SET = new Set(GATE_RESULT_STATUSES);
 
 
 function isSuccessfulProjectionLedgerStatus(status) {
-  return ["projected_local", "projected", "created", "updated"].includes(typeof status === "string" ? status.trim() : "");
+  return isSuccessfulProjectionResultStatus(status);
 }
 
 function validateHandoffTarget(value, errors, fieldPath, { snapshot = null, durableContract = false } = {}) {
@@ -85,11 +83,7 @@ function artifactStageAllowsEpochZero(stageName) {
 }
 
 function isSafeRelativeArtifactPath(value) {
-  if (!nonEmptyString(value)) return false;
-  if (path.isAbsolute(value)) return false;
-  const normalized = path.normalize(value);
-  if (!normalized || normalized === ".") return false;
-  return !normalized.startsWith("..") && !path.isAbsolute(normalized);
+  return isSafeContainedRelativePath(value);
 }
 
 function requireRecord(parent, field, errors, { pathPrefix = "" } = {}) {

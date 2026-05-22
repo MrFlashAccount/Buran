@@ -11,7 +11,6 @@ const PROJECTION_NAME = "handoff_target";
 const PROJECTION_TARGET = "handoff_target";
 export const LOCAL_SCM_HANDOFF_MODE = "local_fake";
 export const LOCAL_SCM_HANDOFF_ADAPTER = "local-scm-handoff";
-export const LOCAL_JOURNAL_SCM_HANDOFF_ADAPTER = LOCAL_SCM_HANDOFF_ADAPTER;
 
 function scmTarget(snapshot) {
   if (snapshot?.scm_target && typeof snapshot.scm_target === "object") return snapshot.scm_target;

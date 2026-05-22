@@ -1,8 +1,6 @@
 /** Shared safe reader for recorded run artifacts under a run directory. */
 import { promises as fs } from "node:fs";
-import path from "node:path";
-
-import { nonEmptyString } from "../shared/primitives.js";
+import { resolveContainedRelativePath } from "../shared/safe-relative-path.js";
 
 /**
  * Resolve a recorded artifact path while rejecting absolute paths, traversal, and the run directory itself.
@@ -12,13 +10,7 @@ import { nonEmptyString } from "../shared/primitives.js";
  * @returns {{absolutePath: string, relativePath: string}|null}
  */
 export function resolveRecordedArtifactPath(runDir, artifactPath) {
-  const root = path.resolve(nonEmptyString(runDir));
-  const input = nonEmptyString(artifactPath);
-  if (!root || !input || path.isAbsolute(input)) return null;
-  const absolutePath = path.resolve(root, path.normalize(input));
-  const relativePath = path.relative(root, absolutePath);
-  if (!relativePath || relativePath.startsWith("..") || path.isAbsolute(relativePath)) return null;
-  return { absolutePath, relativePath };
+  return resolveContainedRelativePath(runDir, artifactPath);
 }
 
 /**

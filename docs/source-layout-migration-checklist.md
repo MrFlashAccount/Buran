@@ -14,11 +14,11 @@ Implementation checklist for the approved source-layout refactor. This is a migr
 | `src/github-pr-transport-adapter.js` | `src/integrations/scm/github/github-scm-handoff-adapter.js` | GitHub-specific transport isolated under SCM integration. |
 | `src/implementation-dispatch.js` | `src/gates/implementation-contract.js` | Gate-facing implementation dispatch contract/evidence validation. |
 | `src/internal-review-adapter.js` | `src/gates/internal-review-adapter.js` | Internal review gate adapter retained under gates. |
-| `src/locks.js` | `src/workspace-leases/contract.js`, `src/integrations/worktree/filesystem/locks.js` | Lease semantics separated from filesystem-backed lock adapter. |
+| `src/locks.js` | `src/core/modules/workspace-leases/contract.js`, `src/integrations/worktree/filesystem/locks.js` | Lease semantics separated from filesystem-backed lock adapter. |
 | `src/observability.js` | `src/observability/{index.js,public-output.js,redaction.js}` | Public output/report summaries split from reusable privacy redaction helpers. |
 | `src/packet-sufficiency.js` | `src/approved-packets/sufficiency.js` | Approved packet validation context. |
-| `src/scm-handoff-projection-adapter.js` | `src/core/modules/scm-handoff/services/local-journal-scm-handoff-adapter.js` | Provider-neutral local PR/SCM projection journal. |
-| `src/projection-contract.js` | `src/core/modules/scm-handoff/contract.js` | Generic PR/SCM projection contract. |
+| `src/scm-handoff-projection-adapter.js` | `src/integrations/scm/local-journal/local-journal-scm-handoff-adapter.js` plus `src/core/modules/scm-handoff/services/scm-handoff-projection.js` | Local journal adapter lives in integrations; core owns provider-neutral handoff planning/result helpers only. |
+| `src/projection-contract.js` | `src/core/modules/scm-handoff/contract.js` | Provider-neutral SCM handoff contract. Provider-specific URL/profile semantics stay in SCM integrations. |
 | `src/recovery.js` | `src/execution-runs/recovery/index.js`, `src/execution-runs/recovery/reporting.js` | Public recovery report formatting extracted; replay/apply semantics kept co-located to avoid event-order drift. |
 | `src/registry-store.js` | `src/integrations/storage/json-registry/{store.js,path-layout.js,atomic-read-write.js,event-journal.js,indexes-snapshots.js,lease-records.js,fs-atomic.js}` | Store facade split from paths, atomic writes, event journal, indexes/snapshot hashing, and lease-record file helpers. |
 | `src/registry.js` | `src/core/modules/execution-runs/ports/registry-repository.js` | Core registry boundary export surface. |

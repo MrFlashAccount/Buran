@@ -9,6 +9,7 @@ import {
   TERMINAL_STATES,
   TRANSITION_METADATA,
 } from "./constants.js";
+import { isSuccessfulProjectionResultStatus } from "../scm-handoff/status.js";
 import { isRecord, nonEmptyString } from "../../../shared/primitives.js";
 
 /**
@@ -93,7 +94,7 @@ function freshGateStatus(snapshot, gateName, acceptedStatuses) {
 }
 
 function isSuccessfulProjectionLedgerStatus(status) {
-  return ["projected_local", "projected", "created", "updated"].includes(nonEmptyString(status));
+  return isSuccessfulProjectionResultStatus(status);
 }
 
 function hasRecordedHandoffProjection(snapshot) {

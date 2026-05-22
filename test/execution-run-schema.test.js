@@ -7,6 +7,7 @@ import {
   buildLeaseRecord,
   findArtifactRefs,
   validateArtifactRecordedPayload,
+  validateArtifactRef,
   validateGateResultPayload,
   validateLeaseRecord,
   validateRunSnapshot,
@@ -129,6 +130,12 @@ test("execution-run schema validates artifact and gate-result payload contracts"
     recorded_from_state: "running",
   }).ok, true);
   assert.match(validateArtifactRecordedPayload({ ...artifactPayload, path: "../escape.txt" }).error, /safe relative path/);
+
+  const unsafePaths = ["artifacts/../run.json", "artifacts\\..\\run.json", "../escape", "/tmp/run.json", "C:\\buran\\run.json"];
+  for (const unsafePath of unsafePaths) {
+    assert.match(validateArtifactRef({ path: unsafePath, sha256: "b".repeat(64) }).join("; "), /safe relative path/);
+    assert.match(validateArtifactRecordedPayload({ ...artifactPayload, path: unsafePath }).error, /safe relative path/);
+  }
 
   const gatePayload = {
     gate_name: "verification",
