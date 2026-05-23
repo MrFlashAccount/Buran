@@ -7,6 +7,7 @@ import { normalizePacketList, summarizePacketReports } from "../approved-packets
 import { assertRegistryRepository } from "../core/modules/execution-runs/ports/registry-repository.js";
 import { formatRecoveryReport, recoverRegistry } from "../execution-runs/recovery/index.js";
 import { runLocalMission } from "./run-local-mission.js";
+import { buildOperatorStatusReport } from "./operator-status.js";
 import { nonEmptyString, resolveMaybeRelative } from "../shared/primitives.js";
 
 function configuredImplementationDispatchAdapter(config) {
@@ -181,8 +182,13 @@ export async function runLocalMissionReport({ registryRoot, runId, workspaceId =
   });
 }
 
+export async function statusRunReport({ registryRoot, runId, registryRepository, clock = () => new Date() } = {}) {
+  return buildOperatorStatusReport({ registryRoot, runId, registryRepository, clock });
+}
+
 export function formatBuranReport(report) {
   if (report.mode === "recovery") return withObservabilityLines(formatRecoveryReport(report), report);
+  if (report.mode === "status") return withObservabilityLines(formatStatusReport(report), report);
   if (report.mode === "run_local") {
     const lines = [];
     lines.push("buran: run local");
@@ -278,6 +284,39 @@ export function formatBuranReport(report) {
     lines.push(`- ${packet.task_id}: ${status}`);
   }
   return withObservabilityLines(lines.join("\n"), report);
+}
+
+function formatStatusReport(report) {
+  const lines = [];
+  lines.push("buran: status");
+  lines.push(`Registry: ${report.registry_root}`);
+  lines.push(`Run: ${report.run_id}${report.task_id ? `; task=${report.task_id}` : ""}`);
+  lines.push(`State: ${report.state} (${report.status_kind})`);
+  if (report.execution) lines.push(`Execution: epoch=${report.execution.current_epoch} stage=${report.execution.stage} attempt=${report.execution.attempt}`);
+  if (report.workspace) {
+    const workspaceId = report.workspace.workspace_id || "<none>";
+    const expires = report.workspace.expires_at ? ` expires=${report.workspace.expires_at}` : "";
+    const stale = report.workspace.stale_suspected ? " stale_suspected=yes" : "";
+    lines.push(`Workspace: ${workspaceId} lease=${report.workspace.lease_status}${expires}${stale}`);
+  }
+  if (report.worker_task?.worker_task_id) {
+    lines.push(`Worker task: ${report.worker_task.worker_task_id} ${report.worker_task.role || ""} ${report.worker_task.status}${report.worker_task.overdue ? " overdue" : ""}`.trim());
+  }
+  if (report.artifacts?.last?.length) lines.push(`Artifacts: ${report.artifacts.last.map((artifact) => artifact.path || artifact.id || artifact.kind).filter(Boolean).join(", ")}`);
+  if (report.blockers?.length) {
+    for (const blocker of report.blockers) lines.push(`Blocker: ${blocker.code}: ${blocker.message}`);
+  }
+  const policyLast = report.policy?.last_decision ? `${report.policy.last_decision.action_kind}:${report.policy.last_decision.decision}` : "none";
+  lines.push(`Policy: ${report.policy?.profile || "local-only"}; last=${policyLast}`);
+  lines.push(`Audit: external_writes=${report.audit?.external_writes || 0} approval_gated_actions=${report.audit?.approval_gated_actions || 0}`);
+  const exhausted = (report.retry_budgets || []).filter((budget) => budget.exhausted).map((budget) => budget.name);
+  if (exhausted.length) lines.push(`Retry exhausted: ${exhausted.join(", ")}`);
+  if (report.next_safe_action) {
+    lines.push(`Next safe action: ${report.next_safe_action.kind} — ${report.next_safe_action.reason}`);
+    if (report.next_safe_action.command) lines.push(`Command: ${report.next_safe_action.command}`);
+  }
+  lines.push(`External side effects: ${report.external_side_effects ? "yes" : "no"}`);
+  return lines.join("\n");
 }
 
 function withObservabilityLines(text, report) {

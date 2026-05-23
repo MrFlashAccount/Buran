@@ -89,6 +89,34 @@ Required fields:
 | `created_at` / `updated_at` | Timestamps. |
 | `terminal_reason` | Required for terminal blocked/failed states. |
 
+
+## Operator status report
+
+`/buran status --run <run_id> [--registry <path>] [--json]` returns a derived `OperatorStatusReport`. It is not persisted as registry truth and has no external side effects. The report is built from `run.json`, `events.jsonl`, and safe artifact references through the registry repository port. Status must not repair runs, append events, transition state, rebuild indexes, reclaim leases, dispatch workers, read operational logs/diagnostics/chat/session memory, or call SCM/remote providers.
+
+Stable top-level fields:
+
+| Field | Meaning |
+| --- | --- |
+| `schema_version` | Current execution-run schema version. |
+| `mode` | Always `status`. |
+| `registry_root` | Registry root, redacted at public CLI boundaries. |
+| `run_id` / `task_id` | Run and work-item identifiers when known. |
+| `status_kind` | One of `missing`, `corrupt`, `quarantined`, `active`, `blocked`, or `terminal`. |
+| `state` | Current execution state when readable; otherwise the problem kind. |
+| `execution` | Current epoch, stage, and attempt summary. |
+| `workspace` | Workspace id plus read-only lease status. Lease status values are `missing`, `acquired`, `expired`, `stale_suspected`, `released`, or `unknown`; `expired`/`stale_suspected` never imply reclaim happened. |
+| `worker_task` | Public `WorkerTask` summary only: ids, role, status, decision, overdue marker, and artifact refs. |
+| `artifacts` | Safe relative artifact refs/hashes/bytes/timestamps only; no artifact content. |
+| `policy` | Provider-neutral `local-only` policy summary derived from registry evidence when present. |
+| `audit` | Counts and last safe audit action summary derived from registry evidence when present. |
+| `retry_budgets` | Retry budget summaries with `name`, `scope`, `used`, `limit`, `remaining`, `exhausted`, `last_event`, and `blocker_code`. |
+| `blockers` | Structured public blockers, including retry exhaustion and quarantined/corrupt/missing run problems. |
+| `next_safe_action` | Deterministic operator recommendation. Allowed `kind` values: `check_run_id`, `intake`, `lease_acquire`, `run`, `wait`, `recover`, `manual_review`, `fix_config`, `inspect_quarantine`, or `none`. |
+| `external_side_effects` | Always `false` for status. |
+
+The first policy profile is `local-only`: read-only actions such as status/validate/registry reads are allowed; destructive local changes, git branch mutations, external worker spawn, remote provider writes, and strict-profile lease recovery are approval-gated; force push, merge, branch deletion, tracker Done movement, scope expansion from remote comments, raw transcript/secret persistence, and policy bypass are forbidden. This slice reads policy/audit-shaped registry evidence for summaries but does not add policy/audit writers or change recovery acceptance of event types. Future writers must update schema/recovery/store/tests before emitting new event types.
+
 ## `events.jsonl`
 
 Append-only event journal. One JSON object per line.

@@ -39,12 +39,13 @@ Current emitted event names are:
 - `validation.completed`
 - `intake.completed`
 - `runner.completed`
+- `status.completed`
 - `recovery.completed`
 - `lease.acquire.completed`
 - `lease.release.completed`
 - `diagnostic.report_written`
 
-`runner.completed` is the success marker for `/buran run`.
+`runner.completed` is the success marker for `/buran run`; `status.completed` is the success marker for the read-only `/buran status` query.
 
 Limitation: the logger does not preserve arbitrary custom event names. Anything outside this allowlist is folded into `diagnostic.report_written`, so new event names should be added deliberately and covered by tests.
 
@@ -100,3 +101,10 @@ Public CLI output uses the same path redaction rules and a narrower field redact
 ## Runtime logger boundary
 
 If the embedding runtime provides `api.logger` (as OpenClaw does in the current profile), the plugin mirrors sanitized operational events there on a best-effort basis. Local JSONL logging and diagnostic report creation do not depend on that mirror.
+
+
+## Operator status public output
+
+`/buran status --run <run_id> [--registry <path>] [--json]` is an operator read model, not an observability log reader. It derives status only from the local registry snapshot, event journal, and safe artifact references. Operational logs, diagnostic reports, chat/session memory, raw worker payloads, and remote providers are forbidden status sources.
+
+Status output goes through the public report sanitizer. It may expose ids, state names, bounded public summaries, safe relative artifact refs, policy/audit counts, retry budget summaries, and a deterministic `next_safe_action`; it must not expose raw prompts, transcripts, stdout/stderr, markdown/content/body fields, secret-like values, absolute private paths, or artifact contents.

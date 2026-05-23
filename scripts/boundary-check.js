@@ -4,7 +4,7 @@ import path from "node:path";
 
 const root = process.cwd();
 const failures = [];
-const skippedDirNames = new Set([".git", "node_modules"]);
+const skippedDirNames = new Set([".git", ".worktrees", "node_modules"]);
 const ignoredRuntimeRootDirs = new Set(["registry", ".openclaw-runtime", "artifacts", "logs"]);
 const documentedPathFiles = ["docs/module-map.md"];
 const documentedPathPrefixes = ["bin/", "docs/", "scripts/", "src/", "test/"];
@@ -258,6 +258,9 @@ for (const file of jsFiles) {
       if (/^src\/(application|entrypoints|composition)\//.test(resolved)) {
         failures.push(`${fileRel} imports orchestration/application layer ${resolved}`);
       }
+    }
+    if (fileRel === "src/application/operator-status.js" && (/^src\/integrations\/scm\//.test(resolved) || /^src\/execution-runs\/recovery\//.test(resolved) || /^src\/integrations\/implementation\//.test(resolved))) {
+      failures.push(`${fileRel} imports forbidden action/remote/recovery dependency ${resolved}`);
     }
     if (/^src\/(core\/modules\/scm-handoff|workflow-boundary\/scm-handoff)\//.test(fileRel) && /^src\/integrations\/scm\/github\//.test(resolved)) {
       failures.push(`${fileRel} imports GitHub integration from provider-neutral SCM handoff boundary ${resolved}`);
