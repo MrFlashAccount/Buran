@@ -414,6 +414,154 @@ async function advanceRunToInternalReview(registryRoot, runId, timestamp = "2026
 }
 
 
+function dispatchUnitSnapshot({ adapterTaskId = "" } = {}) {
+  return {
+    run_id: "run_dispatch_unit",
+    task_id: "task_dispatch_unit",
+    state: "running",
+    workspace: { id: "ws-dispatch-unit", path: "" },
+    execution: { current_epoch: 1 },
+    scm_target: { provider: "github", repo: "MrFlashAccount/Buran", issue_number: 15, intended_branch: "issue-15" },
+    artifacts: { packet: { path: "artifacts/packet.json", sha256: "a".repeat(64) } },
+    worker_tasks: {
+      head: {
+        worker_task_id: "wt_dispatch_unit",
+        run_id: "run_dispatch_unit",
+        task_id: "task_dispatch_unit",
+        purpose: "implementation_dispatch",
+        role: "implementer",
+        epoch: 1,
+        attempt: 1,
+        authority: "implementation-harness-dispatch.v1",
+        status: "dispatched",
+        created_at: "2026-05-16T13:00:00.000Z",
+        updated_at: "2026-05-16T13:00:00.000Z",
+        deadline_at: null,
+        dispatch: adapterTaskId ? { adapter_task_id: adapterTaskId, adapter_id: "spawn-only-test", adapter_status: "PENDING" } : null,
+        completion: null,
+        decision: null,
+      },
+      history: [],
+    },
+  };
+}
+
+function dispatchUnitIntent() {
+  return {
+    schema_version: "implementation-dispatch-intent.v1",
+    dispatch_status: "dispatch_requested",
+    dispatch_intent_id: "dispatch_unit_intent",
+    run_id: "run_dispatch_unit",
+    task_id: "task_dispatch_unit",
+    packet_artifact: { path: "artifacts/packet.json", sha256: "a".repeat(64) },
+    workspace_preparation_artifact: { path: "artifacts/workspace.json", sha256: "b".repeat(64) },
+    worker_task_id: "wt_dispatch_unit",
+    worker_task_role: "implementer",
+    worker_task_epoch: 1,
+    worker_task_attempt: 1,
+    completion_authority: "implementation-harness-dispatch.v1",
+    completion_idempotency_key: "run_dispatch_unit:worker_completion:wt_dispatch_unit",
+  };
+}
+
+test("executeImplementationDispatch supports spawn-only HarnessRuntime adapters", async () => {
+  let spawned = false;
+  const result = await executeImplementationDispatch({
+    snapshot: dispatchUnitSnapshot(),
+    intent: dispatchUnitIntent(),
+    adapter: {
+      adapter_id: "spawn-only-test",
+      async spawn(envelope) {
+        spawned = true;
+        assert.equal(envelope.schema_version, "harness-execution-envelope.v1");
+        return {
+          status: "COMPLETED",
+          adapter: "spawn-only-test",
+          actor: "spawn-only-test",
+          evidence: {
+            files_changed: ["src/gates/implementation-contract.js"],
+            result_artifact_ref: { path: "artifacts/implementation/spawn-only.json", sha256: "c".repeat(64) },
+          },
+        };
+      },
+    },
+    clock: () => new Date("2026-05-16T13:01:00.000Z"),
+  });
+
+  assert.equal(spawned, true);
+  assert.equal(result.status, "COMPLETED");
+  assert.equal(result.adapter, "spawn-only-test");
+  assert.equal(validateImplementationDispatchResultReport(result.public_report, dispatchUnitIntent(), { requireCompleteProvenance: true }), null);
+});
+
+test("executeImplementationDispatch reattaches and polls active WorkerTask adapter tasks without duplicate spawn", async () => {
+  const calls = [];
+  const result = await executeImplementationDispatch({
+    snapshot: dispatchUnitSnapshot({ adapterTaskId: "adapter-task-1" }),
+    intent: dispatchUnitIntent(),
+    adapter: {
+      adapter_id: "reattach-test",
+      async spawn() {
+        calls.push("spawn");
+        return { status: "BLOCKED" };
+      },
+      async reattach(adapterTaskId) {
+        calls.push(`reattach:${adapterTaskId}`);
+        return { status: "PENDING", adapter_task_id: adapterTaskId, adapter: "reattach-test" };
+      },
+      async poll(adapterTaskId) {
+        calls.push(`poll:${adapterTaskId}`);
+        return {
+          status: "COMPLETED",
+          adapter: "reattach-test",
+          actor: "reattach-test",
+          adapter_task_id: adapterTaskId,
+          evidence: {
+            files_changed: ["src/application/mission-phase-runner.js"],
+            result_artifact_ref: { path: "artifacts/implementation/polled.json", sha256: "d".repeat(64) },
+          },
+        };
+      },
+    },
+    clock: () => new Date("2026-05-16T13:02:00.000Z"),
+  });
+
+  assert.deepEqual(calls, ["poll:adapter-task-1"]);
+  assert.equal(result.status, "COMPLETED");
+  assert.equal(result.public_report.adapter_task_id, "adapter-task-1");
+});
+
+test("local runner bounded loop advances deterministic stages until review wait/block boundary", async () => {
+  const tempDir = await makeTempDir();
+  const registryRoot = path.join(tempDir, "registry");
+  const workspacePath = await createVerificationWorkspace(tempDir);
+  const runId = await prepareVerificationRun(registryRoot, workspacePath, {
+    runId: "run_runner_bounded_loop",
+    commands: ["node --test test/runner.test.js"],
+  });
+
+  const result = await runLocalMission({
+    registryRoot,
+    runId,
+    clock: () => new Date("2026-05-16T13:56:00.000Z"),
+    maxRunnerSteps: 3,
+  });
+
+  assert.equal(result.previous_state, "verification");
+  assert.equal(result.current_state, "blocked_needs_human");
+  assert.equal(result.verification.status, "PASS");
+  assert.equal(result.internal_review.status, "BLOCKED");
+  assert.deepEqual(result.steps_taken.map((step) => step.action), [
+    "verification_artifact",
+    "gate_result_recorded",
+    "transition",
+    "internal_review_artifact",
+    "gate_result_recorded",
+    "transition",
+  ]);
+});
+
+
 /** Writes an independent-review verdict artifact under the run artifact directory. */
 async function writeReviewVerdictArtifact(registryRoot, runId, {
   status = "PASS",

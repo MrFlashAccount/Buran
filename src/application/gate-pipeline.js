@@ -9,6 +9,59 @@ import { isRecord, nonEmptyString, sha256Hex } from "../shared/primitives.js";
 import { buildIssue, buildRunnerReport, buildStep, internalReviewTransition, internalReviewTransitionReason, verificationTransition, verificationTransitionReason } from "./final-report.js";
 import { readRecordedArtifactJson, resolveRecordedArtifactPath } from "./recorded-artifacts.js";
 
+async function recordReviewerAggregationWorker(registry, registryRoot, runId, current, { artifactRef, gateStatus, actor, clock } = {}) {
+  if (!artifactRef?.path || !artifactRef?.sha256) return current;
+  const recordedAt = clock().toISOString();
+  const epoch = current.execution?.current_epoch || 0;
+  const attempt = current.gates?.internal_review?.current_attempt || 1;
+  const authority = "review-aggregation.v1";
+  const created = await registry.recordWorkerTaskCreated(registryRoot, runId, {
+    purpose: "review_attempt",
+    role: "reviewer",
+    epoch,
+    attempt,
+    authority,
+    recorded_at: recordedAt,
+    actor,
+    idempotency_key: `${runId}:worker_task:review_attempt:${epoch}:${attempt}:${artifactRef.sha256}`,
+  });
+  let next = created.run;
+  const dispatch = await registry.recordWorkerTaskDispatch(registryRoot, runId, {
+    intent_ref: artifactRef,
+    dispatch_ref: artifactRef,
+    adapter_id: authority,
+    adapter_status: gateStatus,
+    responsibility_zone: "review_attempt:default",
+    recorded_at: recordedAt,
+    actor,
+    idempotency_key: `${runId}:worker_dispatch:review_attempt:${epoch}:${attempt}:${artifactRef.sha256}`,
+  });
+  next = dispatch.run;
+  const completionKey = `${runId}:worker_completion:review_attempt:${epoch}:${attempt}:${artifactRef.sha256}`;
+  const completion = await registry.recordWorkerCompletion(registryRoot, runId, {
+    worker_task_id: next.worker_tasks?.head?.worker_task_id || "",
+    purpose: "review_attempt",
+    role: "reviewer",
+    epoch,
+    attempt,
+    authority,
+    status: gateStatus,
+    completion_ref: artifactRef,
+    evidence: { status: gateStatus, artifact_ref: artifactRef },
+    received_at: clock().toISOString(),
+    actor: authority,
+    idempotency_key: completionKey,
+  });
+  next = completion.run;
+  const decision = await registry.recordWorkerCompletionDecision(registryRoot, runId, {
+    completion: next.worker_tasks?.head?.completion,
+    decided_at: clock().toISOString(),
+    actor,
+    idempotency_key: `${completionKey}:decision`,
+  });
+  return decision.run;
+}
+
 function hasFreshRecordedGate(snapshot, gateName) {
   const currentEpoch = snapshot?.execution?.current_epoch;
   const gate = snapshot?.gates?.[gateName];
@@ -331,6 +384,14 @@ export async function runVerificationStage({ registryRoot, runId, current, previ
       toState: "verification",
       detail: "Existing current-epoch verification gate result was reused without re-executing verification.",
     }));
+
+    current = await recordReviewerAggregationWorker(registry, registryRoot, runId, current, {
+      artifactRef: artifactIntegrity.artifact_refs[0] || null,
+      gateStatus: current.gates.internal_review.status,
+      actor,
+      clock,
+      resumed: true,
+    });
 
     const transitioned = await registry.transitionRun(registryRoot, runId, {
       toState: targetState,
@@ -695,6 +756,13 @@ export async function runInternalReviewStage({ registryRoot, runId, current, pre
     gate_result_status: gateResult.status,
     resumed_recorded_result: false,
   };
+
+  current = await recordReviewerAggregationWorker(registry, registryRoot, runId, current, {
+    artifactRef: recordedArtifact.artifact_ref,
+    gateStatus: internalReviewRun.status,
+    actor,
+    clock,
+  });
 
   const targetState = internalReviewTransition(internalReviewRun.status);
   const transitioned = await registry.transitionRun(registryRoot, runId, {

@@ -15,7 +15,7 @@ import { runVerificationStage, runInternalReviewStage } from "./gate-pipeline.js
 import { runScmHandoffStage } from "./scm-handoff.js";
 import { runFixLoopStage } from "./fix-review-loop.js";
 
-export async function runLocalMission({ registryRoot, runId, workspaceId = "", workspacePath = "", ttlMs = "", clock = () => new Date(), actor = RUNNER_ACTOR, implementationDispatchAdapter = createUnavailableImplementationDispatchAdapter(), scmHandoffAdapter, registryRepository, workspaceLeaseService, workspacePreparationInspector, stackPrerequisite = null } = {}) {
+async function runLocalMissionStep({ registryRoot, runId, workspaceId = "", workspacePath = "", ttlMs = "", clock = () => new Date(), actor = RUNNER_ACTOR, implementationDispatchAdapter = createUnavailableImplementationDispatchAdapter(), scmHandoffAdapter, registryRepository, workspaceLeaseService, workspacePreparationInspector, stackPrerequisite = null } = {}) {
   if (!registryRoot) throw new Error("registryRoot is required for local mission runner");
   if (!runId) throw new Error("runId is required for local mission runner");
   const registry = assertRegistryRepository(registryRepository);
@@ -314,4 +314,50 @@ export async function runLocalMission({ registryRoot, runId, workspaceId = "", w
     verification,
     internalReview,
   }));
+}
+
+
+const RUN_LOOP_TERMINAL_OUTCOMES = new Set(["blocked", "failed", "waiting"]);
+
+function mergeRunnerReports(previous, next) {
+  if (!previous) return next;
+  return {
+    ...next,
+    previous_state: previous.previous_state || next.previous_state,
+    steps_taken: [...(previous.steps_taken || []), ...(next.steps_taken || [])],
+    blockers: [...(previous.blockers || []), ...(next.blockers || [])],
+    warnings: [...(previous.warnings || []), ...(next.warnings || [])],
+    workspace_preparation: next.workspace_preparation || previous.workspace_preparation || null,
+    implementation_dispatch: next.implementation_dispatch || previous.implementation_dispatch || null,
+    verification: next.verification || previous.verification || null,
+    internal_review: next.internal_review || previous.internal_review || null,
+    fix_loop: next.fix_loop || previous.fix_loop || null,
+    projection: next.projection || previous.projection || null,
+  };
+}
+
+export async function runLocalMission(options = {}) {
+  const maxRunnerSteps = Number.isSafeInteger(options.maxRunnerSteps) && options.maxRunnerSteps > 0 ? options.maxRunnerSteps : 1;
+  let aggregate = null;
+  let lastState = "";
+
+  for (let step = 0; step < maxRunnerSteps; step += 1) {
+    const report = await runLocalMissionStep(options);
+    aggregate = mergeRunnerReports(aggregate, report);
+
+    if (RUN_LOOP_TERMINAL_OUTCOMES.has(report.outcome)) return aggregate;
+    if (!report.current_state || report.current_state === lastState) return aggregate;
+    lastState = report.current_state;
+    if (["ready_for_manual_review", "failed_execution", "blocked_needs_human"].includes(report.current_state)) return aggregate;
+  }
+
+  if (maxRunnerSteps <= 1) return aggregate;
+  return {
+    ...aggregate,
+    outcome: "waiting",
+    warnings: [
+      ...(aggregate?.warnings || []),
+      buildIssue("bounded_run_loop_budget_exhausted", `Bounded run loop stopped after ${maxRunnerSteps} deterministic steps; reinvoke /buran run to continue.`, { max_runner_steps: maxRunnerSteps }),
+    ],
+  };
 }

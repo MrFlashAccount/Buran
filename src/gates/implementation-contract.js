@@ -400,6 +400,48 @@ export function createUnavailableImplementationDispatchAdapter({ reason = "Imple
   };
 }
 
+function activeAdapterTask(snapshot) {
+  const dispatch = snapshot?.worker_tasks?.head?.dispatch;
+  const adapterTaskId = truncateDispatchString(dispatch?.adapter_task_id, 160);
+  if (!adapterTaskId) return null;
+  return {
+    adapter_task_id: adapterTaskId,
+    adapter_id: nonEmptyString(dispatch?.adapter_id),
+    adapter_status: nonEmptyString(dispatch?.adapter_status),
+    heartbeat_at: nonEmptyString(dispatch?.heartbeat_at),
+    status_summary_ref: sanitizeDispatchReference(dispatch?.status_summary_ref),
+  };
+}
+
+async function executeHarnessRuntime(adapter, envelope, context, snapshot) {
+  const activeTask = activeAdapterTask(snapshot);
+  if (activeTask && typeof adapter?.poll === "function") {
+    return adapter.poll(activeTask.adapter_task_id, { ...context, envelope, activeTask });
+  }
+  if (activeTask && typeof adapter?.reattach === "function") {
+    const reattached = await adapter.reattach(activeTask.adapter_task_id, { ...context, envelope, activeTask });
+    if (reattached && typeof adapter?.poll === "function") {
+      const taskId = nonEmptyString(reattached.adapter_task_id || reattached.task_id) || activeTask.adapter_task_id;
+      if (["PENDING", "UNKNOWN", "STALE"].includes(normalizeDispatchStatus(reattached.status))) {
+        return adapter.poll(taskId, { ...context, envelope, activeTask: { ...activeTask, adapter_task_id: taskId }, reattached });
+      }
+    }
+    return reattached;
+  }
+  if (typeof adapter?.spawn === "function") {
+    return adapter.spawn(envelope, context);
+  }
+  if (typeof adapter?.execute === "function") {
+    return adapter.execute({ ...context, envelope });
+  }
+  return {
+    status: "BLOCKED",
+    adapter: DEFAULT_UNAVAILABLE_ADAPTER,
+    actor: DEFAULT_UNAVAILABLE_ADAPTER,
+    problem: buildProblem("implementation_dispatch_unavailable", "Implementation-harness dispatch adapter is not available."),
+  };
+}
+
 export async function executeImplementationDispatch({ snapshot, intent, adapter = createUnavailableImplementationDispatchAdapter(), clock = () => new Date(), intentArtifactPath = "", artifactDirectory = "artifacts/implementation-dispatch" } = {}) {
   if (!snapshot?.run_id) throw new Error("run snapshot is required for implementation dispatch execution");
   if (!intent?.dispatch_intent_id) throw new Error("implementation dispatch intent is required");
@@ -414,7 +456,7 @@ export async function executeImplementationDispatch({ snapshot, intent, adapter 
   let finishedAt = "";
   let normalized;
   try {
-    if (!adapter || typeof adapter.execute !== "function") {
+    if (!adapter || (typeof adapter.execute !== "function" && typeof adapter.spawn !== "function" && typeof adapter.reattach !== "function" && typeof adapter.poll !== "function")) {
       normalized = normalizeResult({
         status: "BLOCKED",
         adapter: DEFAULT_UNAVAILABLE_ADAPTER,
@@ -436,15 +478,13 @@ export async function executeImplementationDispatch({ snapshot, intent, adapter 
         expected_output_contract: "worker-completion-evidence.v1",
         completion_idempotency_key: adapterIntent.completion_idempotency_key,
       };
-      const rawResult = typeof adapter.spawn === "function"
-        ? await adapter.spawn(envelope, { idempotencyKey: adapterIntent.completion_idempotency_key, intent: adapterIntent, snapshot: adapterSnapshot, workspace_path: snapshot.workspace?.path || "" })
-        : await adapter.execute({
-          snapshot: adapterSnapshot,
-          intent: adapterIntent,
-          envelope,
-          workspace_path: snapshot.workspace?.path || "",
-          packet_artifact: adapterPacketArtifact,
-        });
+      const rawResult = await executeHarnessRuntime(adapter, envelope, {
+        idempotencyKey: adapterIntent.completion_idempotency_key,
+        intent: adapterIntent,
+        snapshot: adapterSnapshot,
+        workspace_path: snapshot.workspace?.path || "",
+        packet_artifact: adapterPacketArtifact,
+      }, snapshot);
       startedAt = nonEmptyString(rawResult?.started_at);
       finishedAt = nonEmptyString(rawResult?.finished_at);
       const provenanceProblem = validateImplementationDispatchResultProvenance(rawResult, intent, { intentArtifactPath: dispatchIntentArtifactPath });

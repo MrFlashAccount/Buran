@@ -108,6 +108,8 @@ async function readReusableImplementationDispatchResult(runDir, snapshot, intent
     return null;
   }
 
+  if (["PENDING", "UNKNOWN", "STALE"].includes(artifactReport.status)) return null;
+
   const evidence = sanitizeImplementationDispatchEvidence(artifactReport.evidence);
   return {
     reusable: true,
@@ -392,6 +394,36 @@ export async function runImplementationDispatchStage({ runContext = {}, reportSt
           workspaceId: current.workspace?.id || "",
           artifactPath: dispatchResultRecorded.artifact_ref.path,
           artifactSha256: dispatchResultRecorded.artifact_ref.sha256,
+        }));
+      }
+
+      if (implementationDispatch?.adapter_task_id || implementationDispatch?.heartbeat_at || implementationDispatch?.status_summary_ref) {
+        const adapterDispatchRecorded = await registry.recordWorkerTaskDispatch(registryRoot, runId, {
+          intent_ref: dispatchRecorded.artifact_ref,
+          dispatch_ref: dispatchRecorded.artifact_ref,
+          adapter_id: implementationDispatch.adapter || dispatchResult?.adapter || IMPLEMENTATION_DISPATCH_ADAPTER,
+          adapter_task_id: implementationDispatch.adapter_task_id || "",
+          adapter_status: implementationDispatch.adapter_status || implementationDispatch.status || "",
+          heartbeat_at: implementationDispatch.heartbeat_at || "",
+          status_summary_ref: implementationDispatch.status_summary_ref || null,
+          recorded_at: clock().toISOString(),
+          actor: implementationDispatch.adapter || dispatchResult?.adapter || IMPLEMENTATION_DISPATCH_ADAPTER,
+          idempotency_key: `${dispatchIntent.intent.completion_idempotency_key.replace(":worker_completion:", ":worker_dispatch_adapter_status:")}:${implementationDispatch.adapter_task_id || implementationDispatch.adapter_status || implementationDispatch.status || "unknown"}:${implementationDispatch.result_artifact_ref?.sha256 || "no-result"}`,
+        });
+        current = adapterDispatchRecorded.run;
+        implementationDispatch = {
+          ...implementationDispatch,
+          worker_task: current.worker_tasks?.head || null,
+        };
+        stepsTaken.push(buildStep({
+          action: "worker_task_adapter_status_recorded",
+          status: adapterDispatchRecorded.status === "noop" ? "noop" : "completed",
+          fromState: "running",
+          toState: "running",
+          detail: "WorkerTask adapter task identity/status was recorded for bounded reattach/poll resume.",
+          sequence: adapterDispatchRecorded.event?.sequence ?? null,
+          artifactPath: implementationDispatch.result_artifact_ref?.path || "",
+          artifactSha256: implementationDispatch.result_artifact_ref?.sha256 || "",
         }));
       }
 
