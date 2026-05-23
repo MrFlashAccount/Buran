@@ -7,6 +7,7 @@
  * systems. Returned objects are public reports and must not include raw packet,
  * prompt, transcript, stdout/stderr, log, session, payload, or artifact content.
  */
+import { promises as fs } from "node:fs";
 import path from "node:path";
 
 import { SCHEMA_VERSION, TERMINAL_STATES } from "../core/modules/execution-runs/constants.js";
@@ -112,6 +113,40 @@ function normalizeErrorKind(error) {
   if (message.includes("quarantine")) return "quarantined";
   if (message.includes("json") || message.includes("schema") || message.includes("parse")) return "corrupt";
   return "corrupt";
+}
+
+async function readQuarantineReportForRun(registry, registryRoot, runId) {
+  const registryPaths = registry.getRegistryPaths(registryRoot);
+  const quarantineRoot = nonEmptyString(registryPaths?.quarantine);
+  if (!quarantineRoot) return null;
+
+  let entries;
+  try {
+    entries = await fs.readdir(quarantineRoot, { withFileTypes: true });
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  }
+
+  const candidates = entries
+    .filter((entry) => entry.isDirectory() && entry.name.includes(`_${runId}_`))
+    .map((entry) => path.join(quarantineRoot, entry.name, "quarantine-report.json"));
+
+  for (const reportPath of candidates) {
+    try {
+      const report = JSON.parse(await fs.readFile(reportPath, "utf8"));
+      if (report?.run_id === runId) return { report, reportPath };
+    } catch (error) {
+      if (error?.code !== "ENOENT" && !(error instanceof SyntaxError)) throw error;
+    }
+  }
+  return null;
+}
+
+async function classifySnapshotReadError({ registry, registryRoot, runId, error }) {
+  if (error?.code !== "ENOENT") return { kind: normalizeErrorKind(error), quarantine: null };
+  const quarantine = await readQuarantineReportForRun(registry, registryRoot, runId);
+  return quarantine ? { kind: "quarantined", quarantine } : { kind: "missing", quarantine: null };
 }
 
 function statusKindForSnapshot(snapshot) {
@@ -270,8 +305,7 @@ function normalizeBudget(budget) {
 function fixLoopBudget(snapshot, events) {
   const recorded = Object.values(snapshot?.artifacts?.recorded?.by_path || {})
     .filter((summary) => summary?.gate_name === "fix_attempt" && summary?.provenance?.kind === "fix-attempt-result").length;
-  const eventAttempts = events.filter((event) => event?.type === "worker_task.created" && event?.evidence?.purpose === "fix_attempt").length;
-  const used = Math.max(recorded, eventAttempts);
+  const used = recorded;
   if (used <= 0 && snapshot?.state !== "fix_loop") return null;
   return {
     name: "fix_loop",
@@ -280,7 +314,7 @@ function fixLoopBudget(snapshot, events) {
     limit: FIX_LOOP_LIMIT,
     remaining: Math.max(0, FIX_LOOP_LIMIT - used),
     exhausted: used >= FIX_LOOP_LIMIT,
-    last_event: events.filter((event) => event?.type?.startsWith?.("worker_task.")).at(-1)?.type || "",
+    last_event: events.filter((event) => event?.type === "artifact.recorded" && event?.evidence?.gate_name === "fix_attempt").at(-1)?.type || "",
     blocker_code: used >= FIX_LOOP_LIMIT ? "retry_budget_exhausted" : "",
   };
 }
@@ -321,7 +355,7 @@ function addDerivedBlockers(report) {
   }
 }
 
-function markProblemReport({ registryRoot, runId, kind, error }) {
+function markProblemReport({ registryRoot, runId, kind, error, quarantine = null }) {
   const report = baseReport({ registryRoot, runId });
   report.status_kind = kind;
   report.state = kind;
@@ -331,7 +365,14 @@ function markProblemReport({ registryRoot, runId, kind, error }) {
     : kind === "quarantined"
       ? `Run ${runId} is quarantined and requires manual inspection.`
       : `Run ${runId} could not be read safely from the local registry.`;
-  report.blockers = [issue(code, message, { error_kind: normalizeErrorKind(error) })];
+  report.blockers = [issue(code, message, { error_kind: kind })];
+  if (quarantine?.report) {
+    report.quarantine = {
+      basename: path.basename(path.dirname(quarantine.reportPath)),
+      reason: safeText(quarantine.report.reason, { max: 120 }) || "",
+      quarantined_at: safeText(quarantine.report.quarantined_at, { max: 80 }) || "",
+    };
+  }
   report.next_safe_action = nextSafeAction(report);
   return report;
 }
@@ -351,7 +392,8 @@ export async function buildOperatorStatusReport({ registryRoot, runId, registryR
   try {
     snapshot = await registry.readRunSnapshot(paths.runPath);
   } catch (error) {
-    return markProblemReport({ registryRoot, runId, kind: normalizeErrorKind(error), error });
+    const { kind, quarantine } = await classifySnapshotReadError({ registry, registryRoot, runId, error });
+    return markProblemReport({ registryRoot, runId, kind, error, quarantine });
   }
 
   let events = [];

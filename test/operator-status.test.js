@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { promises as fs } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 import { buildOperatorStatusReport } from "../src/application/operator-status.js";
 import { statusRunReport, formatBuranReport } from "../src/application/commands.js";
@@ -95,7 +98,34 @@ test("operator status returns structured missing run without writes", async () =
   assert.equal(report.status_kind, "missing");
   assert.equal(report.external_side_effects, false);
   assert.equal(report.next_safe_action.kind, "check_run_id");
-  assert.deepEqual(repo.calls.map((call) => call[0]), ["getRunPaths", "readRunSnapshot"]);
+  assert.deepEqual(repo.calls.map((call) => call[0]), ["getRunPaths", "readRunSnapshot", "getRegistryPaths"]);
+});
+
+test("operator status distinguishes quarantined run moved out of runs directory", async () => {
+  const registryRoot = await fs.mkdtemp(path.join(os.tmpdir(), "buran-status-quarantine-"));
+  const quarantineDir = path.join(registryRoot, "quarantine", "20260523183000_run_quarantined_invalid-json");
+  await fs.mkdir(quarantineDir, { recursive: true });
+  await fs.writeFile(path.join(quarantineDir, "quarantine-report.json"), JSON.stringify({
+    schema_version: "buran.registry.v1",
+    quarantined_at: "2026-05-23T18:30:00.000Z",
+    run_id: "run_quarantined",
+    reason: "invalid-json",
+    human_needed: true,
+  }));
+
+  const notFound = new Error("missing");
+  notFound.code = "ENOENT";
+  const repo = repository({ snapshotError: notFound });
+
+  const report = await buildOperatorStatusReport({ registryRoot, runId: "run_quarantined", registryRepository: repo });
+
+  assert.equal(report.status_kind, "quarantined");
+  assert.equal(report.state, "quarantined");
+  assert.equal(report.next_safe_action.kind, "inspect_quarantine");
+  assert.equal(report.blockers[0].code, "run_quarantined");
+  assert.equal(report.quarantine.basename, "20260523183000_run_quarantined_invalid-json");
+  assert.equal(report.quarantine.reason, "invalid-json");
+  assert.deepEqual(repo.calls.map((call) => call[0]), ["getRunPaths", "readRunSnapshot", "getRegistryPaths"]);
 });
 
 test("operator status summarizes active run from snapshot/events and keeps output public-safe", async () => {
@@ -161,6 +191,55 @@ test("operator status reports expired lease and exhausted retry budget read-only
   assert.equal(report.retry_budgets.find((budget) => budget.name === "fix_loop").exhausted, true);
   assert.equal(report.blockers.some((blocker) => blocker.code === "retry_budget_exhausted"), true);
   assert.equal(report.next_safe_action.kind, "manual_review");
+});
+
+
+test("operator status counts only completed fix attempts for fix-loop budget", async () => {
+  const repo = repository({
+    snapshot: activeSnapshot({
+      state: "fix_loop",
+      worker_tasks: {
+        head: {
+          worker_task_id: "wt_fix_2",
+          run_id: "run_active",
+          task_id: "task-active",
+          purpose: "fix_attempt",
+          role: "implementer",
+          epoch: 1,
+          attempt: 2,
+          authority: "test",
+          status: "dispatched",
+          created_at: "2026-05-23T18:10:00.000Z",
+          updated_at: "2026-05-23T18:10:00.000Z",
+          deadline_at: "2026-05-23T19:10:00.000Z",
+        },
+      },
+      artifacts: {
+        recorded: {
+          by_path: {
+            "artifacts/fix-loop/result-1.json": { path: "artifacts/fix-loop/result-1.json", sha256: "c".repeat(64), gate_name: "fix_attempt", provenance: { kind: "fix-attempt-result" } },
+          },
+        },
+      },
+    }),
+    events: [
+      { type: "worker_task.created", evidence: { purpose: "fix_attempt" } },
+      { type: "worker_task.created", evidence: { purpose: "fix_attempt" } },
+    ],
+  });
+
+  const report = await buildOperatorStatusReport({
+    registryRoot: "/tmp/registry",
+    runId: "run_active",
+    registryRepository: repo,
+    clock: () => new Date("2026-05-23T18:30:00.000Z"),
+  });
+
+  const budget = report.retry_budgets.find((entry) => entry.name === "fix_loop");
+  assert.equal(budget.used, 1);
+  assert.equal(budget.exhausted, false);
+  assert.equal(report.blockers.some((blocker) => blocker.code === "retry_budget_exhausted"), false);
+  assert.equal(report.next_safe_action.kind, "run");
 });
 
 test("operator status maps corrupt events to corrupt status", async () => {
