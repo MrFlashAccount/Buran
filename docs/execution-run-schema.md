@@ -107,7 +107,7 @@ Required fields:
 | `evidence` | Artifact refs, hashes, command summaries, or remote ids. |
 | `idempotency_key` | Required for projection/effect events. |
 
-Recovery only accepts documented event types. Current accepted types are `transition`, `artifact.recorded`, `gate.result_recorded`, `lock.lease_acquired`, `lock.lease_released`, `lock.lease_blocked`, `projection.intent_recorded`, `projection.result_recorded`, `recovery.lease_stale_reclaimed`, and `recovery.lease_record_removed`. Unknown event types are quarantined even when they include timestamp/actor/evidence fields.
+Recovery only accepts documented event types. Current accepted types are `transition`, `artifact.recorded`, `gate.result_recorded`, `lock.lease_acquired`, `lock.lease_released`, `lock.lease_blocked`, `projection.intent_recorded`, `projection.result_recorded`, `worker_task.created`, `worker_task.dispatch_recorded`, `worker_task.completion_received`, `worker_task.completion_decided`, `worker_task.overdue_recorded`, `worker_task.quarantined`, `recovery.lease_stale_reclaimed`, and `recovery.lease_record_removed`. Unknown event types are quarantined even when they include timestamp/actor/evidence fields.
 
 `artifact.recorded` evidence is typed and must include: safe relative `path`, `sha256`, `bytes`, `gate_name`, `execution_epoch`, `gate_attempt`, `recorded_from_state`, `recorded_at`, `actor`, and `provenance`. Supported artifact stages include `workspace_preparation`, `implementation_dispatch`, `fix_attempt`, `verification`, and `internal_review`; `fix_attempt` artifacts are valid only from `fix_loop` and use current-epoch provenance.
 

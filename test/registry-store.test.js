@@ -193,6 +193,53 @@ test("late completion observation does not overwrite current active worker task"
   assert.equal(recoveredSnapshot.worker_tasks.history.some((entry) => entry.worker_task_id === secondHead.worker_task_id && entry.status === "late"), false);
 });
 
+test("late completion decision replay does not overwrite current active worker task", async () => {
+  const tempDir = await makeTempDir();
+  const registryRoot = path.join(tempDir, "registry");
+  const created = await createRunFromPacketReport(packetReport("run_worker_late_decision_active"), { registryRoot, clock: () => new Date("2026-05-16T13:52:00.000Z") });
+  const firstHead = await createDispatchedWorkerTask(registryRoot, created.run.run_id, { purpose: "implementation_dispatch", idSuffix: "impl" });
+  const secondHead = await createDispatchedWorkerTask(registryRoot, created.run.run_id, { purpose: "fix_attempt", attempt: 1, recordedAt: "2026-05-16T13:54:00.000Z", idSuffix: "fix" });
+  const staleCompletion = {
+    worker_task_id: firstHead.worker_task_id,
+    purpose: firstHead.purpose,
+    role: firstHead.role,
+    epoch: firstHead.epoch,
+    attempt: firstHead.attempt,
+    authority: firstHead.authority,
+    status: "COMPLETED",
+    evidence: { files_changed: [{ path: "src/stale-worker.js", sha256: "abc123" }] },
+    received_at: "2026-05-16T13:56:00.000Z",
+    idempotency_key: `${firstHead.worker_task_id}:late-decision-completion`,
+  };
+
+  const observed = await recordWorkerCompletion(registryRoot, created.run.run_id, staleCompletion);
+  const decided = await recordWorkerCompletionDecision(registryRoot, created.run.run_id, {
+    completion: staleCompletion,
+    decided_at: "2026-05-16T13:56:01.000Z",
+    idempotency_key: `${firstHead.worker_task_id}:late-decision`,
+  });
+
+  assert.equal(decided.event.type, "worker_task.completion_decided");
+  assert.equal(decided.event.evidence.worker_task_id, firstHead.worker_task_id);
+  assert.equal(decided.event.evidence.decision, "late");
+  assert.equal(decided.event.evidence.role, "implementer");
+  assert.deepEqual(decided.run.worker_tasks.head, observed.run.worker_tasks.head);
+  assert.equal(decided.run.worker_tasks.head.worker_task_id, secondHead.worker_task_id);
+  assert.equal(decided.run.worker_tasks.head.status, "dispatched");
+  assert.equal(decided.run.worker_tasks.head.role, "fixer");
+  assert.ok(decided.run.worker_tasks.history.some((entry) => entry.worker_task_id === firstHead.worker_task_id && entry.status === "late" && entry.completion?.idempotency_key === staleCompletion.idempotency_key));
+  assert.equal(decided.run.worker_tasks.history.some((entry) => entry.worker_task_id === secondHead.worker_task_id && entry.status === "late"), false);
+
+  const recovery = await recoverRegistry(registryRoot, { registryRepository, clock: () => new Date("2026-05-16T13:57:00.000Z") });
+  assert.equal(recovery.summary.quarantined_runs, 0);
+  const recoveredSnapshot = await readRunSnapshot(getRunPaths(registryRoot, created.run.run_id).runPath);
+  assert.equal(recoveredSnapshot.worker_tasks.head.worker_task_id, secondHead.worker_task_id);
+  assert.equal(recoveredSnapshot.worker_tasks.head.status, "dispatched");
+  assert.equal(recoveredSnapshot.worker_tasks.head.role, "fixer");
+  assert.ok(recoveredSnapshot.worker_tasks.history.some((entry) => entry.worker_task_id === firstHead.worker_task_id && entry.status === "late" && entry.completion?.idempotency_key === staleCompletion.idempotency_key));
+  assert.equal(recoveredSnapshot.worker_tasks.history.some((entry) => entry.worker_task_id === secondHead.worker_task_id && entry.status === "late"), false);
+});
+
 test("conflict and unauthorized completions do not overwrite accepted worker task truth", async () => {
   const tempDir = await makeTempDir();
   const registryRoot = path.join(tempDir, "registry");
