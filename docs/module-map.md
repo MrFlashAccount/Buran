@@ -1,92 +1,125 @@
 # Module Map
 
-This file is the quick source-tree guide for maintainers. It maps the current code layout to responsibilities already implemented on this branch.
+This file maps the implemented source layout and canonical runtime surfaces.
 
-## Top-level entrypoints
-
-| Path | Responsibility |
-| --- | --- |
-| `index.js` | OpenClaw plugin export surface. |
-| `bin/buran.js` | CLI wrapper for local command execution. |
-| `src/cli.js` | argument parsing and command dispatch for `validate`, `intake`, `run`, `lease`, and `recover`. |
-| `src/buran.js` | packet-list validation and intake orchestration. |
-
-## Core runtime modules
+## Entrypoints and composition
 
 | Path | Responsibility |
 | --- | --- |
-| `src/constants.js` | schema version, state names, transition constants, artifact-stage names, and shared limits. |
-| `src/state-machine.js` | allowed transition validation and terminal-state enforcement. |
-| `src/packet-sufficiency.js` | approved-packet normalization and PASS/FAIL sufficiency decisions. |
-| `src/runner.js` | local mission runner orchestration across `queued`, `waiting_for_lock`, `running`, `verification`, `internal_review`, bounded `fix_loop`, and `pr_ready`. |
-| `src/locks.js` | workspace lease acquisition, conflict detection, TTL handling, and lease release. |
-| `src/workspace-preparation.js` | local git workspace inspection and immutable preparation artifact content. |
-| `src/implementation-dispatch.js` | implementation-dispatch and fix-attempt intent/result artifact builder, result sanitizer, custom intent-artifact provenance support, and durable completion-evidence contract. |
+| `index.js` | Plugin/export surface; imports canonical core execution-run constants/state machine. |
+| `bin/buran.js` | CLI wrapper. |
+| `src/entrypoints/cli.js` | CLI argument parsing and command dispatch. |
+| `src/composition/local-runtime.js` | Local composition root wiring registry storage, workspace leases/inspection, implementation adapters, and the default SCM handoff adapter. |
 
-## Registry and persistence
+## Provider-neutral core
 
 | Path | Responsibility |
 | --- | --- |
-| `src/execution-run-schema.js` | `execution-run.v2` builders and validators for runs, batches, leases, and typed event payloads. |
-| `src/registry-store.js` | canonical multi-file mutation ordering for snapshots, events, artifacts, leases, and indexes. |
-| `src/registry.js` | compatibility export surface around registry operations. |
-| `src/fs-atomic.js` | atomic write helpers used by registry persistence. |
-| `src/recovery.js` | replay, validation, quarantine, stale-lease reclamation, and index rebuild flow. |
+| `src/core/modules/execution-runs/` | Canonical execution-run entity, registry port, constants, transition/event builders, and state-machine authority. |
+| `src/core/modules/scm-handoff/` | Canonical provider-neutral handoff target value object, projection contract helpers, SCM handoff port, projection entity, status/error authority, and projection service. |
+| `src/core/modules/workspace-leases/` | Lease request/status contract, policy decisions, lease entity, and lease-service/record-store ports. |
+| `src/core/ports/` | Provider-neutral cross-module/application seam ports and descriptor helpers that do not have enough domain rules to justify a core module. |
+| `src/core/ports/integration.js` | Metadata validation/default helpers used by concrete integrations for composition/debug visibility; not a domain entity or lifecycle base class. |
+| `src/core/ports/workspace-preparation-inspector.js` | Workspace preparation/inspection port; intentionally not a `modules/workspaces` module because no workspace entity/policy/value object exists in this slice. |
+| `src/core/README.md` | Core dependency rules. |
 
-## Gate and projection adapters
-
-| Path | Responsibility |
-| --- | --- |
-| `src/verification-adapter.js` | allowlisted verification command execution and verification report generation. |
-| `src/internal-review-adapter.js` | local internal-review report generation that treats packet review text as context only. |
-| `src/pr-projection-adapter.js` | local fake PR projection planning, artifact generation, and projection replay helpers. |
-| `src/github-pr-transport-adapter.js` | injectable transport-backed PR projection seam plus disabled-by-default GitHub CLI stacked-PR create/update hook with repo allowlisting, local-first intent, sanitization, and result validation. |
-| `src/workflow-policy.js` | review-ready stack progression policy; exposes prerequisite gates and refuses next-slice starts until local evidence is complete. |
-| `src/projection-contract.js` | projection payload normalization and contract checks shared by projection code. |
-| `src/observability.js` | redaction, public report sanitization, and observability path helpers. |
-
-## Shared helpers
+## Execution-run application support
 
 | Path | Responsibility |
 | --- | --- |
-| `src/utils.js` | generic helpers such as hashing, string normalization, and utility checks. |
+| `src/execution-runs/schema/` | Durable `execution-run.v2` builders/validators; imports canonical core authority. |
+| `src/execution-runs/recovery/` | Recovery/replay/quarantine flow; imports canonical core authority. |
+
+## Application orchestration
+
+| Path | Responsibility |
+| --- | --- |
+| `src/approved-packets/sufficiency.js` | Approved packet normalization and sufficiency decisions. |
+| `src/application/run-local-mission.js` | Thin state dispatcher for local mission runs. |
+| `src/application/mission-context.js` | Runner constants and mission context helpers. |
+| `src/application/mission-phase-runner.js` | Workspace-preparation and implementation-dispatch coordination. |
+| `src/application/gate-pipeline.js` | Verification/internal-review sequencing. |
+| `src/application/fix-review-loop.js` | Bounded fix-loop retry coordination. |
+| `src/application/scm-handoff.js` | Provider-neutral SCM handoff orchestration through an injected port. |
+| `src/application/final-report.js` | Runner reports and problem formatting. |
+| `src/gates/` | Implementation, verification, and internal-review artifact/gate contracts. |
+| `src/stack-workflow/review-ready-policy.js` | Review-ready stack progression policy. |
+| `src/application/recorded-artifacts.js` | Shared containment helper for recorded artifact references. |
+| `src/observability/` | Redaction, public report sanitization, summaries, and observability path helpers. |
+| `src/shared/primitives.js` | Generic helpers only; no Buran domain vocabulary. |
+
+## Integrations
+
+| Path | Responsibility |
+| --- | --- |
+| `src/integrations/storage/json-registry/` | Concrete JSON/filesystem registry adapter. |
+| `src/integrations/worktree/filesystem/` | Concrete filesystem workspace lease and inspection adapters. |
+| `src/integrations/scm/github/` | Optional GitHub-specific SCM handoff adapter/client/profile; live writes only when explicitly enabled by the embedding caller. |
+| `src/integrations/scm/local-journal/` | Default no-network local SCM handoff adapter. |
+| `src/integrations/implementation/codex/CONTEXT.md` | Reserved implementation integration note; core does not depend on it. |
+
+## Boundary checks
+
+`scripts/boundary-check.js` enforces:
+
+- canonical core does not import application, composition, entrypoints, or integrations;
+- provider-neutral SCM handoff contexts do not import concrete GitHub integrations;
+- integrations do not import application/composition/entrypoints;
+- removed wrapper paths are absent and not imported by runtime/tests;
+- provider-neutral core does not contain provider-specific public vocabulary;
+- shallow core module shells are rejected when a core module folder contains only ports and no entity, value object, policy, or service implementation;
+- documented paths in this module map exist.
 
 ## Test map
 
 | Path | Coverage focus |
 | --- | --- |
-| `test/buran.test.js` | CLI and intake/validation behavior, sanitization, leases, projections, and recovery edges. |
-| `test/execution-run-schema.test.js` | schema builders and snapshot validation. |
-| `test/gate-ledger.test.js` | artifact/gate ledger semantics and projection recording constraints. |
-| `test/registry-store.test.js` | registry write ordering, transitions, rebuilds, and recovery interactions. |
-| `test/runner.test.js` | end-to-end local runner behavior across lease, verification, review, and PR projection stages. |
-| `test/fixtures/packet-list.mixed.json` | mixed sufficient/insufficient packet intake fixture. |
+| `test/buran.test.js` | CLI/intake/validation behavior, sanitization, leases, handoff projections, and recovery edges. |
+| `test/execution-run-schema.test.js` | Schema builders and snapshot validation. |
+| `test/gate-ledger.test.js` | Artifact/gate ledger semantics and handoff recording constraints. |
+| `test/registry-store.test.js` | Registry write ordering, transitions, rebuilds, and recovery interactions. |
+| `test/runner.test.js` | End-to-end local runner behavior across lease, verification, review, and SCM handoff stages. |
+| `test/scm-handoff-architecture.test.js` | Provider-neutral SCM handoff core exports and port shape. |
+| `test/scm-handoff-projection-adapter.test.js` | Handoff projection identity/collision protection. |
 
 ## Current runtime flow
 
 ```text
 packet list -> sufficiency -> registry intake -> queued
 queued -> waiting_for_lock -> running
-running -> workspace_preparation artifact -> implementation_dispatch intent artifact -> adapter call or reusable result -> sanitized result artifact
-implementation_dispatch COMPLETED + durable evidence -> verification
-implementation_dispatch BLOCKED -> stay running with blocker
-implementation_dispatch FAILED -> failed_execution
-verification -> verification artifact + gate -> internal_review | fix_loop | blocked_needs_human
-internal_review -> internal-review artifact + gate -> pr_ready | fix_loop | blocked_needs_human
-fix_loop -> fix_attempt intent artifact -> implementation-harness adapter call or reusable result -> sanitized fix_attempt result artifact
-fix_attempt COMPLETED + durable evidence -> verification with fresh gate epoch
-fix_attempt BLOCKED/FAILED -> stay fix_loop with blocker
-bounded completed fix attempts exhausted -> blocked_needs_human
-pr_ready -> projection intent/result artifacts -> ready_for_manual_review
-next slice start -> workflow policy checks previous slice review-ready gates
+running -> workspace_preparation -> implementation_dispatch -> verification
+verification -> internal_review | fix_loop | blocked_needs_human
+internal_review -> handoff_ready | fix_loop | blocked_needs_human
+fix_loop -> fix_attempt -> verification | blocked_needs_human
+handoff_ready -> SCM handoff intent/result artifacts -> ready_for_manual_review
 recover -> replay + rebuild + quarantine when state is ambiguous
 ```
 
-## What is intentionally absent
+## Intentionally absent
 
-- no autonomous task discovery
-- no direct implementation or fix worker execution inside the runner; worker execution is behind injected approved adapters
-- no implementation worker execution outside the approved implementation-harness adapter boundary
-- no fix-loop worker execution outside the approved implementation-harness adapter boundary
-- no default remote GitHub write path in the CLI/runtime slice; live GitHub PR transport is injected and explicitly enabled only
-- no dashboard or backlog management surface
+- no autonomous `work_item` discovery;
+- no direct implementation/fix worker execution in the runner;
+- no default remote provider write path;
+- no persisted schema migration for legacy provider-specific mirrors in this slice.
+
+## WorkerTask ownership map
+
+| Path | WorkerTask responsibility |
+| --- | --- |
+| `src/core/modules/execution-runs/entities/worker-task.js` | Core lifecycle semantics, ids, status/decision normalization, sanitized completion evidence, and public summary derivation. |
+| `src/execution-runs/schema/` | Durable snapshot/event validation for worker task heads/history and typed worker task events. |
+| `src/integrations/storage/json-registry/` | Atomic event/snapshot persistence, idempotency repair, and repository port implementation for worker task lifecycle writes. |
+| `src/execution-runs/recovery/` | Replay and quarantine of worker task events alongside existing run/gate/projection semantics. |
+| `src/application/mission-phase-runner.js` and `src/application/fix-review-loop.js` | Sequencing only: create task, record dispatch, ingest completion, require accepted decision before outer state transition. |
+| `src/observability/` | Privacy-safe summaries and redaction of raw worker payload fields. |
+
+## WorkerTask source ownership
+
+| Path | Responsibility |
+| --- | --- |
+| `src/core/modules/execution-runs/entities/worker-task.js` | Provider-neutral WorkerTask entity helpers, identity, lifecycle head updates, completion evaluation, and sanitized summary derivation. |
+| `src/execution-runs/schema/` | Worker task snapshot/event/completion/decision builders and validators. |
+| `src/integrations/storage/json-registry/store.js` | Concrete worker task event append, idempotency, snapshot merge, and quarantine persistence. |
+| `src/application/mission-phase-runner.js` | Running-stage worker task sequencing around implementation dispatch. |
+| `src/application/fix-review-loop.js` | Fix-attempt worker task sequencing and legacy recorded-result resume compatibility. |
+| `src/observability/` | Privacy-safe worker task summary output/redaction. |

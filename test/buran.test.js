@@ -5,16 +5,21 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { runBuranCli } from "../src/cli.js";
-import { SCHEMA_VERSION } from "../src/constants.js";
-import { intakePacketListFile, validatePacketListFile } from "../src/buran.js";
-import { validateRunSnapshot } from "../src/execution-run-schema.js";
-import { acquireWorkspaceLease, getLeaseRecordPath } from "../src/locks.js";
-import { normalizeObservabilityConfig, sanitizeForObservability, sanitizePathForOutput, sanitizePublicReportForOutput } from "../src/observability.js";
-import { buildLocalPrProjection } from "../src/pr-projection-adapter.js";
-import { recoverRegistry } from "../src/recovery.js";
-import { transitionRun, writeJsonAtomic } from "../src/registry.js";
-import { validateTransition } from "../src/state-machine.js";
+import { runBuranCli } from "../src/entrypoints/cli.js";
+import { SCHEMA_VERSION } from "../src/core/modules/execution-runs/constants.js";
+import { intakePacketListFile, validatePacketListFile } from "../src/application/commands.js";
+import { validateRunSnapshot } from "../src/execution-runs/schema/index.js";
+import { acquireWorkspaceLease as acquireWorkspaceLeaseWithPorts } from "../src/integrations/worktree/filesystem/locks.js";
+import { getLeaseRecordPath } from "../src/integrations/storage/json-registry/path-layout.js";
+import { normalizeObservabilityConfig, sanitizeForObservability, sanitizePathForOutput, sanitizePublicReportForOutput } from "../src/observability/index.js";
+import { buildLocalScmHandoffProjection } from "../src/integrations/scm/local-journal/local-journal-scm-handoff-adapter.js";
+import { recoverRegistry as recoverRegistryCore } from "../src/execution-runs/recovery/index.js";
+import { writeJsonAtomic } from "../src/integrations/storage/json-registry/fs-atomic.js";
+import { createJsonRegistryRepository } from "../src/integrations/storage/json-registry/repository.js";
+import { createJsonLeaseRecordStore } from "../src/integrations/storage/json-registry/lease-record-store.js";
+import { createJsonRegistryRecoveryStore } from "../src/integrations/storage/json-registry/recovery-store.js";
+import { createFilesystemWorkspaceLeaseService } from "../src/integrations/worktree/filesystem/locks.js";
+import { validateTransition } from "../src/core/modules/execution-runs/state-machine.js";
 
 /**
  * End-to-end coverage for packet intake, CLI orchestration, locks, redaction,
@@ -22,6 +27,12 @@ import { validateTransition } from "../src/state-machine.js";
  */
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const registryRepository = createJsonRegistryRepository();
+const leaseRecordStore = createJsonLeaseRecordStore();
+const workspaceLeaseService = createFilesystemWorkspaceLeaseService({ registryRepository, leaseRecordStore });
+const registryRecoveryStore = createJsonRegistryRecoveryStore();
+const acquireWorkspaceLease = (registryRoot, runId, options = {}) => acquireWorkspaceLeaseWithPorts(registryRoot, runId, { ...options, registryRepository, leaseRecordStore });
+const recoverRegistry = (registryRoot, options = {}) => recoverRegistryCore(registryRoot, { ...options, registryRepository: options.registryRepository || registryRepository, workspaceLeaseService: options.workspaceLeaseService || workspaceLeaseService, registryRecoveryStore: options.registryRecoveryStore || registryRecoveryStore });
 const fixturePath = path.join(__dirname, "fixtures", "packet-list.mixed.json");
 
 /** Creates an isolated temp workspace for full-flow integration tests. */
@@ -91,6 +102,28 @@ function projectionReadySnapshot() {
     schema_version: SCHEMA_VERSION,
     run_id: "run_projection_ready",
     task_id: "projection-ready",
+    scm_target: {
+      provider: "github",
+      repo: "example-owner/example-repo",
+      issue_number: 17,
+      intended_branch: "user/feature",
+      base_branch: "develop",
+    },
+    handoff_target: {
+      provider: "github",
+      number: 123456,
+      url: "local://scm-handoff/example/target/123456",
+      repo: "example-owner/example-repo",
+      issue_number: 17,
+      head_branch: "user/feature",
+      base_branch: "develop",
+      state: "open",
+      draft: false,
+      title: "Buran handoff for feature",
+      projection_mode: "local_fake",
+      projected_at: "2026-05-16T13:57:00.000Z",
+      actor: "runner-test",
+    },
     github: {
       repo: "example-owner/example-repo",
       issue_number: 17,
@@ -98,7 +131,7 @@ function projectionReadySnapshot() {
       base_branch: "develop",
       pr: {
         number: 123456,
-        url: "local://github-pr/example/pull/123456",
+        url: "local://scm-handoff/example/target/123456",
         repo: "example-owner/example-repo",
         issue_number: 17,
         head_branch: "user/feature",
@@ -155,36 +188,37 @@ function projectionReadySnapshot() {
       packet: { path: "artifacts/packet.md", sha256: "c".repeat(64) },
       recorded: { by_path: {} },
     },
-    projections: {
-      github_pr: {
-        projection_name: "github_pr",
-        projection_target: "github.pr",
-        adapter: "local-github-pr-projection",
+    projection_ledger: {
+      handoff_target: {
+        projection_name: "handoff_target",
+        projection_target: "handoff_target",
+        adapter: "local-scm-handoff",
         mode: "local_fake",
         execution_epoch: 1,
-        recorded_from_state: "pr_ready",
+        recorded_from_state: "handoff_ready",
         last_intent: {
-          artifact_ref: { path: "artifacts/pr/projection-intent-abc123.json", sha256: "d".repeat(64) },
+          artifact_ref: { path: "artifacts/scm-handoff/intent-abc123.json", sha256: "d".repeat(64) },
           recorded_at: "2026-05-16T13:57:00.000Z",
           actor: "runner-test",
           idempotency_key: "run:projection:intent",
           execution_epoch: 1,
-          recorded_from_state: "pr_ready",
+          recorded_from_state: "handoff_ready",
           sequence: 5,
         },
         last_result: {
           status: "projected_local",
-          artifact_ref: { path: "artifacts/pr/projection-result-abc123.json", sha256: "e".repeat(64) },
+          artifact_ref: { path: "artifacts/scm-handoff/result-abc123.json", sha256: "e".repeat(64) },
           recorded_at: "2026-05-16T13:57:00.000Z",
           actor: "runner-test",
           idempotency_key: "run:projection:result",
           intent_idempotency_key: "run:projection:intent",
           execution_epoch: 1,
-          recorded_from_state: "pr_ready",
+          recorded_from_state: "handoff_ready",
           sequence: 6,
-          github_pr: {
+          handoff_target: {
+            provider: "github",
             number: 123456,
-            url: "local://github-pr/example/pull/123456",
+            url: "local://scm-handoff/example/target/123456",
             repo: "example-owner/example-repo",
             issue_number: 17,
             head_branch: "user/feature",
@@ -201,7 +235,7 @@ function projectionReadySnapshot() {
     },
     created_at: "2026-05-16T13:52:00.000Z",
     updated_at: "2026-05-16T13:57:00.000Z",
-    terminal_reason: "PR handoff recorded",
+    terminal_reason: "SCM handoff recorded",
   };
 }
 
@@ -304,6 +338,7 @@ test("intake creates local JSON runs, packet artifacts, and transition event jou
 
   const report = await intakePacketListFile(fixturePath, {
     registryRoot,
+    registryRepository,
     clock: () => fixedDate,
   });
 
@@ -352,8 +387,8 @@ test("intake creates local JSON runs, packet artifacts, and transition event jou
   assert.deepEqual(queuedSnapshot.gates.internal_review, queuedSnapshot.gates.verification);
   assert.equal(queuedSnapshot.last_sequence, 2);
   assert.equal(queuedSnapshot.execution.current_epoch, 0);
-  assert.deepEqual(queuedSnapshot.projections, {});
-  assert.equal(queuedSnapshot.github.pr, null);
+  assert.deepEqual(queuedSnapshot.projection_ledger, {});
+  assert.equal(queuedSnapshot.handoff_target, null);
   assert.equal(queuedSnapshot.workspace.lease_status, "not_requested");
   assert.equal(queuedSnapshot.locks.lease_status, "not_requested");
 
@@ -371,7 +406,7 @@ test("intake creates local JSON runs, packet artifacts, and transition event jou
 test("insufficient packets become terminal blocked_plan_insufficient runs with evidence", async () => {
   const tempDir = await makeTempDir();
   const registryRoot = path.join(tempDir, "registry");
-  const report = await intakePacketListFile(fixturePath, { registryRoot });
+  const report = await intakePacketListFile(fixturePath, { registryRoot, registryRepository });
   const blockedRun = report.runs.find((run) => run.task_id === "weak-task-18");
 
   const snapshot = await readJson(path.join(blockedRun.run_dir, "run.json"));
@@ -380,7 +415,7 @@ test("insufficient packets become terminal blocked_plan_insufficient runs with e
   assert.equal(snapshot.state, "blocked_plan_insufficient");
   assert.equal(snapshot.packet.sufficiency_status, "FAIL");
   assert.ok(snapshot.packet.missing_fields.includes("approval.approved"));
-  assert.ok(snapshot.packet.missing_fields.includes("github.intended_branch"));
+  assert.ok(snapshot.packet.missing_fields.includes("scm_target.intended_branch"));
   assert.ok(snapshot.packet.missing_fields.includes("implementation.instructions"));
   assert.match(snapshot.terminal_reason, /Packet insufficient/);
   assert.equal(events.at(-1).state_after, "blocked_plan_insufficient");
@@ -406,7 +441,7 @@ test("dry validation reports non-object packets as structured validation failure
     assert.equal(packet.sufficient, false);
     assert.deepEqual(packet.missing_fields, ["packet_object"]);
     assert.match(packet.run_id, /^run_packet-\d+_[a-f0-9]{12}$/);
-    assert.deepEqual(packet.github, {});
+    assert.deepEqual(packet.scm_target, {});
     assert.deepEqual(packet.conflict_surface, []);
   }
 });
@@ -416,7 +451,7 @@ test("intake blocks non-object packets instead of crashing", async () => {
   const registryRoot = path.join(tempDir, "registry");
   const packetPath = await writePacketList(tempDir, [null, 42, ["array-packet"], "text-packet"]);
 
-  const report = await intakePacketListFile(packetPath, { registryRoot });
+  const report = await intakePacketListFile(packetPath, { registryRoot, registryRepository });
 
   assert.equal(report.mode, "intake");
   assert.equal(report.summary.total, 4);
@@ -456,16 +491,16 @@ test("atomic JSON writes leave a complete parseable file and no temp sibling on 
 test("slice 1 intake records no runner, PR, or remote projection effects", async () => {
   const tempDir = await makeTempDir();
   const registryRoot = path.join(tempDir, "registry");
-  const report = await intakePacketListFile(fixturePath, { registryRoot });
+  const report = await intakePacketListFile(fixturePath, { registryRoot, registryRepository });
 
   for (const run of report.runs) {
     const snapshot = await readJson(path.join(run.run_dir, "run.json"));
     const events = await readJsonLines(path.join(run.run_dir, "events.jsonl"));
     assert.notEqual(snapshot.state, "running");
-    assert.notEqual(snapshot.state, "pr_ready");
+    assert.notEqual(snapshot.state, "handoff_ready");
     assert.notEqual(snapshot.state, "ready_for_manual_review");
-    assert.equal(snapshot.github.pr, null);
-    assert.deepEqual(snapshot.projections, {});
+    assert.equal(snapshot.handoff_target, null);
+    assert.deepEqual(snapshot.projection_ledger, {});
     assert.equal(events.some((event) => String(event.type).includes("projection")), false);
     assert.equal(events.some((event) => String(event.type).includes("execution")), false);
   }
@@ -500,64 +535,70 @@ test("state machine routes verification BLOCKED to blocked_needs_human instead o
   assert.match(blockedToFixLoop.reason, /requires a current verification FAIL result/);
 });
 
-test("state machine requires a recorded PR projection result before ready_for_manual_review", () => {
+test("state machine requires a recorded SCM handoff projection result before ready_for_manual_review", () => {
   const missingProjection = validateTransition({
-    fromState: "pr_ready",
+    fromState: "handoff_ready",
     toState: "ready_for_manual_review",
     snapshot: {
-      state: "pr_ready",
+      state: "handoff_ready",
       execution: { current_epoch: 1 },
       github: { repo: "example-owner/example-repo", issue_number: 17, intended_branch: "user/feature", base_branch: "develop", pr: null },
       projections: {},
     },
   });
   assert.equal(missingProjection.ok, false);
-  assert.match(missingProjection.reason, /recorded PR projection result/i);
+  assert.match(missingProjection.reason, /recorded handoff projection result/i);
 
   const readyProjection = validateTransition({
-    fromState: "pr_ready",
+    fromState: "handoff_ready",
     toState: "ready_for_manual_review",
     snapshot: {
-      state: "pr_ready",
+      state: "handoff_ready",
       execution: { current_epoch: 1 },
-      github: {
+      scm_target: {
+        provider: "github",
         repo: "example-owner/example-repo",
         issue_number: 17,
         intended_branch: "user/feature",
         base_branch: "develop",
-        pr: {
-          number: 123456,
-          url: "local://github-pr/example/pull/123456",
-          repo: "example-owner/example-repo",
-          issue_number: 17,
-          head_branch: "user/feature",
-          base_branch: "develop",
-          state: "open",
-          draft: false,
-          title: "Buran handoff for feature",
-        },
       },
-      projections: {
-        github_pr: {
+      handoff_target: {
+        provider: "github",
+        number: 123456,
+        url: "local://scm-handoff/example/target/123456",
+        repo: "example-owner/example-repo",
+        issue_number: 17,
+        head_branch: "user/feature",
+        base_branch: "develop",
+        state: "open",
+        draft: false,
+        title: "Buran handoff for feature",
+        projection_mode: "local_fake",
+        projected_at: "2026-05-16T13:57:00.000Z",
+        actor: "runner-test",
+      },
+      projection_ledger: {
+        handoff_target: {
           execution_epoch: 1,
-          projection_name: "github_pr",
-          projection_target: "github.pr",
-          adapter: "local-github-pr-projection",
+          projection_name: "handoff_target",
+          projection_target: "handoff_target",
+          adapter: "local-scm-handoff",
           mode: "local_fake",
-          recorded_from_state: "pr_ready",
+          recorded_from_state: "handoff_ready",
           last_result: {
             execution_epoch: 1,
-            recorded_from_state: "pr_ready",
+            recorded_from_state: "handoff_ready",
             idempotency_key: "run:projection:result",
             intent_idempotency_key: "run:projection:intent",
             status: "projected_local",
-            artifact_ref: { path: "artifacts/pr/projection-result-abc123.json", sha256: "a".repeat(64) },
+            artifact_ref: { path: "artifacts/scm-handoff/result-abc123.json", sha256: "a".repeat(64) },
             recorded_at: "2026-05-16T13:57:00.000Z",
             actor: "runner-test",
             sequence: 7,
-            github_pr: {
+            handoff_target: {
+              provider: "github",
               number: 123456,
-              url: "local://github-pr/example/pull/123456",
+              url: "local://scm-handoff/example/target/123456",
               repo: "example-owner/example-repo",
               issue_number: 17,
               head_branch: "user/feature",
@@ -565,6 +606,9 @@ test("state machine requires a recorded PR projection result before ready_for_ma
               state: "open",
               draft: false,
               title: "Buran handoff for feature",
+              projection_mode: "local_fake",
+              projected_at: "2026-05-16T13:57:00.000Z",
+              actor: "runner-test",
             },
           },
         },
@@ -574,10 +618,10 @@ test("state machine requires a recorded PR projection result before ready_for_ma
   assert.equal(readyProjection.ok, true);
 
   const failedStatusProjection = validateTransition({
-    fromState: "pr_ready",
+    fromState: "handoff_ready",
     toState: "ready_for_manual_review",
     snapshot: {
-      state: "pr_ready",
+      state: "handoff_ready",
       execution: { current_epoch: 1 },
       github: {
         repo: "example-owner/example-repo",
@@ -586,7 +630,7 @@ test("state machine requires a recorded PR projection result before ready_for_ma
         base_branch: "develop",
         pr: {
           number: 123456,
-          url: "local://github-pr/example/pull/123456",
+          url: "local://scm-handoff/example/target/123456",
           repo: "example-owner/example-repo",
           issue_number: 17,
           head_branch: "user/feature",
@@ -596,38 +640,38 @@ test("state machine requires a recorded PR projection result before ready_for_ma
           title: "Buran handoff for feature",
         },
       },
-      projections: {
-        github_pr: {
+      projection_ledger: {
+        handoff_target: {
           execution_epoch: 1,
-          projection_name: "github_pr",
-          projection_target: "github.pr",
-          adapter: "local-github-pr-projection",
+          projection_name: "handoff_target",
+          projection_target: "handoff_target",
+          adapter: "local-scm-handoff",
           mode: "local_fake",
-          recorded_from_state: "pr_ready",
+          recorded_from_state: "handoff_ready",
           last_result: {
             execution_epoch: 1,
-            recorded_from_state: "pr_ready",
+            recorded_from_state: "handoff_ready",
             idempotency_key: "run:projection:result",
             intent_idempotency_key: "run:projection:intent",
             status: "failed_remote_write",
-            artifact_ref: { path: "artifacts/pr/projection-result-abc123.json", sha256: "a".repeat(64) },
+            artifact_ref: { path: "artifacts/scm-handoff/result-abc123.json", sha256: "a".repeat(64) },
             recorded_at: "2026-05-16T13:57:00.000Z",
             actor: "runner-test",
             sequence: 7,
-            github_pr: {},
+            handoff_target: {},
           },
         },
       },
     },
   });
   assert.equal(failedStatusProjection.ok, false);
-  assert.match(failedStatusProjection.reason, /recorded PR projection result/i);
+  assert.match(failedStatusProjection.reason, /recorded handoff projection result/i);
 
   const missingUrlProjection = validateTransition({
-    fromState: "pr_ready",
+    fromState: "handoff_ready",
     toState: "ready_for_manual_review",
     snapshot: {
-      state: "pr_ready",
+      state: "handoff_ready",
       execution: { current_epoch: 1 },
       github: {
         repo: "example-owner/example-repo",
@@ -646,25 +690,25 @@ test("state machine requires a recorded PR projection result before ready_for_ma
           title: "Buran handoff for feature",
         },
       },
-      projections: {
-        github_pr: {
+      projection_ledger: {
+        handoff_target: {
           execution_epoch: 1,
-          projection_name: "github_pr",
-          projection_target: "github.pr",
-          adapter: "local-github-pr-projection",
+          projection_name: "handoff_target",
+          projection_target: "handoff_target",
+          adapter: "local-scm-handoff",
           mode: "local_fake",
-          recorded_from_state: "pr_ready",
+          recorded_from_state: "handoff_ready",
           last_result: {
             execution_epoch: 1,
-            recorded_from_state: "pr_ready",
+            recorded_from_state: "handoff_ready",
             idempotency_key: "run:projection:result",
             intent_idempotency_key: "run:projection:intent",
             status: "projected_local",
-            artifact_ref: { path: "artifacts/pr/projection-result-abc123.json", sha256: "a".repeat(64) },
+            artifact_ref: { path: "artifacts/scm-handoff/result-abc123.json", sha256: "a".repeat(64) },
             recorded_at: "2026-05-16T13:57:00.000Z",
             actor: "runner-test",
             sequence: 7,
-            github_pr: {
+            handoff_target: {
               number: 123456,
               url: "",
               repo: "example-owner/example-repo",
@@ -674,6 +718,9 @@ test("state machine requires a recorded PR projection result before ready_for_ma
               state: "open",
               draft: false,
               title: "Buran handoff for feature",
+              projection_mode: "local_fake",
+              projected_at: "2026-05-16T13:57:00.000Z",
+              actor: "runner-test",
             },
           },
         },
@@ -681,24 +728,24 @@ test("state machine requires a recorded PR projection result before ready_for_ma
     },
   });
   assert.equal(missingUrlProjection.ok, false);
-  assert.match(missingUrlProjection.reason, /recorded PR projection result/i);
+  assert.match(missingUrlProjection.reason, /recorded handoff projection result/i);
 });
 
 test("run snapshot validation rejects corrupt successful projection state", () => {
   const corruptSnapshot = projectionReadySnapshot();
-  corruptSnapshot.github.pr = {};
-  corruptSnapshot.projections.github_pr.last_result.github_pr = {};
+  corruptSnapshot.handoff_target = {};
+  corruptSnapshot.projection_ledger.handoff_target.last_result.handoff_target = {};
 
   const decision = validateRunSnapshot(corruptSnapshot, { expectedRunId: "run_projection_ready" });
   assert.equal(decision.ok, false);
-  assert.match(decision.error, /github\.pr\.url|successful projections\.github_pr\.last_result requires github\.pr/i);
+  assert.match(decision.error, /handoff_target\.url|successful projection_ledger\.handoff_target\.last_result requires handoff_target/i);
 });
 
 test("projection adapter sanitizes durable projection artifacts", () => {
-  const projection = buildLocalPrProjection({
+  const projection = buildLocalScmHandoffProjection({
     run_id: "run_projection_sanitized",
     task_id: `task ${GITHUB_PAT_SECRET} /Users/user/private/notes.md`,
-    state: "pr_ready",
+    state: "handoff_ready",
     execution: { current_epoch: 1 },
     gates: {
       verification: { status: "PASS", current_epoch: 1, current_attempt: 1, artifact_refs: [] },
@@ -749,10 +796,10 @@ test("state machine routes internal_review BLOCKED to blocked_needs_human instea
 test("registry transitions persist run snapshot and event journal consistently", async () => {
   const tempDir = await makeTempDir();
   const registryRoot = path.join(tempDir, "registry");
-  const report = await intakePacketListFile(fixturePath, { registryRoot, clock: () => new Date("2026-05-16T13:52:00.000Z") });
+  const report = await intakePacketListFile(fixturePath, { registryRoot, registryRepository, clock: () => new Date("2026-05-16T13:52:00.000Z") });
   const queuedRun = report.runs.find((run) => run.task_id === "good-task-17");
 
-  const committed = await transitionRun(registryRoot, queuedRun.run_id, {
+  const committed = await registryRepository.transitionRun(registryRoot, queuedRun.run_id, {
     toState: "waiting_for_lock",
     actor: "test-lock-adapter",
     evidence: { reason: "accepted into manual batch" },
@@ -771,11 +818,11 @@ test("registry transitions persist run snapshot and event journal consistently",
 test("registry transition engine blocks terminal state transitions", async () => {
   const tempDir = await makeTempDir();
   const registryRoot = path.join(tempDir, "registry");
-  const report = await intakePacketListFile(fixturePath, { registryRoot });
+  const report = await intakePacketListFile(fixturePath, { registryRoot, registryRepository });
   const blockedRun = report.runs.find((run) => run.task_id === "weak-task-18");
 
   await assert.rejects(
-    () => transitionRun(registryRoot, blockedRun.run_id, { toState: "queued", actor: "test" }),
+    () => registryRepository.transitionRun(registryRoot, blockedRun.run_id, { toState: "queued", actor: "test" }),
     /terminal state blocked_plan_insufficient/,
   );
 });
@@ -783,11 +830,11 @@ test("registry transition engine blocks terminal state transitions", async () =>
 test("recovery replays events and rebuilds active-run indexes", async () => {
   const tempDir = await makeTempDir();
   const registryRoot = path.join(tempDir, "registry");
-  const report = await intakePacketListFile(fixturePath, { registryRoot });
+  const report = await intakePacketListFile(fixturePath, { registryRoot, registryRepository });
   const queuedRun = report.runs.find((run) => run.task_id === "good-task-17");
   await fs.rm(path.join(registryRoot, "indexes"), { recursive: true, force: true });
 
-  const recovery = await recoverRegistry(registryRoot, { clock: () => new Date("2026-05-16T14:00:00.000Z") });
+  const recovery = await recoverRegistry(registryRoot, { registryRepository, clock: () => new Date("2026-05-16T14:00:00.000Z") });
 
   assert.equal(recovery.summary.inspected_runs, 2);
   assert.equal(recovery.summary.valid_runs, 2);
@@ -836,7 +883,7 @@ test("recovery quarantines incomplete run snapshots instead of indexing them", a
     "",
   ].join("\n"), "utf8");
 
-  const recovery = await recoverRegistry(registryRoot, { clock: () => new Date("2026-05-16T14:00:02.000Z") });
+  const recovery = await recoverRegistry(registryRoot, { registryRepository, clock: () => new Date("2026-05-16T14:00:02.000Z") });
 
   assert.equal(recovery.summary.valid_runs, 0);
   assert.equal(recovery.summary.quarantined_runs, 1);
@@ -850,7 +897,7 @@ test("recovery quarantines incomplete run snapshots instead of indexing them", a
 test("recovery quarantines events missing required replay fields", async () => {
   const tempDir = await makeTempDir();
   const registryRoot = path.join(tempDir, "registry");
-  const report = await intakePacketListFile(fixturePath, { registryRoot });
+  const report = await intakePacketListFile(fixturePath, { registryRoot, registryRepository });
   const queuedRun = report.runs.find((run) => run.task_id === "good-task-17");
   const eventsPath = path.join(queuedRun.run_dir, "events.jsonl");
   const events = await readJsonLines(eventsPath);
@@ -859,7 +906,7 @@ test("recovery quarantines events missing required replay fields", async () => {
   delete events[1].evidence;
   await fs.writeFile(eventsPath, `${events.map((event) => JSON.stringify(event)).join("\n")}\n`, "utf8");
 
-  const recovery = await recoverRegistry(registryRoot, { clock: () => new Date("2026-05-16T14:00:00.000Z") });
+  const recovery = await recoverRegistry(registryRoot, { registryRepository, clock: () => new Date("2026-05-16T14:00:00.000Z") });
 
   assert.equal(recovery.summary.quarantined_runs, 1);
   assert.equal(recovery.quarantined[0].run_id, queuedRun.run_id);
@@ -873,11 +920,11 @@ test("recovery quarantines events missing required replay fields", async () => {
 test("recovery quarantines corrupt run.json to an inspectable human-needed path", async () => {
   const tempDir = await makeTempDir();
   const registryRoot = path.join(tempDir, "registry");
-  const report = await intakePacketListFile(fixturePath, { registryRoot });
+  const report = await intakePacketListFile(fixturePath, { registryRoot, registryRepository });
   const queuedRun = report.runs.find((run) => run.task_id === "good-task-17");
   await fs.writeFile(path.join(queuedRun.run_dir, "run.json"), "{not json", "utf8");
 
-  const recovery = await recoverRegistry(registryRoot, { clock: () => new Date("2026-05-16T14:00:00.000Z") });
+  const recovery = await recoverRegistry(registryRoot, { registryRepository, clock: () => new Date("2026-05-16T14:00:00.000Z") });
 
   assert.equal(recovery.summary.quarantined_runs, 1);
   assert.equal(recovery.quarantined[0].reason, "corrupt_run_json");
@@ -890,11 +937,11 @@ test("recovery quarantines corrupt run.json to an inspectable human-needed path"
 test("recovery quarantines malformed or truncated events.jsonl", async () => {
   const tempDir = await makeTempDir();
   const registryRoot = path.join(tempDir, "registry");
-  const report = await intakePacketListFile(fixturePath, { registryRoot });
+  const report = await intakePacketListFile(fixturePath, { registryRoot, registryRepository });
   const queuedRun = report.runs.find((run) => run.task_id === "good-task-17");
   await fs.appendFile(path.join(queuedRun.run_dir, "events.jsonl"), "{truncated", "utf8");
 
-  const recovery = await recoverRegistry(registryRoot, { clock: () => new Date("2026-05-16T14:00:00.000Z") });
+  const recovery = await recoverRegistry(registryRoot, { registryRepository, clock: () => new Date("2026-05-16T14:00:00.000Z") });
 
   assert.equal(recovery.summary.quarantined_runs, 1);
   assert.equal(recovery.quarantined[0].reason, "malformed_events_jsonl");
@@ -905,12 +952,12 @@ test("recovery quarantines malformed or truncated events.jsonl", async () => {
 test("recovery quarantines artifact integrity failures", async () => {
   const tempDir = await makeTempDir();
   const registryRoot = path.join(tempDir, "registry");
-  const report = await intakePacketListFile(fixturePath, { registryRoot });
+  const report = await intakePacketListFile(fixturePath, { registryRoot, registryRepository });
   const queuedRun = report.runs.find((run) => run.task_id === "good-task-17");
   const snapshot = await readJson(path.join(queuedRun.run_dir, "run.json"));
   await fs.writeFile(path.join(queuedRun.run_dir, snapshot.artifacts.packet.path), "tampered artifact", "utf8");
 
-  const recovery = await recoverRegistry(registryRoot, { clock: () => new Date("2026-05-16T14:00:00.000Z") });
+  const recovery = await recoverRegistry(registryRoot, { registryRepository, clock: () => new Date("2026-05-16T14:00:00.000Z") });
 
   assert.equal(recovery.summary.quarantined_runs, 1);
   assert.equal(recovery.quarantined[0].reason, "artifact_integrity_failure");
@@ -921,7 +968,7 @@ test("recovery quarantines artifact integrity failures", async () => {
 test("recovery CLI produces a local report without packets or external effects", async () => {
   const tempDir = await makeTempDir();
   const registryRoot = path.join(tempDir, "registry");
-  await intakePacketListFile(fixturePath, { registryRoot });
+  await intakePacketListFile(fixturePath, { registryRoot, registryRepository });
 
   const result = await runBuranCli(["recover", "--registry", registryRoot, "--json"]);
 
@@ -936,7 +983,7 @@ test("recovery CLI produces a local report without packets or external effects",
 test("lease acquisition reserves workspace and lock surfaces without creating a checkout", async () => {
   const tempDir = await makeTempDir();
   const registryRoot = path.join(tempDir, "registry");
-  const report = await intakePacketListFile(fixturePath, { registryRoot, clock: () => new Date("2026-05-16T13:52:00.000Z") });
+  const report = await intakePacketListFile(fixturePath, { registryRoot, registryRepository, clock: () => new Date("2026-05-16T13:52:00.000Z") });
   const queuedRun = report.runs.find((run) => run.task_id === "good-task-17");
 
   const acquired = await acquireWorkspaceLease(registryRoot, queuedRun.run_id, {
@@ -969,7 +1016,7 @@ test("lease acquisition blocks conflicting active issue/branch/surface runs and 
     goodPacket({ taskId: "task-a", issue: 21, branch: "user/task-a", conflictSurface: "src/same-area" }),
     goodPacket({ taskId: "task-b", issue: 21, branch: "user/task-a", conflictSurface: "src/same-area" }),
   ]);
-  const report = await intakePacketListFile(packetPath, { registryRoot });
+  const report = await intakePacketListFile(packetPath, { registryRoot, registryRepository });
 
   const first = await acquireWorkspaceLease(registryRoot, report.runs[0].run_id, { workspaceId: "ws-a" });
   const second = await acquireWorkspaceLease(registryRoot, report.runs[1].run_id, { workspaceId: "ws-b" });
@@ -991,7 +1038,7 @@ test("lease conflict reports dedupe exact active snapshot and lease-record overl
     goodPacket({ taskId: "dedupe-owner", issue: 71, branch: "user/dedupe", conflictSurface: "src/dedupe-area" }),
     goodPacket({ taskId: "dedupe-contender", issue: 71, branch: "user/dedupe", conflictSurface: "src/dedupe-area" }),
   ]);
-  const report = await intakePacketListFile(packetPath, { registryRoot });
+  const report = await intakePacketListFile(packetPath, { registryRoot, registryRepository });
   await acquireWorkspaceLease(registryRoot, report.runs[0].run_id, { workspaceId: "ws-dedupe-owner" });
 
   const contender = await acquireWorkspaceLease(registryRoot, report.runs[1].run_id, { workspaceId: "ws-dedupe-contender" });
@@ -1011,7 +1058,7 @@ test("lease acquisition blocks the same physical workspace path across different
     goodPacket({ taskId: "path-owner", issue: 51, branch: "user/path-owner", conflictSurface: "src/path-owner", repo: "example-owner/repo-a" }),
     goodPacket({ taskId: "path-contender", issue: 52, branch: "user/path-contender", conflictSurface: "src/path-contender", repo: "example-owner/repo-b" }),
   ]);
-  const report = await intakePacketListFile(packetPath, { registryRoot });
+  const report = await intakePacketListFile(packetPath, { registryRoot, registryRepository });
 
   const owner = await acquireWorkspaceLease(registryRoot, report.runs[0].run_id, {
     workspaceId: "ws-path-a",
@@ -1036,7 +1083,7 @@ test("lease manager supports four non-conflicting workspaces for the same repo",
     branch: `user/parallel-${index}`,
     conflictSurface: `src/area-${index}`,
   })));
-  const report = await intakePacketListFile(packetPath, { registryRoot });
+  const report = await intakePacketListFile(packetPath, { registryRoot, registryRepository });
 
   const results = [];
   for (let index = 0; index < report.runs.length; index += 1) {
@@ -1060,7 +1107,7 @@ test("lease conflicts are still detected from active run snapshots when lease fi
     goodPacket({ taskId: "snapshot-owner", issue: 41, branch: "user/snapshot-owner", conflictSurface: "src/snapshot-area" }),
     goodPacket({ taskId: "snapshot-contender", issue: 41, branch: "user/snapshot-owner", conflictSurface: "src/snapshot-area" }),
   ]);
-  const report = await intakePacketListFile(packetPath, { registryRoot });
+  const report = await intakePacketListFile(packetPath, { registryRoot, registryRepository });
   await acquireWorkspaceLease(registryRoot, report.runs[0].run_id, { workspaceId: "ws-owner" });
   await fs.rm(path.join(registryRoot, "leases"), { recursive: true, force: true });
 
@@ -1074,7 +1121,7 @@ test("partial lease acquisition rolls back already-created local lock records on
   const tempDir = await makeTempDir();
   const registryRoot = path.join(tempDir, "registry");
   const packetPath = await writePacketList(tempDir, [goodPacket({ taskId: "race-task", issue: 31, branch: "user/race-task", conflictSurface: "src/race-area" })]);
-  const report = await intakePacketListFile(packetPath, { registryRoot });
+  const report = await intakePacketListFile(packetPath, { registryRoot, registryRepository });
   let injected = false;
 
   const result = await acquireWorkspaceLease(registryRoot, report.runs[0].run_id, {
@@ -1116,7 +1163,7 @@ test("partial lease acquisition rolls back already-created local lock records on
 test("recovery reclaims stale TTL leases, removes lock records, and keeps ownership explicit", async () => {
   const tempDir = await makeTempDir();
   const registryRoot = path.join(tempDir, "registry");
-  const report = await intakePacketListFile(fixturePath, { registryRoot, clock: () => new Date("2026-05-16T13:52:00.000Z") });
+  const report = await intakePacketListFile(fixturePath, { registryRoot, registryRepository, clock: () => new Date("2026-05-16T13:52:00.000Z") });
   const queuedRun = report.runs.find((run) => run.task_id === "good-task-17");
   await acquireWorkspaceLease(registryRoot, queuedRun.run_id, {
     workspaceId: "ws-stale",
@@ -1124,7 +1171,7 @@ test("recovery reclaims stale TTL leases, removes lock records, and keeps owners
     clock: () => new Date("2026-05-16T13:53:00.000Z"),
   });
 
-  const recovery = await recoverRegistry(registryRoot, { clock: () => new Date("2026-05-16T13:53:02.000Z") });
+  const recovery = await recoverRegistry(registryRoot, { registryRepository, clock: () => new Date("2026-05-16T13:53:02.000Z") });
 
   assert.ok(recovery.findings.some((finding) => finding.type === "stale_lease_reclaimed" && finding.run_id === queuedRun.run_id));
   assert.equal(recovery.summary.workspace_leases, 0);
@@ -1144,10 +1191,10 @@ test("terminal runs immediately release active leases and do not block a later s
     goodPacket({ taskId: "terminal-owner", issue: 61, branch: "user/terminal-same", conflictSurface: "src/terminal-same" }),
     goodPacket({ taskId: "terminal-contender", issue: 61, branch: "user/terminal-same", conflictSurface: "src/terminal-same" }),
   ]);
-  const report = await intakePacketListFile(packetPath, { registryRoot });
+  const report = await intakePacketListFile(packetPath, { registryRoot, registryRepository });
   await acquireWorkspaceLease(registryRoot, report.runs[0].run_id, { workspaceId: "ws-terminal-a" });
 
-  const terminal = await transitionRun(registryRoot, report.runs[0].run_id, {
+  const terminal = await registryRepository.transitionRun(registryRoot, report.runs[0].run_id, {
     toState: "failed_execution",
     actor: "test-runner",
     evidence: { terminal_reason: "test terminal release" },
@@ -1161,7 +1208,7 @@ test("terminal runs immediately release active leases and do not block a later s
   assert.equal(contender.status, "acquired");
   assert.equal(contender.run.state, "running");
 
-  const recovery = await recoverRegistry(registryRoot);
+  const recovery = await recoverRegistry(registryRoot, { registryRepository });
   assert.equal(recovery.summary.active_runs, 1);
   assert.equal(recovery.summary.workspace_leases, 1);
   assert.equal((await listLeaseRecordFiles(registryRoot)).length, 6);
@@ -1170,7 +1217,7 @@ test("terminal runs immediately release active leases and do not block a later s
 test("recovery quarantines unknown non-transition event types instead of accepting timestamped events", async () => {
   const tempDir = await makeTempDir();
   const registryRoot = path.join(tempDir, "registry");
-  const report = await intakePacketListFile(fixturePath, { registryRoot });
+  const report = await intakePacketListFile(fixturePath, { registryRoot, registryRepository });
   const queuedRun = report.runs.find((run) => run.task_id === "good-task-17");
   await fs.appendFile(path.join(queuedRun.run_dir, "events.jsonl"), `${JSON.stringify({
     schema_version: SCHEMA_VERSION,
@@ -1183,7 +1230,7 @@ test("recovery quarantines unknown non-transition event types instead of accepti
     idempotency_key: `${queuedRun.run_id}:mystery:3`,
   })}\n`, "utf8");
 
-  const recovery = await recoverRegistry(registryRoot, { clock: () => new Date("2026-05-16T14:00:01.000Z") });
+  const recovery = await recoverRegistry(registryRoot, { registryRepository, clock: () => new Date("2026-05-16T14:00:01.000Z") });
 
   assert.equal(recovery.summary.quarantined_runs, 1);
   assert.equal(recovery.quarantined[0].reason, "invalid_event_replay");
@@ -1194,7 +1241,7 @@ test("recovery quarantines unknown non-transition event types instead of accepti
 test("lease CLI smoke acquires a local lease and recovery reports no external side effects", async () => {
   const tempDir = await makeTempDir();
   const registryRoot = path.join(tempDir, "registry");
-  const report = await intakePacketListFile(fixturePath, { registryRoot });
+  const report = await intakePacketListFile(fixturePath, { registryRoot, registryRepository });
   const queuedRun = report.runs.find((run) => run.task_id === "good-task-17");
 
   const leaseResult = await runBuranCli(["lease", "acquire", "--run", queuedRun.run_id, "--workspace-id", "ws-cli", "--registry", registryRoot, "--json"]);
@@ -1334,7 +1381,7 @@ test("validate public JSON report redacts secrets across packet ids, branches, a
   const report = JSON.parse(result.text);
   assert.equal(report.packets[0].task_id, "task-[REDACTED_SECRET]");
   assert.match(report.packets[0].run_id, /\[REDACTED_SECRET\]/);
-  assert.equal(report.packets[0].github.intended_branch, "user/secret-[REDACTED_SECRET]");
+  assert.equal(report.packets[0].scm_target.intended_branch, "user/secret-[REDACTED_SECRET]");
   assert.deepEqual(report.packets[0].conflict_surface, ["src/safe-area", "src/conflict-[REDACTED_SECRET]", "src/gitlab-[REDACTED_SECRET]", "<absolute_path>/path.js"]);
   assert.doesNotMatch(result.text, /\/tmp\/synthetic-private/);
 });
@@ -1376,7 +1423,7 @@ test("intake public JSON and text reports redact secrets without hiding packet s
   const report = JSON.parse(jsonResult.text);
   assert.equal(report.packets.length, 1);
   assert.equal(report.runs.length, 1);
-  assert.equal(report.packets[0].github.intended_branch, "user/intake-[REDACTED_SECRET]");
+  assert.equal(report.packets[0].scm_target.intended_branch, "user/intake-[REDACTED_SECRET]");
   assert.deepEqual(report.packets[0].conflict_surface, ["src/intake-[REDACTED_SECRET]", "src/intake-gitlab-[REDACTED_SECRET]", "<absolute_path>/path.js"]);
   assert.doesNotMatch(jsonResult.text, /\/tmp\/synthetic-private/);
   assert.doesNotMatch(textResult.text, /\/tmp\/synthetic-private/);

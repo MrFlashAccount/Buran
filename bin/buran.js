@@ -15,8 +15,8 @@
  * - writes to process stdout/stderr;
  * - sets {@link process.exitCode} instead of forcing an immediate exit.
  */
-import { runBuranCli } from "../src/cli.js";
-import { sanitizeError } from "../src/observability.js";
+import { runBuranCli } from "../src/entrypoints/cli.js";
+import { sanitizeError } from "../src/observability/index.js";
 
 try {
   const result = await runBuranCli(process.argv.slice(2));

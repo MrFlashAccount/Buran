@@ -1,8 +1,9 @@
 export function reviewReadyPolicySnapshot({ runId = "run_policy_ready", state = "ready_for_manual_review" } = {}) {
   const verificationRef = { path: "artifacts/verification/pass.json", sha256: "sha-verification" };
   const reviewRef = { path: "artifacts/internal-review/pass.json", sha256: "sha-review" };
-  const projectionRef = { path: "artifacts/pr/projection-result.json", sha256: "sha-projection" };
-  const githubPr = {
+  const projectionRef = { path: "artifacts/scm-handoff/result.json", sha256: "sha-projection" };
+  const handoffTarget = {
+    provider: "github",
     number: 99,
     url: "https://github.com/example-owner/example-repo/pull/99",
     repo: "example-owner/example-repo",
@@ -81,25 +82,39 @@ export function reviewReadyPolicySnapshot({ runId = "run_policy_ready", state = 
         artifact_refs: [reviewRef],
       },
     },
-    github: {
+    scm_target: {
+      provider: "github",
       repo: "example-owner/example-repo",
       issue_number: 42,
       intended_branch: "buran/slice-current",
       base_branch: "buran/slice-previous",
-      pr: { ...githubPr },
     },
-    projections: {
-      github_pr: {
+    handoff_target: { ...handoffTarget },
+    projection_ledger: {
+      handoff_target: {
+        projection_name: "scm_handoff",
+        projection_target: "handoff_target",
         adapter: "github-pr-transport-adapter",
         mode: "github_transport",
         execution_epoch: 1,
+        recorded_from_state: "handoff_ready",
+        last_intent: {
+          artifact_ref: { path: "artifacts/scm-handoff/intent.json", sha256: "sha-projection-intent" },
+          recorded_at: "2026-05-16T13:56:30.000Z",
+          actor: "github-pr-transport-adapter",
+          idempotency_key: "handoff_target:policy:intent",
+          execution_epoch: 1,
+          recorded_from_state: "handoff_ready",
+          sequence: 9,
+        },
         last_result: {
           status: "created",
           execution_epoch: 1,
-          recorded_from_state: "pr_ready",
+          recorded_from_state: "handoff_ready",
           artifact_ref: projectionRef,
-          idempotency_key: "github.pr:policy:result",
-          github_pr: { ...githubPr },
+          idempotency_key: "handoff_target:policy:result",
+          intent_idempotency_key: "handoff_target:policy:intent",
+          handoff_target: { ...handoffTarget },
         },
       },
     },

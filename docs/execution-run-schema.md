@@ -1,12 +1,12 @@
-# ExecutionRun Schema Contract
+# ExecutionRun Registry Contract
 
-The local registry is the canonical state owner. Remote systems are projections derived from these files.
+The local registry is the canonical state owner. Remote systems are projections derived from registry state. Core code owns provider-neutral run, gate, artifact, lease, `work_item`, `scm_target`, `handoff_target`, and `projection_ledger` semantics; the concrete JSON/filesystem layout below is the current storage adapter contract, not a core dependency.
 
 Implementation ownership is explicit:
 
-- `src/execution-run-schema.js` owns current `execution-run.v2` snapshot, batch, lease-record builders/validators, typed artifact/gate event validators, artifact-ref traversal, and version rejection policy.
-- `src/registry-store.js` owns registry domain write ordering for run snapshots, events, artifacts, indexes, and run lease snapshot/event updates.
-- `src/registry.js` remains a compatibility export surface for existing callers; new domain mutations should route through the store seam.
+- `src/execution-runs/schema/index.js` owns current `execution-run.v2` snapshot, batch, lease-record builders/validators, typed artifact/gate event validators, artifact-ref traversal, and version rejection policy.
+- `src/integrations/storage/json-registry/store.js` owns registry domain write ordering for run snapshots, events, artifacts, indexes, and run lease snapshot/event updates.
+- Registry mutation callers route through the canonical `src/core/modules/execution-runs/ports/registry-repository.js` port and concrete registry store seam.
 
 ## Layout
 
@@ -31,9 +31,9 @@ registry/
         verification.json
         internal-review/
           <hash>.json
-        pr/
-          projection-intent-<hash>.json
-          projection-result-<hash>.json
+        scm-handoff/
+          intent-<hash>.json
+          result-<hash>.json
   indexes/
     active-runs.json
     workspace-leases.json
@@ -41,7 +41,7 @@ registry/
     <sha256(lock-key)>.json
 ```
 
-The exact root path is implementation-configurable, but this shape is the architectural contract.
+The exact root path is implementation-configurable. This shape is the current JSON storage adapter contract; core behavior depends on the registry port, not on filesystem paths.
 
 ## `batch.json`
 
@@ -55,7 +55,7 @@ Required fields:
 | `batch_id` | Stable id for the intake batch. |
 | `created_at` | Batch intake timestamp. |
 | `source` | Source kind and packet-list path/reference. |
-| `input_summary` | Packet count, task ids, and packet hashes. |
+| `input_summary` | Packet count, `work_item` ids, and packet hashes. |
 | `selected` | Count and run ids selected from the packet list. |
 | `accepted` | Count and run ids queued for later stages. |
 | `blocked` | Count and run ids blocked by packet insufficiency. |
@@ -71,19 +71,21 @@ Required fields:
 | --- | --- |
 | `schema_version` | Schema version string. Required in every persisted file/event. |
 | `run_id` | Stable unique run id. |
-| `task_id` | Local task identifier from the approved packet/batch. |
-| `github` | Repo, issue number, intended branch, and PR metadata when created or locally projected for handoff. |
+| `task_id` | Legacy-compatible local identifier for the approved `work_item` from the packet/batch. |
+| `work_item` | Provider-neutral approved work identity and summary. |
+| `scm_target` | Provider-neutral repo/review target, branch, and conflict identity. |
+| `github` | Current GitHub-profile persisted view of repo, issue number, intended branch, and PR metadata when created or locally projected for handoff. Adapter-specific; not core/domain language. |
 | `packet` | Packet hash, source path/reference, approval metadata, and sufficiency status. |
 | `state` | Current state from `docs/state-machine.md`. |
 | `last_sequence` | Last fully applied event sequence reflected by the snapshot. |
 | `execution.current_epoch` | Monotonic execution/gate epoch. New verification epochs reset gate heads. |
 | `workspace` | Workspace id/path and lease status. |
-| `locks` | Repo/issue/branch/conflict-surface lease keys. |
+| `locks` | Repo checkout/`scm_target`/branch/conflict-surface lease keys. |
 | `gates.verification` | Current verification gate head: status, epoch, attempt, refs, actor, and idempotency summary. |
 | `gates.internal_review` | Current internal-review gate head: status, epoch, attempt, refs, actor, and idempotency summary. |
 | `artifacts.recorded.by_path` | Immutable recorded-artifact heads keyed by relative artifact path, with epoch/attempt provenance. |
 | `artifacts` | Named artifact references and recorded-artifact content hashes. |
-| `projections` | Last known GitHub/TaskFlow/comment/project projection results, including local fake handoff metadata when no network write is allowed. |
+| `projection_ledger` | Provider-neutral projection intent/result ledger, including local fake handoff metadata when no network write is allowed. Provider-specific mirrors are adapter/profile persisted views only. |
 | `created_at` / `updated_at` | Timestamps. |
 | `terminal_reason` | Required for terminal blocked/failed states. |
 
@@ -105,7 +107,7 @@ Required fields:
 | `evidence` | Artifact refs, hashes, command summaries, or remote ids. |
 | `idempotency_key` | Required for projection/effect events. |
 
-Recovery only accepts documented event types. Current accepted types are `transition`, `artifact.recorded`, `gate.result_recorded`, `lock.lease_acquired`, `lock.lease_released`, `lock.lease_blocked`, `projection.intent_recorded`, `projection.result_recorded`, `recovery.lease_stale_reclaimed`, and `recovery.lease_record_removed`. Unknown event types are quarantined even when they include timestamp/actor/evidence fields.
+Recovery only accepts documented event types. Current accepted types are `transition`, `artifact.recorded`, `gate.result_recorded`, `lock.lease_acquired`, `lock.lease_released`, `lock.lease_blocked`, `projection.intent_recorded`, `projection.result_recorded`, `worker_task.created`, `worker_task.dispatch_recorded`, `worker_task.completion_received`, `worker_task.completion_decided`, `worker_task.overdue_recorded`, `worker_task.quarantined`, `recovery.lease_stale_reclaimed`, and `recovery.lease_record_removed`. Unknown event types are quarantined even when they include timestamp/actor/evidence fields.
 
 `artifact.recorded` evidence is typed and must include: safe relative `path`, `sha256`, `bytes`, `gate_name`, `execution_epoch`, `gate_attempt`, `recorded_from_state`, `recorded_at`, `actor`, and `provenance`. Supported artifact stages include `workspace_preparation`, `implementation_dispatch`, `fix_attempt`, `verification`, and `internal_review`; `fix_attempt` artifacts are valid only from `fix_loop` and use current-epoch provenance.
 
@@ -121,15 +123,15 @@ Required lease fields:
 | --- | --- |
 | `schema_version` | Schema version string. |
 | `lease_id` | Lease id shared by all surface records for one run acquisition. |
-| `run_id` / `task_id` | Owning run/task. |
+| `run_id` / `task_id` | Owning run and legacy-compatible `work_item` id. |
 | `status` | `acquired` for active lease records. |
-| `surface` | `workspace`, `repo_checkout`, `issue`, `branch`, or `conflict_surface`. |
+| `surface` | `workspace`, `repo_checkout`, `scm_target`, `branch`, or `conflict_surface` (`issue` remains a current GitHub-profile persisted surface). |
 | `key` / `value` | Canonical lock key and human-readable value. |
 | `workspace_id` / `workspace_path` | Reserved local workspace identity/path; no checkout is created by this slice. |
-| `repo` / `issue_number` / `branch` / `conflict_surface` | Conflict metadata. |
+| `repo` / `scm_target` / `branch` / `conflict_surface` | Conflict metadata. `issue_number` is a current GitHub-profile persisted field. |
 | `acquired_at` / `expires_at` / `ttl_ms` | TTL metadata used by local recovery. |
 
-Conflict detection is conservative across workspace id, repo checkout path, issue, branch, and declared conflict surfaces. `repo_checkout` is scoped to the reserved workspace path so 3–4 parallel workspaces can hold separate checkouts for the same repo when issue/branch/conflict-surface keys do not overlap.
+Conflict detection is conservative across workspace id, repo checkout path, `scm_target`, branch, and declared conflict surfaces. `repo_checkout` is scoped to the reserved workspace path so 3–4 parallel workspaces can hold separate checkouts for the same repo when `scm_target`/branch/conflict-surface keys do not overlap.
 
 ## Artifacts
 
@@ -141,15 +143,15 @@ Minimum expected artifacts:
 
 - `packet.md` — normalized approved packet copy or pointer with hash.
 - `implementation-log.md` — compact implementation summary and touched files.
-- `artifacts/implementation-dispatch/intent-<hash>.json` — immutable dispatch intent recorded before adapter execution. It includes `schema_version: implementation-dispatch-intent.v1`, `dispatch_status: dispatch_requested`, the run/task ids, repo/issue/branch summary, workspace id, current execution epoch/state, packet artifact ref, workspace-preparation artifact ref, and `dispatch_intent_id` derived from the canonical intent payload.
-- `artifacts/implementation-dispatch/result-<hash>.json` — immutable sanitized dispatch result recorded after adapter execution or reused on resume. Shape: `schema_version: implementation-dispatch-result.v1`, adapter/run/task ids, `dispatch_intent_id`, intent/packet/workspace-preparation artifact refs, timestamps, `status` (`COMPLETED`, `BLOCKED`, or `FAILED`), generic safe `summary`, `implementation_epoch`, sanitized `evidence`, optional sanitized `problem`, and actor. `COMPLETED` is accepted only when evidence includes changed-file evidence plus a durable implementation/result reference such as `implementation_result_id`, `commit_sha`, `patch_sha`, or implementation artifact ref(s). Raw prompt/stdout/stderr/output/transcript/session/content-like blobs are not valid evidence and must not be persisted through summary/problem/report fields.
-- `artifacts/fix-loop/intent-<attempt>-<hash>.json` — immutable fix-attempt dispatch intent recorded from `fix_loop` before implementation-harness dispatch. It uses `schema_version: fix-attempt-intent.v1` and records run/task ids, `fix_attempt`, `max_fix_attempts`, current state/epoch, packet artifact ref, workspace id, failed verification/internal-review gate heads, `scope_boundary: approved_packet_artifact`, `dispatch_boundary: implementation-harness`, and the gates that must rerun.
+- `artifacts/implementation-dispatch/intent-<hash>.json` — immutable dispatch intent recorded before adapter execution. It includes `schema_version: implementation-dispatch-intent.v1`, `dispatch_status: dispatch_requested`, the run/`work_item` ids, `scm_target`/branch summary, workspace id, current execution epoch/state, packet artifact ref, workspace-preparation artifact ref, and `dispatch_intent_id` derived from the canonical intent payload.
+- `artifacts/implementation-dispatch/result-<hash>.json` — immutable sanitized dispatch result recorded after adapter execution or reused on resume. Shape: `schema_version: implementation-dispatch-result.v1`, adapter/run/`work_item` ids, `dispatch_intent_id`, intent/packet/workspace-preparation artifact refs, timestamps, `status` (`COMPLETED`, `BLOCKED`, or `FAILED`), generic safe `summary`, `implementation_epoch`, sanitized `evidence`, optional sanitized `problem`, and actor. `COMPLETED` is accepted only when evidence includes changed-file evidence plus a durable implementation/result reference such as `implementation_result_id`, `commit_sha`, `patch_sha`, or implementation artifact ref(s). Raw prompt/stdout/stderr/output/transcript/session/content-like blobs are not valid evidence and must not be persisted through summary/problem/report fields.
+- `artifacts/fix-loop/intent-<attempt>-<hash>.json` — immutable fix-attempt dispatch intent recorded from `fix_loop` before implementation-harness dispatch. It uses `schema_version: fix-attempt-intent.v1` and records run/`work_item` ids, `fix_attempt`, `max_fix_attempts`, current state/epoch, packet artifact ref, workspace id, failed verification/internal-review gate heads, `scope_boundary: approved_packet_artifact`, `dispatch_boundary: implementation-harness`, and the gates that must rerun.
 - `artifacts/fix-loop/result-<hash>.json` — immutable sanitized fix-attempt result recorded after implementation-harness dispatch or reused on resume. It uses the same `implementation-dispatch-result.v1` result schema as the running-stage dispatch, but its `dispatch_intent_artifact` points at the fix-loop intent path and its artifact-ledger entry uses `gate_name: fix_attempt`, `recorded_from_state: fix_loop`, and provenance `kind: fix-attempt-result` with the attempt number and intent artifact ref.
 - `verification.json` — verification commands/checks, outcomes, evidence, and the embedded `verification-policy.v1` artifact field.
 - `internal-review/<hash>.json` — immutable local `internal-review-report.v1` findings, sanitized packet review context, sanitized independent reviewer result when supplied, and final review status. The report records `packet_review.verdict_artifact_path` from the approved packet's `review.verdict_artifact_path` and, when a verdict artifact is accepted, `reviewer_result.artifact_ref` with the immutable verdict path and hash.
 - `internal-review/<verdict-name>.json` or another safe path under `artifacts/` referenced by `review.verdict_artifact_path` — independent reviewer verdict input with `schema_version: internal-review-verdict.v1`. The verdict JSON object must contain `status` (`PASS`, `FAIL`, or `BLOCKED`) and may include `reviewer`/`actor`, `summary`, `findings[]`, `evidence[]`, and `problem`. The adapter sanitizes this payload before copying it into the internal-review report; private prompt, transcript, stdout/stderr, output, log, and session-like fields are not retained in public reports or immutable review reports. Absolute paths, paths escaping the run directory, paths outside `artifacts/`, invalid JSON, unsupported statuses, or another `schema_version` block the gate instead of producing a PASS/FAIL.
-- `pr/projection-intent-<hash>.json` — immutable local PR handoff intent derived from the approved local contract.
-- `pr/projection-result-<hash>.json` — immutable local PR handoff result mirrored into `github.pr` / `projections.github_pr` only after a semantically valid successful projection record.
+- `artifacts/scm-handoff/intent-<hash>.json` — immutable local `handoff_target` projection intent derived from the approved local contract.
+- `artifacts/scm-handoff/result-<hash>.json` — immutable local `handoff_target` projection result mirrored into provider projection ledger fields only after a semantically valid successful projection record. Provider-specific mirrors are adapter/profile views, not core registry authority.
 
 Implementation-dispatch `problem` uses a small safe shape: `code` plus generic `message`; extra raw adapter fields are intentionally not copied into immutable artifacts or public runner reports. `BLOCKED` keeps the run in `running`; `FAILED` transitions `running -> failed_execution`; only `COMPLETED` with durable evidence transitions to `verification`.
 
@@ -165,7 +167,7 @@ When implementation dispatch blocks or fails, the public runner report records a
 
 Verification and review command records describe allowed adapters/gates from the approved packet and Buran policy. They must not become a general-purpose arbitrary script execution surface.
 
-Internal review is completed by durable independent reviewer evidence, not by packet prose. The packet may provide `review.verdict_artifact_path` (or the legacy-compatible camelCase/result aliases accepted by the adapter) to identify an `internal-review-verdict.v1` artifact relative to the run directory and stored under `artifacts/`. If present and valid, the verdict artifact status becomes the internal-review gate status: `PASS` advances toward `pr_ready`, `FAIL` enters `fix_loop`, and `BLOCKED` enters `blocked_needs_human`. If no verdict artifact path is supplied, or the artifact is missing, corrupt, outside `artifacts/`, or schema/status-incompatible, the internal-review gate records `BLOCKED` with a structured problem such as `independent_internal_review_required`, `review_artifact_missing`, `review_artifact_invalid`, or `review_artifact_path_invalid`.
+Internal review is completed by durable independent reviewer evidence, not by packet prose. The packet may provide `review.verdict_artifact_path` (or the legacy-compatible camelCase/result aliases accepted by the adapter) to identify an `internal-review-verdict.v1` artifact relative to the run directory and stored under `artifacts/`. If present and valid, the verdict artifact status becomes the internal-review gate status: `PASS` advances toward `handoff_ready`, `FAIL` enters `fix_loop`, and `BLOCKED` enters `blocked_needs_human`. If no verdict artifact path is supplied, or the artifact is missing, corrupt, outside `artifacts/`, or schema/status-incompatible, the internal-review gate records `BLOCKED` with a structured problem such as `independent_internal_review_required`, `review_artifact_missing`, `review_artifact_invalid`, or `review_artifact_path_invalid`.
 
 Recorded internal-review results are reusable only with intact independent verdict evidence. On resume, the report must still be `internal-review-report.v1`, the stored gate status must match `reviewer_result.status`, and `reviewer_result.artifact_ref` must point to an existing `internal-review-verdict.v1` artifact whose hash and status still match. Legacy PASS records without verdict artifact evidence, missing verdict artifacts, hash mismatches, invalid verdict JSON, or schema/status mismatches are treated as stale recorded results and do not advance the run.
 
@@ -182,7 +184,7 @@ Recovery and consumers must treat `policy` as the durable reference for how pack
 
 ## Registry store ordering
 
-`src/registry-store.js` centralizes multi-file mutation order. Current `execution-run.v2` ordering is:
+`src/integrations/storage/json-registry/store.js` centralizes multi-file mutation order. Current `execution-run.v2` ordering is:
 
 - Intake: write packet artifact, initialize event journal, append `packet_received`, write `run.json`, commit sufficiency transition, then rebuild indexes.
 - Transition: append the transition event, write the matching snapshot, release terminal lease records when needed, then rebuild indexes for terminal transitions.
@@ -193,7 +195,7 @@ Recovery and consumers must treat `policy` as the durable reference for how pack
 
 ## Atomic writes
 
-- Low-level atomic helpers live behind the registry store/compatibility seam.
+- Low-level atomic helpers live behind the registry store seam.
 - Write snapshots/artifacts to a temporary file in the same directory.
 - Flush file contents where practical.
 - Rename temp file into place.
@@ -214,7 +216,7 @@ Recovery order:
 7. Rebuild active-run and workspace-lease indexes.
 8. Reclaim expired lease records by marking the owning run lease as `stale_recovered`, appending `recovery.lease_stale_reclaimed`, deleting local lease records, and reporting the finding. Recovery only reclaims when TTL has elapsed; it does not guess active ownership.
 9. Remove terminal/orphan lease records from the local lease-record directory.
-10. Semantically replay `projection.intent_recorded` / `projection.result_recorded` so `github.pr` and `projections.github_pr` are rebuilt from local event truth before `ready_for_manual_review` is trusted.
+10. Semantically replay `projection.intent_recorded` / `projection.result_recorded` so provider projection ledger entries and any adapter-owned mirrors are rebuilt from local event truth before `ready_for_manual_review` is trusted.
 11. Quarantine corrupt, malformed, incomplete, unknown-event, missing-artifact, hash-mismatch, conflicting-idempotency, stale/wrong-state gate, or other ambiguous run folders instead of guessing.
 
 Slice 2 quarantine layout:
@@ -235,8 +237,27 @@ The local recovery command writes `indexes/recovery-report.json`, rebuilds index
 
 - Current version is exactly `execution-run.v2`.
 - Readers reject unsupported schema versions explicitly.
-- Persisted shape changes require synchronized updates to `src/execution-run-schema.js`, this document, and focused tests.
+- Persisted shape changes require synchronized updates to `src/execution-runs/schema/index.js`, this document, and focused tests.
 - Every schema change increments `schema_version`.
 - Migrations must be explicit, idempotent, and recorded as recovery/migration events.
 - No implementation may rely on undocumented fields.
 - Registry and recovery remain local-only and do not emit external telemetry.
+
+## Worker task fields and events
+
+`run.json` includes `worker_tasks.head` for the current implementation/fix worker and `worker_tasks.history` for immutable lifecycle snapshots. The lifecycle is persisted through typed events: `worker_task.created`, `worker_task.dispatch_recorded`, `worker_task.completion_received`, `worker_task.completion_decided`, `worker_task.overdue_recorded`, and `worker_task.quarantined`.
+
+`WorkerTask` identity is derived from `run_id`, `task_id`, purpose, role, epoch, attempt, and authority. Every task head/history entry and worker-task event payload carries an explicit `role`. Current purpose-to-role mapping is `implementation_dispatch` -> `implementer` and `fix_attempt` -> `fixer`; `reviewer` is reserved for future review-worker behavior and is schema-valid but has no runner behavior in this slice. `WorkerCompletion` stores only sanitized status, role, evidence, and artifact refs. `CompletionDecision` is registry/core-owned and may accept, defer, mark late/duplicate/conflict/unknown/unauthorized, or quarantine. Recovery replays these typed events and quarantines mismatched task ids, conflicting idempotency payloads, or completion events without a current task head.
+
+## Worker task registry slice
+
+`run.json.worker_tasks` stores durable delegated-work truth for the current `ExecutionRun`:
+
+| Field | Meaning |
+| --- | --- |
+| `head` | Current `WorkerTask` head, or `null` when no worker task is known. |
+| `history` | Ordered task-head history from worker task events. |
+
+Worker task events are first-class non-transition events in `events.jsonl`: `worker_task.created`, `worker_task.dispatch_recorded`, `worker_task.completion_received`, `worker_task.completion_decided`, `worker_task.overdue_recorded`, and `worker_task.quarantined`. Payloads carry task identity, role, epoch, attempt, authority, safe artifact refs, status/decision, completion status, and idempotency keys. Raw worker content is not part of the public schema; summaries and reports use sanitized refs only.
+
+A completion cannot move the outer run until a durable `worker_task.completion_decided` event records an `accepted` `CompletionDecision`. Issue #16 terminology maps to durable events as follows: completed/failed = `worker_task.completion_decided` with `decision=accepted` plus `completion_status=COMPLETED|FAILED`; timed-out = `worker_task.overdue_recorded`; late/conflict = `worker_task.completion_decided` with `decision=late|conflict`. Duplicate idempotent events are `noop`; conflicting idempotency payloads fail instead of repairing into accepted truth.

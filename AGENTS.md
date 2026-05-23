@@ -45,13 +45,13 @@ Use the repo scripts before claiming success:
 
 Use `docs/module-map.md` for the detailed file map. Quick landmarks:
 
-- `src/buran.js` and `src/cli.js` — validate/intake/CLI flow
-- `src/runner.js` — local mission runner orchestration
-- `src/registry-store.js` and `src/execution-run-schema.js` — canonical persistence contract
-- `src/locks.js` — lease/conflict logic
-- `src/verification-adapter.js` and `src/internal-review-adapter.js` — gate adapters
-- `src/pr-projection-adapter.js` and `src/github-pr-transport-adapter.js` — PR handoff/projection logic
-- `src/recovery.js` — replay, quarantine, and rebuild flow
+- `src/application/commands.js` and `src/entrypoints/cli.js` — validate/intake/CLI flow
+- `src/application/run-local-mission.js` — local mission runner orchestration
+- `src/integrations/storage/json-registry/store.js` and `src/execution-runs/schema/index.js` — canonical persistence contract
+- `src/integrations/worktree/filesystem/locks.js` — lease/conflict logic
+- `src/gates/verification-adapter.js` and `src/gates/internal-review-adapter.js` — gate adapters
+- `src/workflow-boundary/pr-scm-projection/local-journal-adapter.js` and `src/integrations/scm/github/pr-transport-adapter.js` — PR handoff/projection logic
+- `src/execution-runs/recovery/index.js` — replay, quarantine, and rebuild flow
 
 ## Working rules
 

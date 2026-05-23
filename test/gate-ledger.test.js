@@ -4,10 +4,14 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { SCHEMA_VERSION } from "../src/constants.js";
-import { buildLocalPrProjection } from "../src/pr-projection-adapter.js";
-import { acquireWorkspaceLease } from "../src/locks.js";
-import { recoverRegistry } from "../src/recovery.js";
+import { SCHEMA_VERSION } from "../src/core/modules/execution-runs/constants.js";
+import { buildLocalScmHandoffProjection } from "../src/integrations/scm/local-journal/local-journal-scm-handoff-adapter.js";
+import { acquireWorkspaceLease as acquireWorkspaceLeaseWithPorts } from "../src/integrations/worktree/filesystem/locks.js";
+import { recoverRegistry as recoverRegistryCore } from "../src/execution-runs/recovery/index.js";
+import { createJsonRegistryRepository } from "../src/integrations/storage/json-registry/repository.js";
+import { createJsonLeaseRecordStore } from "../src/integrations/storage/json-registry/lease-record-store.js";
+import { createJsonRegistryRecoveryStore } from "../src/integrations/storage/json-registry/recovery-store.js";
+import { createFilesystemWorkspaceLeaseService } from "../src/integrations/worktree/filesystem/locks.js";
 import {
   createRunFromPacketReport,
   getRunPaths,
@@ -18,12 +22,19 @@ import {
   recordProjectionIntent,
   recordProjectionResult,
   transitionRun,
-} from "../src/registry-store.js";
+} from "../src/integrations/storage/json-registry/store.js";
 
 /**
  * Ledger-focused tests for artifact, gate, and projection recording. The helpers
  * construct runs at specific workflow states so each assertion can stay narrow.
  */
+
+const registryRepository = createJsonRegistryRepository();
+const leaseRecordStore = createJsonLeaseRecordStore();
+const workspaceLeaseService = createFilesystemWorkspaceLeaseService({ registryRepository, leaseRecordStore });
+const registryRecoveryStore = createJsonRegistryRecoveryStore();
+const acquireWorkspaceLease = (registryRoot, runId, options = {}) => acquireWorkspaceLeaseWithPorts(registryRoot, runId, { ...options, registryRepository, leaseRecordStore });
+const recoverRegistry = (registryRoot, options = {}) => recoverRegistryCore(registryRoot, { ...options, registryRepository: options.registryRepository || registryRepository, workspaceLeaseService: options.workspaceLeaseService || workspaceLeaseService, registryRecoveryStore: options.registryRecoveryStore || registryRecoveryStore });
 
 /** Creates a throwaway registry root for ledger persistence tests. */
 async function makeTempDir() {
@@ -94,8 +105,8 @@ async function recordVerificationPass(registryRoot, runId) {
   return { artifact, result, resultPayload };
 }
 
-/** Seeds both verification and internal review PASS results, ending at pr_ready. */
-async function preparePrReadyRun(registryRoot, { runId = "run_gate_pr_ready" } = {}) {
+/** Seeds both verification and internal review PASS results, ending at handoff_ready. */
+async function prepareHandoffReadyRun(registryRoot, { runId = "run_gate_handoff_ready" } = {}) {
   const run = await prepareVerificationRun(registryRoot, { runId });
   await recordVerificationPass(registryRoot, run.run_id);
   await transitionRun(registryRoot, run.run_id, {
@@ -129,7 +140,7 @@ async function preparePrReadyRun(registryRoot, { runId = "run_gate_pr_ready" } =
   });
 
   const ready = await transitionRun(registryRoot, run.run_id, {
-    toState: "pr_ready",
+    toState: "handoff_ready",
     actor: "gate-test",
     evidence: { reason: "internal review passed" },
     clock: () => new Date("2026-05-16T14:00:00.000Z"),
@@ -217,7 +228,7 @@ test("gate result recording is idempotent and transition guards require fresh cu
   assert.equal(transitioned.run.gates.verification.current_attempt, 1);
 });
 
-test("internal review gate results open pr_ready on PASS and blocked_needs_human on BLOCKED", async () => {
+test("internal review gate results open handoff_ready on PASS and blocked_needs_human on BLOCKED", async () => {
   const tempDir = await makeTempDir();
   const registryRoot = path.join(tempDir, "registry");
   const run = await prepareVerificationRun(registryRoot, { runId: "run_gate_internal_review_paths" });
@@ -254,12 +265,12 @@ test("internal review gate results open pr_ready on PASS and blocked_needs_human
   });
 
   const ready = await transitionRun(registryRoot, run.run_id, {
-    toState: "pr_ready",
+    toState: "handoff_ready",
     actor: "gate-test",
     evidence: { reason: "internal review passed" },
     clock: () => new Date("2026-05-16T14:00:00.000Z"),
   });
-  assert.equal(ready.run.state, "pr_ready");
+  assert.equal(ready.run.state, "handoff_ready");
   assert.equal(ready.run.gates.internal_review.status, "PASS");
 
   const blockedRegistryRoot = path.join(tempDir, "registry-blocked");
@@ -304,13 +315,13 @@ test("internal review gate results open pr_ready on PASS and blocked_needs_human
   assert.equal(blockedNeedsHuman.run.gates.internal_review.status, "BLOCKED");
 });
 
-test("projection result recording rejects semantically invalid successful PR handoff payloads", async () => {
+test("projection result recording rejects semantically invalid successful SCM handoff payloads", async () => {
   const tempDir = await makeTempDir();
   const registryRoot = path.join(tempDir, "registry");
-  const runId = await preparePrReadyRun(registryRoot, { runId: "run_gate_projection_validation" });
+  const runId = await prepareHandoffReadyRun(registryRoot, { runId: "run_gate_projection_validation" });
   const paths = getRunPaths(registryRoot, runId);
   const snapshot = await readRunSnapshot(paths.runPath);
-  const projection = buildLocalPrProjection(snapshot, {
+  const projection = buildLocalScmHandoffProjection(snapshot, {
     clock: () => new Date("2026-05-16T14:01:00.000Z"),
   });
 
@@ -320,7 +331,7 @@ test("projection result recording rejects semantically invalid successful PR han
     adapter: projection.adapter,
     mode: projection.mode,
     execution_epoch: projection.executionEpoch,
-    recorded_from_state: "pr_ready",
+    recorded_from_state: "handoff_ready",
     idempotency_key: projection.intentIdempotencyKey,
     artifactPath: projection.intentArtifactPath,
     content: projection.intentArtifactContent,
@@ -335,17 +346,17 @@ test("projection result recording rejects semantically invalid successful PR han
       adapter: projection.adapter,
       mode: projection.mode,
       execution_epoch: projection.executionEpoch,
-      recorded_from_state: "pr_ready",
+      recorded_from_state: "handoff_ready",
       idempotency_key: projection.resultIdempotencyKey,
       intent_idempotency_key: projection.intentIdempotencyKey,
       status: "projected_local",
-      github_pr: {},
+      handoff_target: {},
       artifactPath: projection.resultArtifactPath,
       content: projection.resultArtifactContent,
       actor: projection.actor,
       recorded_at: projection.recordedAt,
     }),
-    /github_pr\.(number|url)|github_pr\.repo|github_pr\.head_branch|github_pr\.base_branch/,
+    /handoff_target\.(number|url)|handoff_target\.repo|handoff_target\.head_branch|handoff_target\.base_branch/,
   );
 
   await assert.rejects(
@@ -355,12 +366,12 @@ test("projection result recording rejects semantically invalid successful PR han
       adapter: projection.adapter,
       mode: projection.mode,
       execution_epoch: projection.executionEpoch,
-      recorded_from_state: "pr_ready",
+      recorded_from_state: "handoff_ready",
       idempotency_key: projection.resultIdempotencyKey,
       intent_idempotency_key: projection.intentIdempotencyKey,
       status: "projected_local",
-      github_pr: {
-        ...projection.githubPr,
+      handoff_target: {
+        ...projection.handoffTarget,
         url: "",
       },
       artifactPath: projection.resultArtifactPath,
@@ -368,7 +379,7 @@ test("projection result recording rejects semantically invalid successful PR han
       actor: projection.actor,
       recorded_at: projection.recordedAt,
     }),
-    /github_pr\.url/,
+    /handoff_target\.url/,
   );
 
   const events = await readEventsFile(paths.eventsPath);
@@ -480,7 +491,7 @@ test("artifact retry repairs stale snapshot from journal without duplicating the
   assert.deepEqual(repairedSnapshot.artifacts.recorded.by_path[recorded.artifact_ref.path], recorded.run.artifacts.recorded.by_path[recorded.artifact_ref.path]);
   assert.equal(repairedSnapshot.last_sequence, recorded.event.sequence);
 
-  const recovery = await recoverRegistry(registryRoot, { clock: () => new Date("2026-05-16T14:05:00.000Z") });
+  const recovery = await recoverRegistry(registryRoot, { registryRepository, clock: () => new Date("2026-05-16T14:05:00.000Z") });
   assert.equal(recovery.summary.quarantined_runs, 0);
 });
 
@@ -510,7 +521,7 @@ test("recovery quarantines conflicting gate-result idempotency payloads", async 
     idempotency_key: resultPayload.idempotency_key,
   })}\n`, "utf8");
 
-  const recovery = await recoverRegistry(registryRoot, { clock: () => new Date("2026-05-16T14:05:00.000Z") });
+  const recovery = await recoverRegistry(registryRoot, { registryRepository, clock: () => new Date("2026-05-16T14:05:00.000Z") });
   assert.equal(recovery.summary.quarantined_runs, 1);
   assert.equal(recovery.quarantined[0].reason, "invalid_event_replay");
   const quarantineReport = JSON.parse(await fs.readFile(recovery.quarantined[0].report_path, "utf8"));
