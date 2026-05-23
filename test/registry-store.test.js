@@ -181,7 +181,16 @@ test("late completion observation does not overwrite current active worker task"
   assert.equal(late.run.worker_tasks.head.status, "dispatched");
   assert.equal(late.event.evidence.role, "implementer");
   assert.equal(secondHead.role, "fixer");
-  assert.ok(late.run.worker_tasks.history.some((entry) => entry.worker_task_id === secondHead.worker_task_id && entry.status === "late" && entry.role === "fixer"));
+  assert.ok(late.run.worker_tasks.history.some((entry) => entry.worker_task_id === firstHead.worker_task_id && entry.status === "late" && entry.role === "implementer"));
+  assert.equal(late.run.worker_tasks.history.some((entry) => entry.worker_task_id === secondHead.worker_task_id && entry.status === "late"), false);
+
+  const recovery = await recoverRegistry(registryRoot, { registryRepository, clock: () => new Date("2026-05-16T13:57:00.000Z") });
+  assert.equal(recovery.summary.quarantined_runs, 0);
+  const recoveredSnapshot = await readRunSnapshot(getRunPaths(registryRoot, created.run.run_id).runPath);
+  assert.equal(recoveredSnapshot.worker_tasks.head.worker_task_id, secondHead.worker_task_id);
+  assert.equal(recoveredSnapshot.worker_tasks.head.status, "dispatched");
+  assert.ok(recoveredSnapshot.worker_tasks.history.some((entry) => entry.worker_task_id === firstHead.worker_task_id && entry.status === "late" && entry.role === "implementer"));
+  assert.equal(recoveredSnapshot.worker_tasks.history.some((entry) => entry.worker_task_id === secondHead.worker_task_id && entry.status === "late"), false);
 });
 
 test("conflict and unauthorized completions do not overwrite accepted worker task truth", async () => {

@@ -255,19 +255,50 @@ function appendDistinctWorkerTaskHistory(snapshot, head) {
   return head && !history.some((entry) => canonicalJson(entry) === canonicalJson(head)) ? [...history, head] : history;
 }
 
-function observedCompletionHead(currentHead, completion, decision = "late") {
-  return currentHead ? {
-    ...currentHead,
+function workerTaskSlice(snapshot) {
+  return snapshot.worker_tasks || { head: null, history: [] };
+}
+
+function nonEmptyString(value) {
+  return typeof value === "string" && value.length > 0 ? value : "";
+}
+
+function observedCompletionHistoryEntry(snapshot, completion, decision = "late") {
+  const slice = workerTaskSlice(snapshot);
+  const history = Array.isArray(slice.history) ? slice.history : [];
+  const currentHead = isRecord(slice.head) ? slice.head : null;
+  const completionTaskId = nonEmptyString(completion.worker_task_id);
+  const historicalHead = completionTaskId
+    ? [...history].reverse().find((entry) => entry.worker_task_id === completionTaskId)
+    : null;
+  const sameCurrentHead = completionTaskId && currentHead?.worker_task_id === completionTaskId ? currentHead : null;
+  const fallbackHead = historicalHead || sameCurrentHead || currentHead;
+  if (!fallbackHead) return null;
+  const observedAt = completion.received_at || fallbackHead?.updated_at || fallbackHead?.created_at;
+  return {
+    worker_task_id: completionTaskId || fallbackHead.worker_task_id,
+    run_id: nonEmptyString(completion.run_id) || fallbackHead.run_id,
+    task_id: nonEmptyString(completion.task_id) || fallbackHead.task_id,
+    purpose: nonEmptyString(completion.purpose) || fallbackHead.purpose,
+    role: nonEmptyString(completion.role) || fallbackHead.role,
+    epoch: Number.isSafeInteger(completion.epoch) ? completion.epoch : fallbackHead.epoch,
+    attempt: Number.isSafeInteger(completion.attempt) ? completion.attempt : fallbackHead.attempt,
+    authority: nonEmptyString(completion.authority) || fallbackHead.authority,
     status: decision,
+    deadline_at: fallbackHead.deadline_at ?? null,
+    created_at: fallbackHead.created_at || observedAt,
+    updated_at: observedAt,
+    dispatch: fallbackHead.dispatch || null,
     completion,
     decision: {
       decision,
       reason: `observed ${decision} worker completion`,
-      decided_at: completion.received_at,
+      decided_at: observedAt,
       idempotency_key: completion.idempotency_key,
     },
-    updated_at: completion.received_at,
-  } : null;
+    overdue_recorded_at: fallbackHead.overdue_recorded_at || "",
+    quarantine: fallbackHead.quarantine || null,
+  };
 }
 
 function mergeWorkerTaskSnapshot(snapshot, type, payload, sequence) {
@@ -293,7 +324,7 @@ function mergeWorkerTaskSnapshot(snapshot, type, payload, sequence) {
       head = { ...head, status: "completion_received", completion, updated_at: completion.received_at };
       history = appendWorkerTaskHistory(snapshot, head);
     } else {
-      history = appendWorkerTaskHistory(snapshot, observedCompletionHead(head, completion, evaluated.decision));
+      history = appendWorkerTaskHistory(snapshot, observedCompletionHistoryEntry(snapshot, completion, evaluated.decision));
     }
   } else if (type === "worker_task.completion_decided") {
     if (!head) throw new Error("worker_task.completion_decided requires prior worker task head");

@@ -304,4 +304,3 @@ export function buildRecordedScmHandoff(snapshot, {
     durableContract: true,
   });
 }
-
