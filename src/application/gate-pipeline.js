@@ -11,6 +11,7 @@ import { readRecordedArtifactJson, resolveRecordedArtifactPath } from "./recorde
 
 async function recordReviewerAggregationWorker(registry, registryRoot, runId, current, { artifactRef, gateStatus, actor, clock } = {}) {
   if (!artifactRef?.path || !artifactRef?.sha256) return current;
+  const completionStatus = gateStatus === "PASS" ? "COMPLETED" : "BLOCKED";
   const recordedAt = clock().toISOString();
   const epoch = current.execution?.current_epoch || 0;
   const attempt = current.gates?.internal_review?.current_attempt || 1;
@@ -45,9 +46,9 @@ async function recordReviewerAggregationWorker(registry, registryRoot, runId, cu
     epoch,
     attempt,
     authority,
-    status: gateStatus,
+    status: completionStatus,
     completion_ref: artifactRef,
-    evidence: { status: gateStatus, artifact_ref: artifactRef },
+    evidence: { status: completionStatus, artifact_ref: artifactRef },
     received_at: clock().toISOString(),
     actor: authority,
     idempotency_key: completionKey,
@@ -385,14 +386,6 @@ export async function runVerificationStage({ registryRoot, runId, current, previ
       detail: "Existing current-epoch verification gate result was reused without re-executing verification.",
     }));
 
-    current = await recordReviewerAggregationWorker(registry, registryRoot, runId, current, {
-      artifactRef: artifactIntegrity.artifact_refs[0] || null,
-      gateStatus: current.gates.internal_review.status,
-      actor,
-      clock,
-      resumed: true,
-    });
-
     const transitioned = await registry.transitionRun(registryRoot, runId, {
       toState: targetState,
       actor,
@@ -654,6 +647,13 @@ export async function runInternalReviewStage({ registryRoot, runId, current, pre
       toState: "internal_review",
       detail: "Existing current-epoch internal review gate result was reused with independent reviewer verdict artifact evidence.",
     }));
+
+    current = await recordReviewerAggregationWorker(registry, registryRoot, runId, current, {
+      artifactRef: artifactIntegrity.artifact_refs[0] || null,
+      gateStatus: current.gates.internal_review.status,
+      actor,
+      clock,
+    });
 
     const transitioned = await registry.transitionRun(registryRoot, runId, {
       toState: targetState,
