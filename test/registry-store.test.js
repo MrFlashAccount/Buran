@@ -179,7 +179,9 @@ test("late completion observation does not overwrite current active worker task"
 
   assert.equal(late.run.worker_tasks.head.worker_task_id, secondHead.worker_task_id);
   assert.equal(late.run.worker_tasks.head.status, "dispatched");
-  assert.ok(late.run.worker_tasks.history.some((entry) => entry.worker_task_id === secondHead.worker_task_id && entry.status === "late"));
+  assert.equal(late.event.evidence.role, "implementer");
+  assert.equal(secondHead.role, "fixer");
+  assert.ok(late.run.worker_tasks.history.some((entry) => entry.worker_task_id === secondHead.worker_task_id && entry.status === "late" && entry.role === "fixer"));
 });
 
 test("conflict and unauthorized completions do not overwrite accepted worker task truth", async () => {
@@ -203,7 +205,12 @@ test("conflict and unauthorized completions do not overwrite accepted worker tas
     decided_at: "2026-05-16T13:54:01.000Z",
     idempotency_key: `${head.worker_task_id}:accepted:decision`,
   });
+  assert.equal(accepted.event.type, "worker_task.completion_decided");
+  assert.equal(accepted.event.evidence.decision, "accepted");
+  assert.equal(accepted.event.evidence.completion_status, "COMPLETED");
+  assert.equal(accepted.event.evidence.role, "implementer");
   assert.equal(accepted.run.worker_tasks.head.status, "completed");
+  assert.equal(accepted.run.worker_tasks.head.role, "implementer");
   assert.equal(accepted.run.worker_tasks.head.completion.idempotency_key, acceptedCompletion.idempotency_key);
 
   const conflictCompletion = { ...acceptedCompletion, idempotency_key: `${head.worker_task_id}:conflict`, received_at: "2026-05-16T13:55:00.000Z" };
@@ -214,6 +221,9 @@ test("conflict and unauthorized completions do not overwrite accepted worker tas
     idempotency_key: `${head.worker_task_id}:conflict:decision`,
   });
   assert.equal(conflictObserved.run.worker_tasks.head.completion.idempotency_key, acceptedCompletion.idempotency_key);
+  assert.equal(conflictDecided.event.type, "worker_task.completion_decided");
+  assert.equal(conflictDecided.event.evidence.decision, "conflict");
+  assert.equal(conflictDecided.event.evidence.completion_status, "COMPLETED");
   assert.equal(conflictDecided.run.worker_tasks.head.status, "completed");
   assert.equal(conflictDecided.run.worker_tasks.head.completion.idempotency_key, acceptedCompletion.idempotency_key);
 
@@ -450,6 +460,8 @@ test("recording overdue preserves completed failed and quarantined worker task t
     }
     const before = (await readRunSnapshot(getRunPaths(registryRoot, created.run.run_id).runPath)).worker_tasks.head;
     const overdue = await recordWorkerTaskOverdue(registryRoot, created.run.run_id, { recorded_at: "2026-05-16T13:55:00.000Z", idempotency_key: `${head.worker_task_id}:overdue` });
+    assert.equal(overdue.event.type, "worker_task.overdue_recorded");
+    assert.equal(overdue.event.evidence.role, "implementer");
     assert.equal(overdue.run.worker_tasks.head.status, status);
     assert.deepEqual(overdue.run.worker_tasks.head, before);
   }

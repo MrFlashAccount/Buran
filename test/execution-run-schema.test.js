@@ -11,6 +11,10 @@ import {
   validateGateResultPayload,
   validateLeaseRecord,
   validateRunSnapshot,
+  validateWorkerTaskEventPayload,
+  validateWorkerTaskHead,
+  validateWorkerCompletionPayload,
+  validateCompletionDecisionPayload,
 } from "../src/execution-runs/schema/index.js";
 
 /**
@@ -159,6 +163,83 @@ test("execution-run schema reports malformed artifact refs and traverses path es
   const refs = findArtifactRefs({ nested: [{ path: "../outside", sha256: "b".repeat(64) }] });
   assert.deepEqual(refs, [{ path: "../outside", sha256: "b".repeat(64) }]);
 });
+
+
+
+test("execution-run schema requires and validates worker task roles and lifecycle mapping payloads", () => {
+  const head = {
+    worker_task_id: "wt_schema_impl",
+    run_id: "run_schema_good",
+    task_id: "schema-good",
+    purpose: "implementation_dispatch",
+    role: "implementer",
+    epoch: 1,
+    attempt: 1,
+    authority: "implementation-harness-dispatch.v1",
+    status: "dispatched",
+    deadline_at: null,
+    created_at: "2026-05-16T13:52:00.000Z",
+    updated_at: "2026-05-16T13:53:00.000Z",
+    dispatch: null,
+    completion: null,
+    decision: null,
+    overdue_recorded_at: "",
+    quarantine: null,
+  };
+  assert.equal(validateWorkerTaskHead(head).length, 0);
+  assert.match(validateWorkerTaskHead({ ...head, role: "fixer" }).join("; "), /role must match purpose implementation_dispatch/);
+  assert.match(validateWorkerTaskHead({ ...head, role: "owner" }).join("; "), /role has unsupported value/);
+
+  const eventPayload = {
+    worker_task_id: head.worker_task_id,
+    run_id: head.run_id,
+    task_id: head.task_id,
+    purpose: head.purpose,
+    role: head.role,
+    epoch: head.epoch,
+    attempt: head.attempt,
+    authority: head.authority,
+    status: "dispatched",
+    deadline_at: null,
+    recorded_at: head.updated_at,
+    idempotency_key: "wt_schema_impl:dispatch",
+  };
+  assert.equal(validateWorkerTaskEventPayload(eventPayload).ok, true);
+
+  const completionPayload = {
+    worker_task_id: head.worker_task_id,
+    run_id: head.run_id,
+    task_id: head.task_id,
+    purpose: head.purpose,
+    role: head.role,
+    epoch: head.epoch,
+    attempt: head.attempt,
+    authority: head.authority,
+    status: "COMPLETED",
+    completion_ref: null,
+    evidence_refs: [],
+    received_at: "2026-05-16T13:54:00.000Z",
+    idempotency_key: "wt_schema_impl:completion",
+  };
+  assert.equal(validateWorkerCompletionPayload(completionPayload).ok, true);
+
+  const decisionPayload = {
+    worker_task_id: head.worker_task_id,
+    run_id: head.run_id,
+    task_id: head.task_id,
+    purpose: head.purpose,
+    role: head.role,
+    completion_status: "COMPLETED",
+    decision: "accepted",
+    reason: "completion matches current worker task",
+    decided_at: "2026-05-16T13:54:01.000Z",
+    idempotency_key: "wt_schema_impl:completion:decision",
+    completion_idempotency_key: completionPayload.idempotency_key,
+  };
+  assert.equal(validateCompletionDecisionPayload(decisionPayload).ok, true);
+  assert.match(validateCompletionDecisionPayload({ ...decisionPayload, completion_status: "DONE" }).error, /completion_status has unsupported value/);
+});
+
 
 test("execution-run schema owns lease record construction and validation", () => {
   const request = {

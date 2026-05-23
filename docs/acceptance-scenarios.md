@@ -186,11 +186,13 @@ These scenarios are documentation of the tested slice, not a promise of unimplem
 - Given a run enters `running`
 - When implementation dispatch starts
 - Then Buran records `worker_task.created` and `worker_task.dispatch_recorded` before adapter result handling
+- And `worker_tasks.head`, `worker_tasks.history`, and worker task event payloads expose `role=implementer` for `implementation_dispatch`
 - And it records completion plus completion decision before any outer transition
 - And only an accepted decision can advance the run to `verification` or `failed_execution`
 
 ### Scenario: fix-loop resumes without duplicate worker dispatch
 - Given a current fix-attempt result was recorded before a crash
+- And fix-loop worker tasks use `role=fixer` for `fix_attempt`
 - When the run is retried
 - Then Buran repairs/reuses the worker task lifecycle records idempotently
 - And does not invoke a second implementation adapter attempt
@@ -215,9 +217,10 @@ These scenarios are documentation of the tested slice, not a promise of unimplem
 - And the run is not advanced twice
 
 ### Scenario: invalid, late, or conflicting completion stays safe
-- Given a completion cannot be matched to the expected task identity, epoch, attempt, authority, or idempotency payload
+- Given a completion cannot be matched to the expected task identity, role, epoch, attempt, authority, or idempotency payload
 - When ingestion evaluates it
 - Then Buran rejects, defers, or quarantines the task truth
+- And the durable event mapping is stable: completed/failed use `worker_task.completion_decided` with `decision=accepted` and completion status, timed-out uses `worker_task.overdue_recorded`, and late/conflict use `worker_task.completion_decided` with the corresponding decision
 - And does not silently overwrite accepted truth or advance the outer run
 
 ### Scenario: public worker summary is sanitized

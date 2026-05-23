@@ -1,5 +1,7 @@
 import {
   WORKER_COMPLETION_DECISIONS,
+  WORKER_TASK_ROLE_BY_PURPOSE,
+  WORKER_TASK_ROLE_SET,
   WORKER_TASK_STATUSES,
 } from "../constants.js";
 import { canonicalJson, isRecord, nonEmptyString, sha256Hex } from "../../../../shared/primitives.js";
@@ -51,8 +53,18 @@ function normalizePurpose(value) {
   return ["implementation_dispatch", "fix_attempt"].includes(purpose) ? purpose : "implementation_dispatch";
 }
 
+export function normalizeRole(value, { purpose = "" } = {}) {
+  const role = nonEmptyString(value);
+  if (WORKER_TASK_ROLE_SET.has(role)) return role;
+  return WORKER_TASK_ROLE_BY_PURPOSE[normalizePurpose(purpose)] || "implementer";
+}
+
 function normalizeAuthority(value) {
   return safeText(value, 120) || "implementation-harness-dispatch.v1";
+}
+
+export function deriveWorkerTaskRole(purpose) {
+  return WORKER_TASK_ROLE_BY_PURPOSE[normalizePurpose(purpose)] || "implementer";
 }
 
 function normalizeTimestamp(value) {
@@ -104,6 +116,7 @@ function taskIdentity(input = {}) {
     run_id: nonEmptyString(input.run_id),
     task_id: nonEmptyString(input.task_id),
     purpose: normalizePurpose(input.purpose),
+    role: normalizeRole(input.role, { purpose: input.purpose }),
     epoch: positiveOrZero(input.epoch),
     attempt: positiveOrZero(input.attempt || 1) || 1,
     authority: normalizeAuthority(input.authority),
@@ -125,6 +138,7 @@ export class WorkerTask {
   get id() { return this.snapshot.worker_task_id; }
   get status() { return this.snapshot.status; }
   get purpose() { return this.snapshot.purpose; }
+  get role() { return this.snapshot.role; }
   get epoch() { return this.snapshot.epoch; }
   get attempt() { return this.snapshot.attempt; }
   hasStatus(status) { return this.status === status; }
@@ -138,6 +152,7 @@ export function workerTaskFromSnapshot(snapshot = {}) {
     run_id: snapshot.run_id,
     task_id: snapshot.task_id,
     purpose: snapshot.purpose,
+    role: snapshot.role,
     epoch: snapshot.epoch,
     attempt: snapshot.attempt,
     authority: snapshot.authority,
@@ -194,6 +209,7 @@ export function normalizeWorkerCompletion(completion = {}) {
     run_id: nonEmptyString(completion.run_id),
     task_id: nonEmptyString(completion.task_id),
     purpose: normalizePurpose(completion.purpose),
+    role: normalizeRole(completion.role, { purpose: completion.purpose }),
     epoch: positiveOrZero(completion.epoch),
     attempt: positiveOrZero(completion.attempt || 1) || 1,
     authority: normalizeAuthority(completion.authority),
@@ -246,8 +262,8 @@ export function evaluateWorkerCompletion(head, completion = {}, { now = new Date
   if (normalized.authority !== task.authority) {
     return { decision: "unauthorized", reason: "completion authority does not match worker task", decided_at: decidedAt };
   }
-  if (normalized.epoch !== task.epoch || normalized.attempt !== task.attempt || normalized.purpose !== task.purpose) {
-    return { decision: "late", reason: "completion epoch/attempt/purpose is not current", decided_at: decidedAt };
+  if (normalized.epoch !== task.epoch || normalized.attempt !== task.attempt || normalized.purpose !== task.purpose || normalized.role !== task.role) {
+    return { decision: "late", reason: "completion epoch/attempt/purpose/role is not current", decided_at: decidedAt };
   }
   if (accepted) {
     return sameDurableCompletionIdentity(task.completion, normalized)
@@ -328,6 +344,7 @@ export function deriveWorkerTaskSummary(head, { now = new Date().toISOString() }
     active: ["created", "dispatched", "completion_received", "overdue"].includes(task.status),
     worker_task_id: task.worker_task_id,
     purpose: task.purpose,
+    role: task.role,
     epoch: task.epoch,
     attempt: task.attempt,
     authority: task.authority,

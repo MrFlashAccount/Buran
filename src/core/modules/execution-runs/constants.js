@@ -80,6 +80,17 @@ export const WORKER_TASK_STATUSES = Object.freeze([
 ]);
 export const WORKER_TASK_STATUS_SET = new Set(WORKER_TASK_STATUSES);
 
+export const WORKER_TASK_ROLES = Object.freeze([
+  "implementer",
+  "fixer",
+  "reviewer",
+]);
+export const WORKER_TASK_ROLE_SET = new Set(WORKER_TASK_ROLES);
+export const WORKER_TASK_ROLE_BY_PURPOSE = Object.freeze({
+  implementation_dispatch: "implementer",
+  fix_attempt: "fixer",
+});
+
 export const WORKER_COMPLETION_DECISIONS = Object.freeze([
   "accepted",
   "duplicate",

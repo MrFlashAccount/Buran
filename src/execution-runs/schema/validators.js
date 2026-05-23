@@ -10,6 +10,8 @@ import {
   TERMINAL_STATES,
   WORKER_COMPLETION_DECISION_SET,
   WORKER_TASK_EVENT_TYPES,
+  WORKER_TASK_ROLE_BY_PURPOSE,
+  WORKER_TASK_ROLE_SET,
   WORKER_TASK_STATUS_SET,
 } from "../../core/modules/execution-runs/constants.js";
 import { isKnownState } from "../../core/modules/execution-runs/state-machine.js";
@@ -683,9 +685,11 @@ export function validateWorkerTaskHead(head, errors = [], fieldPath = "worker_ta
     errors.push(`run.json field ${fieldPath} must be an object`);
     return errors;
   }
-  for (const field of ["worker_task_id", "run_id", "task_id", "purpose", "authority", "status", "created_at", "updated_at"]) {
+  for (const field of ["worker_task_id", "run_id", "task_id", "purpose", "role", "authority", "status", "created_at", "updated_at"]) {
     if (!nonEmptyString(head[field])) errors.push(`run.json field ${fieldPath}.${field} must be a non-empty string`);
   }
+  if (!WORKER_TASK_ROLE_SET.has(head.role)) errors.push(`run.json field ${fieldPath}.role has unsupported value: ${head.role}`);
+  else if (WORKER_TASK_ROLE_BY_PURPOSE[head.purpose] && WORKER_TASK_ROLE_BY_PURPOSE[head.purpose] !== head.role) errors.push(`run.json field ${fieldPath}.role must match purpose ${head.purpose}`);
   if (!WORKER_TASK_STATUS_SET.has(head.status)) errors.push(`run.json field ${fieldPath}.status has unsupported value: ${head.status}`);
   if (!isNonNegativeInteger(head.epoch)) errors.push(`run.json field ${fieldPath}.epoch must be a non-negative integer`);
   if (!isPositiveInteger(head.attempt)) errors.push(`run.json field ${fieldPath}.attempt must be a positive integer`);
@@ -714,9 +718,11 @@ function validateWorkerTasksSnapshot(workerTasks, errors, fieldPath) {
 }
 
 function validateWorkerTaskCommonPayload(payload, errors, fieldPath) {
-  for (const field of ["worker_task_id", "run_id", "task_id", "purpose", "authority", "idempotency_key"]) {
+  for (const field of ["worker_task_id", "run_id", "task_id", "purpose", "role", "authority", "idempotency_key"]) {
     if (!nonEmptyString(payload[field])) errors.push(`${fieldPath}.${field} must be a non-empty string`);
   }
+  if (!WORKER_TASK_ROLE_SET.has(payload.role)) errors.push(`${fieldPath}.role has unsupported value: ${payload.role}`);
+  else if (WORKER_TASK_ROLE_BY_PURPOSE[payload.purpose] && WORKER_TASK_ROLE_BY_PURPOSE[payload.purpose] !== payload.role) errors.push(`${fieldPath}.role must match purpose ${payload.purpose}`);
   if (!isNonNegativeInteger(payload.epoch)) errors.push(`${fieldPath}.epoch must be a non-negative integer`);
   if (!isPositiveInteger(payload.attempt)) errors.push(`${fieldPath}.attempt must be a positive integer`);
 }
@@ -726,6 +732,7 @@ export function validateWorkerTaskEventPayload(payload, { fieldPath = "event.evi
   if (!isRecord(payload)) return { ok: false, errors: [`${fieldPath} must be an object`], error: `${fieldPath} must be an object` };
   validateWorkerTaskCommonPayload(payload, errors, fieldPath);
   if (!WORKER_TASK_STATUS_SET.has(payload.status)) errors.push(`${fieldPath}.status has unsupported value: ${payload.status}`);
+  if (!WORKER_TASK_ROLE_SET.has(payload.role)) errors.push(`${fieldPath}.role has unsupported value: ${payload.role}`);
   if (!isTimestampString(payload.recorded_at)) errors.push(`${fieldPath}.recorded_at must be a timestamp string`);
   if (!(payload.deadline_at === null || payload.deadline_at === undefined || isTimestampString(payload.deadline_at))) errors.push(`${fieldPath}.deadline_at must be null or a timestamp string`);
   for (const key of ["intent_ref", "dispatch_ref"]) {
@@ -739,6 +746,7 @@ export function validateWorkerCompletionPayload(payload, { fieldPath = "event.ev
   if (!isRecord(payload)) return { ok: false, errors: [`${fieldPath} must be an object`], error: `${fieldPath} must be an object` };
   validateWorkerTaskCommonPayload(payload, errors, fieldPath);
   if (!["COMPLETED", "FAILED", "BLOCKED"].includes(payload.status)) errors.push(`${fieldPath}.status has unsupported value: ${payload.status}`);
+  if (!WORKER_TASK_ROLE_SET.has(payload.role)) errors.push(`${fieldPath}.role has unsupported value: ${payload.role}`);
   if (!isTimestampString(payload.received_at)) errors.push(`${fieldPath}.received_at must be a timestamp string`);
   if (payload.completion_ref) validateArtifactRef(payload.completion_ref, errors, `${fieldPath}.completion_ref`);
   if (!Array.isArray(payload.evidence_refs)) errors.push(`${fieldPath}.evidence_refs must be an array`);
@@ -749,9 +757,12 @@ export function validateWorkerCompletionPayload(payload, { fieldPath = "event.ev
 export function validateCompletionDecisionPayload(payload, { fieldPath = "event.evidence" } = {}) {
   const errors = [];
   if (!isRecord(payload)) return { ok: false, errors: [`${fieldPath} must be an object`], error: `${fieldPath} must be an object` };
-  for (const field of ["worker_task_id", "run_id", "task_id", "idempotency_key", "completion_idempotency_key"]) {
+  for (const field of ["worker_task_id", "run_id", "task_id", "purpose", "role", "idempotency_key", "completion_idempotency_key"]) {
     if (!nonEmptyString(payload[field])) errors.push(`${fieldPath}.${field} must be a non-empty string`);
   }
+  if (!WORKER_TASK_ROLE_SET.has(payload.role)) errors.push(`${fieldPath}.role has unsupported value: ${payload.role}`);
+  else if (WORKER_TASK_ROLE_BY_PURPOSE[payload.purpose] && WORKER_TASK_ROLE_BY_PURPOSE[payload.purpose] !== payload.role) errors.push(`${fieldPath}.role must match purpose ${payload.purpose}`);
+  if (!["COMPLETED", "FAILED", "BLOCKED"].includes(payload.completion_status)) errors.push(`${fieldPath}.completion_status has unsupported value: ${payload.completion_status}`);
   if (!WORKER_COMPLETION_DECISION_SET.has(payload.decision)) errors.push(`${fieldPath}.decision has unsupported value: ${payload.decision}`);
   if (!nonEmptyString(payload.reason)) errors.push(`${fieldPath}.reason must be a non-empty string`);
   if (!isTimestampString(payload.decided_at)) errors.push(`${fieldPath}.decided_at must be a timestamp string`);

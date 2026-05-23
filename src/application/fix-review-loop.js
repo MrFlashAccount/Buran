@@ -39,6 +39,7 @@ function buildFixAttemptIntent(snapshot, { attempt, maxAttempts, includeWorkerTa
     dispatch_boundary: "implementation-harness",
     ...(includeWorkerTask ? {
       worker_task_id: nonEmptyString(snapshot?.worker_tasks?.head?.worker_task_id),
+      worker_task_role: nonEmptyString(snapshot?.worker_tasks?.head?.role),
       worker_task_epoch: snapshot?.worker_tasks?.head?.epoch ?? snapshot?.execution?.current_epoch ?? 0,
       worker_task_attempt: snapshot?.worker_tasks?.head?.attempt ?? attempt,
       completion_authority: nonEmptyString(snapshot?.worker_tasks?.head?.authority) || IMPLEMENTATION_DISPATCH_ADAPTER,
@@ -163,6 +164,7 @@ async function readReusableFixAttemptResult(runDir, snapshot) {
       fixIntent.intent = {
         ...legacyFixIntent.intent,
         worker_task_id: nonEmptyString(snapshot?.worker_tasks?.head?.worker_task_id),
+        worker_task_role: nonEmptyString(snapshot?.worker_tasks?.head?.role),
         worker_task_epoch: snapshot?.worker_tasks?.head?.epoch ?? snapshot?.execution?.current_epoch ?? 0,
         worker_task_attempt: snapshot?.worker_tasks?.head?.attempt ?? attempt,
         completion_authority: nonEmptyString(snapshot?.worker_tasks?.head?.authority) || IMPLEMENTATION_DISPATCH_ADAPTER,
@@ -298,6 +300,7 @@ export async function runFixLoopStage({ registryRoot, runId, current, previousSt
     const recordedAt = clock().toISOString();
     const workerTaskCreated = await registry.recordWorkerTaskCreated(registryRoot, runId, {
       purpose: "fix_attempt",
+      role: "fixer",
       epoch: current.execution?.current_epoch || 0,
       attempt: reusableFixAttemptResult.fix_attempt,
       authority: IMPLEMENTATION_DISPATCH_ADAPTER,
@@ -318,6 +321,7 @@ export async function runFixLoopStage({ registryRoot, runId, current, previousSt
     const completionRecorded = await registry.recordWorkerCompletion(registryRoot, runId, {
       worker_task_id: reusableFixIntent.intent.worker_task_id,
       purpose: "fix_attempt",
+      role: reusableFixIntent.intent.worker_task_role,
       epoch: reusableFixIntent.intent.worker_task_epoch,
       attempt: reusableFixIntent.intent.worker_task_attempt,
       authority: reusableFixIntent.intent.completion_authority,
@@ -472,6 +476,7 @@ export async function runFixLoopStage({ registryRoot, runId, current, previousSt
   const recordedAt = clock().toISOString();
   const workerTaskCreated = await registry.recordWorkerTaskCreated(registryRoot, runId, {
     purpose: "fix_attempt",
+    role: "fixer",
     epoch: current.execution?.current_epoch || 0,
     attempt,
     authority: IMPLEMENTATION_DISPATCH_ADAPTER,
@@ -588,6 +593,7 @@ export async function runFixLoopStage({ registryRoot, runId, current, previousSt
   const completionRecorded = await registry.recordWorkerCompletion(registryRoot, runId, {
     worker_task_id: fixIntent.intent.worker_task_id,
     purpose: "fix_attempt",
+    role: "fixer",
     epoch: fixIntent.intent.worker_task_epoch,
     attempt: fixIntent.intent.worker_task_attempt,
     authority: fixIntent.intent.completion_authority,

@@ -393,6 +393,7 @@ export async function runImplementationDispatchStage({ runContext = {}, reportSt
         const completionRecorded = await registry.recordWorkerCompletion(registryRoot, runId, {
           worker_task_id: dispatchIntent.intent.worker_task_id,
           purpose: "implementation_dispatch",
+          role: dispatchIntent.intent.worker_task_role,
           epoch: dispatchIntent.intent.worker_task_epoch,
           attempt: dispatchIntent.intent.worker_task_attempt,
           authority: dispatchIntent.intent.completion_authority,

@@ -307,6 +307,7 @@ function buildTestFixAttemptIntent(snapshot, { attempt = 1, maxAttempts = 2 } = 
     scope_boundary: "approved_packet_artifact",
     dispatch_boundary: "implementation-harness",
     worker_task_id: snapshot?.worker_tasks?.head?.worker_task_id || "",
+    worker_task_role: snapshot?.worker_tasks?.head?.role || "",
     worker_task_epoch: snapshot?.worker_tasks?.head?.epoch ?? snapshot?.execution?.current_epoch ?? 0,
     worker_task_attempt: snapshot?.worker_tasks?.head?.attempt ?? attempt,
     completion_authority: snapshot?.worker_tasks?.head?.authority || "implementation-harness-dispatch.v1",

@@ -1,5 +1,5 @@
 /** Durable execution-run snapshot and summary builders. */
-import { SCHEMA_VERSION, GATE_STATUS, WORKER_COMPLETION_DECISION_SET, WORKER_TASK_STATUS_SET } from "../../core/modules/execution-runs/constants.js";
+import { SCHEMA_VERSION, GATE_STATUS, WORKER_COMPLETION_DECISION_SET, WORKER_TASK_ROLE_SET, WORKER_TASK_STATUS_SET } from "../../core/modules/execution-runs/constants.js";
 import { isRecord, nonEmptyString } from "../../shared/primitives.js";
 
 /**
@@ -266,6 +266,7 @@ export function buildWorkerTaskHead(input = {}) {
     run_id: nonEmptyString(input.run_id),
     task_id: nonEmptyString(input.task_id),
     purpose: nonEmptyString(input.purpose),
+    role: WORKER_TASK_ROLE_SET.has(nonEmptyString(input.role)) ? nonEmptyString(input.role) : "implementer",
     epoch: Number.isSafeInteger(input.epoch) ? input.epoch : 0,
     attempt: Number.isSafeInteger(input.attempt) ? input.attempt : 1,
     authority: nonEmptyString(input.authority),
@@ -287,6 +288,7 @@ export function buildWorkerTaskEventPayload(input = {}) {
     run_id: nonEmptyString(input.run_id),
     task_id: nonEmptyString(input.task_id),
     purpose: nonEmptyString(input.purpose),
+    role: WORKER_TASK_ROLE_SET.has(nonEmptyString(input.role)) ? nonEmptyString(input.role) : "implementer",
     epoch: Number.isSafeInteger(input.epoch) ? input.epoch : 0,
     attempt: Number.isSafeInteger(input.attempt) ? input.attempt : 1,
     authority: nonEmptyString(input.authority),
@@ -306,6 +308,7 @@ export function buildWorkerCompletionPayload(input = {}) {
     run_id: nonEmptyString(input.run_id),
     task_id: nonEmptyString(input.task_id),
     purpose: nonEmptyString(input.purpose),
+    role: WORKER_TASK_ROLE_SET.has(nonEmptyString(input.role)) ? nonEmptyString(input.role) : "implementer",
     epoch: Number.isSafeInteger(input.epoch) ? input.epoch : 0,
     attempt: Number.isSafeInteger(input.attempt) ? input.attempt : 1,
     authority: nonEmptyString(input.authority),
@@ -323,6 +326,9 @@ export function buildCompletionDecisionPayload(input = {}) {
     worker_task_id: nonEmptyString(input.worker_task_id),
     run_id: nonEmptyString(input.run_id),
     task_id: nonEmptyString(input.task_id),
+    purpose: nonEmptyString(input.purpose),
+    role: WORKER_TASK_ROLE_SET.has(nonEmptyString(input.role)) ? nonEmptyString(input.role) : "implementer",
+    completion_status: nonEmptyString(input.completion_status).toUpperCase(),
     decision: WORKER_COMPLETION_DECISION_SET.has(decision) ? decision : "deferred",
     reason: nonEmptyString(input.reason),
     decided_at: input.decided_at || input.recorded_at,
@@ -336,6 +342,7 @@ export function buildWorkerTaskSummary(input = {}) {
     active: Boolean(input.active),
     worker_task_id: nonEmptyString(input.worker_task_id),
     purpose: nonEmptyString(input.purpose),
+    role: WORKER_TASK_ROLE_SET.has(nonEmptyString(input.role)) ? nonEmptyString(input.role) : "implementer",
     epoch: Number.isSafeInteger(input.epoch) ? input.epoch : 0,
     attempt: Number.isSafeInteger(input.attempt) ? input.attempt : 0,
     authority: nonEmptyString(input.authority),
