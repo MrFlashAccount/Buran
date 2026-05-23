@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { runBuranCli } from "../src/entrypoints/cli.js";
+import { parseBuranArgs, runBuranCli, usageText } from "../src/entrypoints/cli.js";
 import { SCHEMA_VERSION } from "../src/core/modules/execution-runs/constants.js";
 import { intakePacketListFile, validatePacketListFile } from "../src/application/commands.js";
 import { validateRunSnapshot } from "../src/execution-runs/schema/index.js";
@@ -1591,4 +1591,26 @@ test("observability logs failed CLI errors with bounded error_kind and no raw pa
   const diagnostic = JSON.parse(diagnosticText);
   assert.equal(diagnostic.outcome, "error");
   assert.equal(diagnostic.error_kind, "json_parse");
+});
+
+test("CLI help and parser include read-only status command", () => {
+  assert.match(usageText(), /\/buran status --run <run_id> \[--registry <path>\] \[--json\]/);
+  assert.deepEqual(parseBuranArgs(["status", "--run", "run_123", "--registry", "./registry", "--json"]), {
+    command: "status",
+    subcommand: "",
+    json: true,
+    packets: "",
+    registryRoot: "./registry",
+    runId: "run_123",
+    workspaceId: "",
+    workspacePath: "",
+    ttlMs: "",
+  });
+});
+
+test("CLI status requires --run", async () => {
+  const workspaceDir = await makeTempDir();
+  const result = await runBuranCli(["status"], { workspaceDir });
+  assert.equal(result.ok, false);
+  assert.match(result.text, /status requires --run <run_id>/);
 });

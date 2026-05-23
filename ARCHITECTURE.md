@@ -135,6 +135,7 @@ flowchart TB
 - **Batch interface**: accepts an explicit approved `work_item` packet list and run options. No autonomous discovery.
 - **Packet sufficiency gate**: validates that each `work_item` has approved scope, `scm_target`, implementation instructions, verification expectations, and review criteria. Emits `blocked_plan_insufficient` when weak.
 - **ExecutionRun registry**: owns `run.json`, append-only `events.jsonl`, and artifacts. It is the canonical state owner.
+- **Operator status read model**: `/buran status --run <run_id>` reads only registry snapshots, events, and safe artifact references through the registry port, reports policy/audit/retry/lease/worker summaries plus one `next_safe_action`, and never mutates, recovers, dispatches workers, reclaims leases, reads logs/chat memory, or calls remote providers.
 - **Lock manager**: prevents unsafe overlap by workspace, repo checkout, `scm_target`, branch, and declared conflict surface. No global lock.
 - **Workspace manager**: prepares and tracks 3–4 isolated workspaces.
 - **Implementation runner**: applies the approved packet. It may make implementation decisions only inside the approved envelope.

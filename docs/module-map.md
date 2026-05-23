@@ -36,6 +36,7 @@ This file maps the implemented source layout and canonical runtime surfaces.
 | --- | --- |
 | `src/approved-packets/sufficiency.js` | Approved packet normalization and sufficiency decisions. |
 | `src/application/run-local-mission.js` | Thin state dispatcher for local mission runs. |
+| `src/application/operator-status.js` | Read-only registry-backed operator status projection for `/buran status`; owns status classification, public worker/artifact/policy/audit/retry summaries, lease status projection, and deterministic `next_safe_action`. |
 | `src/application/mission-context.js` | Runner constants and mission context helpers. |
 | `src/application/mission-phase-runner.js` | Workspace-preparation and implementation-dispatch coordination. |
 | `src/application/gate-pipeline.js` | Verification/internal-review sequencing. |
@@ -74,7 +75,8 @@ This file maps the implemented source layout and canonical runtime surfaces.
 
 | Path | Coverage focus |
 | --- | --- |
-| `test/buran.test.js` | CLI/intake/validation behavior, sanitization, leases, handoff projections, and recovery edges. |
+| `test/buran.test.js` | CLI/intake/validation behavior, sanitization, leases, handoff projections, recovery edges, and status parser/help requirements. |
+| `test/operator-status.test.js` | Operator status JSON/human shape, missing/corrupt/active/read-only behavior, lease/retry/next-safe-action mapping, and public-safe summaries. |
 | `test/execution-run-schema.test.js` | Schema builders and snapshot validation. |
 | `test/gate-ledger.test.js` | Artifact/gate ledger semantics and handoff recording constraints. |
 | `test/registry-store.test.js` | Registry write ordering, transitions, rebuilds, and recovery interactions. |
@@ -93,6 +95,7 @@ internal_review -> handoff_ready | fix_loop | blocked_needs_human
 fix_loop -> fix_attempt -> verification | blocked_needs_human
 handoff_ready -> SCM handoff intent/result artifacts -> ready_for_manual_review
 recover -> replay + rebuild + quarantine when state is ambiguous
+status -> read run.json + events.jsonl + safe refs only -> public OperatorStatusReport
 ```
 
 ## Intentionally absent

@@ -35,6 +35,7 @@ const EVENT_VOCABULARY = new Set([
   "validation.completed",
   "intake.completed",
   "runner.completed",
+  "status.completed",
   "recovery.completed",
   "lease.acquire.completed",
   "lease.release.completed",

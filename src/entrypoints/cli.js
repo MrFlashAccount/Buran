@@ -14,7 +14,7 @@
  * - unsupported flags fail fast with a thrown parse error;
  * - every completed invocation finalizes an observability trace.
  */
-import { acquireLeaseReport, formatBuranReport, intakePacketListFile, normalizeBuranConfig, recoverRegistryReport, releaseLeaseReport, runLocalMissionReport, validatePacketListFile } from "../application/commands.js";
+import { acquireLeaseReport, formatBuranReport, intakePacketListFile, normalizeBuranConfig, recoverRegistryReport, releaseLeaseReport, runLocalMissionReport, statusRunReport, validatePacketListFile } from "../application/commands.js";
 import { createLocalBuranRuntime } from "../composition/local-runtime.js";
 import { correlationFromReport, createInvocationObserver, sanitizeError, sanitizePublicReportForOutput, summarizeArgs, summarizeReport } from "../observability/index.js";
 
@@ -143,6 +143,7 @@ export function usageText() {
     "  /buran validate --packets <packet-list.json> [--json]",
     "  /buran intake --packets <packet-list.json> [--registry <path>] [--json]",
     "  /buran run --run <run_id> [--workspace-id <id>] [--workspace-path <path>] [--ttl-ms <ms>] [--registry <path>] [--json]",
+    "  /buran status --run <run_id> [--registry <path>] [--json]",
     "  /buran recover [--registry <path>] [--json]",
     "  /buran lease acquire --run <run_id> --workspace-id <id> [--workspace-path <path>] [--ttl-ms <ms>] [--registry <path>] [--json]",
     "  /buran lease release --run <run_id> [--registry <path>] [--json]",
@@ -194,6 +195,7 @@ function commandEvent(options) {
   if (options.command === "validate") return "validation.completed";
   if (options.command === "intake") return "intake.completed";
   if (options.command === "run") return "runner.completed";
+  if (options.command === "status") return "status.completed";
   if (options.command === "recover" || options.command === "recovery") return "recovery.completed";
   if ((options.command === "lease" || options.command === "lock") && options.subcommand === "acquire") return "lease.acquire.completed";
   if ((options.command === "lease" || options.command === "lock") && options.subcommand === "release") return "lease.release.completed";
@@ -371,6 +373,21 @@ export async function runBuranCli(rawArgs, { pluginConfig = {}, workspaceDir = p
         workspaceLeaseService,
         workspacePreparationInspector,
       });
+      return finishCliResult({ result: { ok: true, report }, options, observer });
+    }
+
+    if (options.command === "status") {
+      if (!options.runId) {
+        return finishCliResult({
+          result: { ok: false, text: `${usageText()}\n\nError: status requires --run <run_id>.` },
+          options,
+          observer,
+          outcome: "rejected",
+          reason: "missing_status_arguments",
+        });
+      }
+      const registryRoot = resolveRegistry(options, pluginConfig, workspaceDir, stateDir);
+      const report = await statusRunReport({ registryRoot, runId: options.runId, registryRepository });
       return finishCliResult({ result: { ok: true, report }, options, observer });
     }
 
