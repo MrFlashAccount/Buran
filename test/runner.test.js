@@ -17,7 +17,7 @@ import { runLocalMission as runLocalMissionCore } from "../src/application/run-l
 import { canonicalJson } from "../src/shared/primitives.js";
 import { evaluateReviewReadyPolicy } from "../src/stack-workflow/review-ready-policy.js";
 import { reviewReadyPolicySnapshot } from "./helpers/workflow-policy-fixture.js";
-import { createRunFromPacketReport, getRunPaths, readEventsFile, readRunSnapshot, recordArtifact, recordGateResult, transitionRun, writeRunSnapshot } from "../src/integrations/storage/json-registry/store.js";
+import { createRunFromPacketReport, getRunPaths, readEventsFile, readRunSnapshot, recordArtifact, recordGateResult, recordWorkerTaskCreated, recordWorkerTaskDispatch, transitionRun, writeRunSnapshot } from "../src/integrations/storage/json-registry/store.js";
 import { createJsonRegistryRepository } from "../src/integrations/storage/json-registry/repository.js";
 import { createJsonLeaseRecordStore } from "../src/integrations/storage/json-registry/lease-record-store.js";
 import { createJsonRegistryRecoveryStore } from "../src/integrations/storage/json-registry/recovery-store.js";
@@ -306,6 +306,11 @@ function buildTestFixAttemptIntent(snapshot, { attempt = 1, maxAttempts = 2 } = 
     },
     scope_boundary: "approved_packet_artifact",
     dispatch_boundary: "implementation-harness",
+    worker_task_id: snapshot?.worker_tasks?.head?.worker_task_id || "",
+    worker_task_epoch: snapshot?.worker_tasks?.head?.epoch ?? snapshot?.execution?.current_epoch ?? 0,
+    worker_task_attempt: snapshot?.worker_tasks?.head?.attempt ?? attempt,
+    completion_authority: snapshot?.worker_tasks?.head?.authority || "implementation-harness-dispatch.v1",
+    completion_idempotency_key: `${snapshot?.run_id || "run"}:worker_completion:fix_attempt:${attempt}:${snapshot?.worker_tasks?.head?.worker_task_id || "legacy"}`,
     rerun_required: ["verification", "internal_review"],
   };
   const dispatchIntentId = sha256Hex(canonicalJson(intent));
@@ -334,7 +339,17 @@ async function seedRecordedFixAttemptResult(registryRoot, runId, {
   clock = () => new Date("2026-05-16T13:56:00.000Z"),
 } = {}) {
   const paths = getRunPaths(registryRoot, runId);
-  const snapshot = await readRunSnapshot(paths.runPath);
+  let snapshot = await readRunSnapshot(paths.runPath);
+  const workerTaskCreated = await recordWorkerTaskCreated(registryRoot, runId, {
+    purpose: "fix_attempt",
+    epoch: snapshot.execution?.current_epoch || 0,
+    attempt,
+    authority: "implementation-harness-dispatch.v1",
+    recorded_at: clock().toISOString(),
+    actor: "runner-test-seed-fix",
+    idempotency_key: `${runId}:worker_task:fix_attempt:${snapshot.execution?.current_epoch || 0}:${attempt}`,
+  });
+  snapshot = workerTaskCreated.run;
   const fixIntent = buildTestFixAttemptIntent(snapshot, { attempt, maxAttempts: 2 });
   const intentRecorded = await recordArtifact(registryRoot, runId, {
     artifactPath: fixIntent.artifactPath,
@@ -352,6 +367,13 @@ async function seedRecordedFixAttemptResult(registryRoot, runId, {
       max_fix_attempts: 2,
       failed_gates: fixIntent.intent.failed_gates,
     },
+  });
+  await recordWorkerTaskDispatch(registryRoot, runId, {
+    intent_ref: intentRecorded.artifact_ref,
+    dispatch_ref: intentRecorded.artifact_ref,
+    recorded_at: clock().toISOString(),
+    actor: "runner-test-seed-fix",
+    idempotency_key: `${fixIntent.intent.completion_idempotency_key.replace(":worker_completion:", ":worker_dispatch:")}:${intentRecorded.artifact_ref.sha256}`,
   });
   const dispatchResult = await executeImplementationDispatch({
     snapshot: intentRecorded.run,
@@ -717,8 +739,11 @@ test("local runner can acquire a local lease and blocks when implementation harn
     ["transition", "completed", "waiting_for_lock"],
     ["lease_acquire", "completed", "running"],
     ["workspace_preparation", "completed", "running"],
+    ["worker_task_created", "completed", "running"],
+    ["worker_task_dispatch_recorded", "completed", "running"],
     ["implementation_dispatch_intent", "completed", "running"],
     ["implementation_dispatch_result", "blocked", "running"],
+    ["worker_completion_decided", "completed", "running"],
   ]);
   assert.equal(first.blockers[0].code, "implementation_dispatch_blocked");
   assert.equal(first.blockers[0].dispatch_status, "BLOCKED");
@@ -776,8 +801,11 @@ test("local runner can acquire a local lease and blocks when implementation harn
   assert.equal(second.current_state, "running");
   assert.deepEqual(second.steps_taken.map((step) => [step.action, step.status, step.to_state]), [
     ["workspace_preparation", "noop", "running"],
+    ["worker_task_created", "noop", "running"],
+    ["worker_task_dispatch_recorded", "noop", "running"],
     ["implementation_dispatch_intent", "noop", "running"],
     ["implementation_dispatch_result", "blocked", "running"],
+    ["worker_completion_decided", "noop", "running"],
   ]);
   assert.equal(second.blockers[0].code, "implementation_dispatch_blocked");
   assert.equal(second.workspace_preparation.artifact_record_status, "noop");
@@ -1046,8 +1074,11 @@ test("local runner advances to verification only after sanitized immutable imple
     ["transition", "completed", "waiting_for_lock"],
     ["lease_acquire", "completed", "running"],
     ["workspace_preparation", "completed", "running"],
+    ["worker_task_created", "completed", "running"],
+    ["worker_task_dispatch_recorded", "completed", "running"],
     ["implementation_dispatch_intent", "completed", "running"],
     ["implementation_dispatch_result", "completed", "running"],
+    ["worker_completion_decided", "completed", "running"],
     ["transition", "completed", "verification"],
   ]);
 
@@ -1234,8 +1265,11 @@ test("local runner reuses an existing dispatch result artifact without invoking 
   assert.equal(eventsAfterSecond.length, eventsAfterFirst.length);
   assert.deepEqual(second.steps_taken.map((step) => [step.action, step.status, step.to_state]), [
     ["workspace_preparation", "noop", "running"],
+    ["worker_task_created", "noop", "running"],
+    ["worker_task_dispatch_recorded", "noop", "running"],
     ["implementation_dispatch_intent", "noop", "running"],
     ["implementation_dispatch_result", "noop", "running"],
+    ["worker_completion_decided", "noop", "running"],
   ]);
 });
 
@@ -1370,7 +1404,7 @@ test("local runner blocks dispatch resume when result provenance artifacts are m
   assert.equal(second.implementation_dispatch.resumed_recorded_result, false);
   assert.equal(second.implementation_dispatch.result_record_status, "stale_recorded_result");
   assert.equal(second.implementation_dispatch.problem.code, "implementation_dispatch_result_artifact_invalid");
-  assert.equal(eventsAfterSecond.length, eventsAfterFirst.length);
+  assert.equal(eventsAfterSecond.length, eventsAfterFirst.length + 2);
 });
 
 test("local runner transitions failed implementation dispatch to failed_execution", async () => {
@@ -1411,8 +1445,11 @@ test("local runner transitions failed implementation dispatch to failed_executio
     ["transition", "completed", "waiting_for_lock"],
     ["lease_acquire", "completed", "running"],
     ["workspace_preparation", "completed", "running"],
+    ["worker_task_created", "completed", "running"],
+    ["worker_task_dispatch_recorded", "completed", "running"],
     ["implementation_dispatch_intent", "completed", "running"],
     ["implementation_dispatch_result", "failed", "running"],
+    ["worker_completion_decided", "completed", "running"],
     ["transition", "completed", "failed_execution"],
   ]);
 
@@ -1502,10 +1539,10 @@ test("local runner records a new immutable workspace preparation artifact when l
   assert.equal(second.implementation_dispatch.result_record_status, "recorded");
   assert.notEqual(second.implementation_dispatch.intent_artifact_ref.path, first.implementation_dispatch.intent_artifact_ref.path);
   assert.notEqual(second.implementation_dispatch.result_artifact_ref.path, first.implementation_dispatch.result_artifact_ref.path);
-  assert.equal(eventsAfterSecond.length, eventsAfterFirst.length + 3);
+  assert.equal(eventsAfterSecond.length, eventsAfterFirst.length + 6);
   assert.equal(snapshotAfterFirst.updated_at, "2026-05-16T13:53:00.000Z");
   assert.equal(snapshotAfterSecond.updated_at, "2026-05-16T13:54:00.000Z");
-  assert.deepEqual(eventsAfterSecond.slice(-3).map((event) => event.timestamp), ["2026-05-16T13:54:00.000Z", "2026-05-16T13:54:00.000Z", "2026-05-16T13:54:00.000Z"]);
+  assert.deepEqual(eventsAfterSecond.slice(-6).map((event) => event.timestamp), ["2026-05-16T13:54:00.000Z", "2026-05-16T13:54:00.000Z", "2026-05-16T13:54:00.000Z", "2026-05-16T13:54:00.000Z", "2026-05-16T13:54:00.000Z", "2026-05-16T13:54:00.000Z"]);
   assert.ok(second.warnings.some((warning) => warning.code === "workspace_dirty"));
 });
 
@@ -1840,7 +1877,7 @@ test("local runner executes a bounded fix attempt and reruns verification in a f
   assert.equal(fixed.implementation_dispatch.status, "COMPLETED");
   assert.match(fixed.implementation_dispatch.intent_artifact_ref.path, /^artifacts\/fix-loop\/intent-1-[a-f0-9]{16}\.json$/);
   assert.match(fixed.implementation_dispatch.result_artifact_ref.path, /^artifacts\/fix-loop\/result-[a-f0-9]{16}\.json$/);
-  assert.deepEqual(fixed.steps_taken.map((step) => step.action), ["fix_attempt_intent", "fix_attempt_result", "transition"]);
+  assert.deepEqual(fixed.steps_taken.map((step) => step.action), ["worker_task_created", "worker_task_dispatch_recorded", "fix_attempt_intent", "fix_attempt_result", "worker_completion_decided", "transition"]);
 
   const verified = await runLocalMission({
     registryRoot,

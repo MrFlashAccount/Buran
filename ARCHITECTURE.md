@@ -196,3 +196,13 @@ Composition belongs at the plugin boundary. Domain transition rules receive data
 8. No handoff projection may be emitted until verification is `PASS` and internal review is `PASS`.
 9. The plugin stops at `Ready for Manual Review`.
 10. Legacy/reference surfaces must not become runtime dependencies unless a later approved migration explicitly wraps them as adapters.
+
+## Durable WorkerTask lifecycle
+
+Implementation-harness work is represented as a registry-owned `WorkerTask` inside the current `ExecutionRun`, not as provider-owned truth. Core owns `WorkerTask`, `WorkerCompletion`, and `CompletionDecision` semantics; the JSON registry persists `worker_tasks.head`, `worker_tasks.history`, and append-only `worker_task.*` events; application orchestration only sequences task creation, dispatch recording, completion ingestion, and accepted-decision checks before outer state transitions.
+
+Adapters may return sanitized evidence and artifact references, but they do not decide run state. A `running -> verification`, `running -> failed_execution`, or `fix_loop -> verification` transition is allowed only after the current worker completion receives an accepted durable completion decision. Raw prompts, transcripts, stdout/stderr, session blobs, and raw completion payloads remain outside public summaries and registry reports.
+
+## WorkerTask lifecycle (#16)
+
+`WorkerTask` is a first-class durable sub-lifecycle under `ExecutionRun`. The local registry remains the source of truth: implementation and fix-loop dispatches create a worker task, record dispatch evidence, ingest a sanitized worker completion, and persist a `CompletionDecision` before any outer run transition. Adapters provide evidence only; they do not accept their own completion as final truth. Duplicate completions are idempotent, late/unknown/conflicting completions do not advance the run, and public reporting exposes only a sanitized `WorkerTaskSummary`. This does not add an autonomous loop, workflow engine, UI, GitHub transport behavior, or operator control plane.

@@ -18,7 +18,7 @@ function fixAttemptCount(snapshot) {
   return recordedFixAttemptArtifacts(snapshot).filter((summary) => summary?.provenance?.kind === "fix-attempt-result").length;
 }
 
-function buildFixAttemptIntent(snapshot, { attempt, maxAttempts } = {}) {
+function buildFixAttemptIntent(snapshot, { attempt, maxAttempts, includeWorkerTask = true } = {}) {
   const intent = {
     schema_version: "fix-attempt-intent.v1",
     run_id: snapshot?.run_id || "",
@@ -37,6 +37,13 @@ function buildFixAttemptIntent(snapshot, { attempt, maxAttempts } = {}) {
     },
     scope_boundary: "approved_packet_artifact",
     dispatch_boundary: "implementation-harness",
+    ...(includeWorkerTask ? {
+      worker_task_id: nonEmptyString(snapshot?.worker_tasks?.head?.worker_task_id),
+      worker_task_epoch: snapshot?.worker_tasks?.head?.epoch ?? snapshot?.execution?.current_epoch ?? 0,
+      worker_task_attempt: snapshot?.worker_tasks?.head?.attempt ?? attempt,
+      completion_authority: nonEmptyString(snapshot?.worker_tasks?.head?.authority) || IMPLEMENTATION_DISPATCH_ADAPTER,
+      completion_idempotency_key: `${snapshot?.run_id || "run"}:worker_completion:fix_attempt:${attempt}:${nonEmptyString(snapshot?.worker_tasks?.head?.worker_task_id) || "legacy"}`,
+    } : {}),
     rerun_required: ["verification", "internal_review"],
   };
   const dispatchIntentId = sha256Hex(canonicalJson(intent));
@@ -137,10 +144,33 @@ async function readReusableFixAttemptResult(runDir, snapshot) {
     };
   }
 
-  const resultProblem = validateImplementationDispatchResultReport(artifactReport, fixIntent.intent, {
+  let resultProblem = validateImplementationDispatchResultReport(artifactReport, fixIntent.intent, {
     requireCompleteProvenance: false,
     intentArtifactPath: fixIntent.artifactPath,
   });
+  if (resultProblem) {
+    const legacyFixIntent = buildFixAttemptIntent(snapshot, {
+      attempt,
+      maxAttempts: MAX_FIX_ATTEMPTS,
+      includeWorkerTask: false,
+    });
+    const legacyResultProblem = validateImplementationDispatchResultReport(artifactReport, legacyFixIntent.intent, {
+      requireCompleteProvenance: false,
+      intentArtifactPath: legacyFixIntent.artifactPath,
+    });
+    if (!legacyResultProblem) {
+      resultProblem = null;
+      fixIntent.intent = {
+        ...legacyFixIntent.intent,
+        worker_task_id: nonEmptyString(snapshot?.worker_tasks?.head?.worker_task_id),
+        worker_task_epoch: snapshot?.worker_tasks?.head?.epoch ?? snapshot?.execution?.current_epoch ?? 0,
+        worker_task_attempt: snapshot?.worker_tasks?.head?.attempt ?? attempt,
+        completion_authority: nonEmptyString(snapshot?.worker_tasks?.head?.authority) || IMPLEMENTATION_DISPATCH_ADAPTER,
+        completion_idempotency_key: `${snapshot?.run_id || "run"}:worker_completion:fix_attempt:${attempt}:${nonEmptyString(snapshot?.worker_tasks?.head?.worker_task_id) || "legacy"}`,
+      };
+      fixIntent.artifactPath = legacyFixIntent.artifactPath;
+    }
+  }
   const missingIntentArtifact = !isRecord(artifactReport.dispatch_intent_artifact)
     || !nonEmptyString(artifactReport.dispatch_intent_artifact.path)
     || !nonEmptyString(artifactReport.dispatch_intent_artifact.sha256);
@@ -248,6 +278,68 @@ export async function runFixLoopStage({ registryRoot, runId, current, previousSt
         intent_artifact_ref: reusableFixAttemptResult.intent_artifact_ref,
         result_artifact_ref: reusableFixAttemptResult.artifact_ref,
         resumed_recorded_result: true,
+      }));
+      return buildRunnerReport({
+        registryRoot,
+        runId,
+        previousState,
+        currentState: current.state,
+        outcome: "blocked",
+        stepsTaken,
+        blockers,
+        warnings,
+        workspacePreparation,
+        implementationDispatch,
+        verification,
+        internalReview,
+      });
+    }
+
+    const recordedAt = clock().toISOString();
+    const workerTaskCreated = await registry.recordWorkerTaskCreated(registryRoot, runId, {
+      purpose: "fix_attempt",
+      epoch: current.execution?.current_epoch || 0,
+      attempt: reusableFixAttemptResult.fix_attempt,
+      authority: IMPLEMENTATION_DISPATCH_ADAPTER,
+      recorded_at: recordedAt,
+      actor,
+      idempotency_key: `${runId}:worker_task:fix_attempt:${current.execution?.current_epoch || 0}:${reusableFixAttemptResult.fix_attempt}`,
+    });
+    current = workerTaskCreated.run;
+    const reusableFixIntent = buildFixAttemptIntent(current, { attempt: reusableFixAttemptResult.fix_attempt, maxAttempts: MAX_FIX_ATTEMPTS });
+    await registry.recordWorkerTaskDispatch(registryRoot, runId, {
+      intent_ref: reusableFixAttemptResult.intent_artifact_ref,
+      dispatch_ref: reusableFixAttemptResult.intent_artifact_ref,
+      recorded_at: recordedAt,
+      actor,
+      idempotency_key: `${reusableFixIntent.intent.completion_idempotency_key.replace(":worker_completion:", ":worker_dispatch:")}:${reusableFixAttemptResult.intent_artifact_ref.sha256}`,
+    });
+    const reusableCompletionIdempotencyKey = `${reusableFixIntent.intent.completion_idempotency_key}:${reusableFixAttemptResult.artifact_ref.sha256}`;
+    const completionRecorded = await registry.recordWorkerCompletion(registryRoot, runId, {
+      worker_task_id: reusableFixIntent.intent.worker_task_id,
+      purpose: "fix_attempt",
+      epoch: reusableFixIntent.intent.worker_task_epoch,
+      attempt: reusableFixIntent.intent.worker_task_attempt,
+      authority: reusableFixIntent.intent.completion_authority,
+      status: reusableFixAttemptResult.status,
+      completion_ref: reusableFixAttemptResult.artifact_ref,
+      evidence: reusableFixAttemptResult.public_report?.evidence || {},
+      received_at: clock().toISOString(),
+      actor: reusableFixAttemptResult.adapter || IMPLEMENTATION_DISPATCH_ADAPTER,
+      idempotency_key: reusableCompletionIdempotencyKey,
+    });
+    current = completionRecorded.run;
+    const decisionRecorded = await registry.recordWorkerCompletionDecision(registryRoot, runId, {
+      completion: current.worker_tasks?.head?.completion,
+      decided_at: clock().toISOString(),
+      actor,
+      idempotency_key: `${reusableCompletionIdempotencyKey}:decision`,
+    });
+    current = decisionRecorded.run;
+    if (current.worker_tasks?.head?.decision?.decision !== "accepted") {
+      blockers.push(buildIssue("worker_completion_not_accepted", "Reusable fix completion did not receive an accepted durable CompletionDecision.", {
+        worker_decision: current.worker_tasks?.head?.decision?.decision || "",
+        worker_task_id: current.worker_tasks?.head?.worker_task_id || "",
       }));
       return buildRunnerReport({
         registryRoot,
@@ -377,11 +469,29 @@ export async function runFixLoopStage({ registryRoot, runId, current, previousSt
   }
 
   const attempt = completedAttempts + 1;
+  const recordedAt = clock().toISOString();
+  const workerTaskCreated = await registry.recordWorkerTaskCreated(registryRoot, runId, {
+    purpose: "fix_attempt",
+    epoch: current.execution?.current_epoch || 0,
+    attempt,
+    authority: IMPLEMENTATION_DISPATCH_ADAPTER,
+    recorded_at: recordedAt,
+    actor,
+    idempotency_key: `${runId}:worker_task:fix_attempt:${current.execution?.current_epoch || 0}:${attempt}`,
+  });
+  current = workerTaskCreated.run;
+  stepsTaken.push(buildStep({
+    action: "worker_task_created",
+    status: workerTaskCreated.status === "noop" ? "noop" : "completed",
+    fromState: "fix_loop",
+    toState: "fix_loop",
+    detail: `Durable fix-attempt WorkerTask ${attempt}/${MAX_FIX_ATTEMPTS} was created before adapter execution.`,
+    sequence: workerTaskCreated.event?.sequence ?? null,
+  }));
   const fixIntent = buildFixAttemptIntent(current, {
     attempt,
     maxAttempts: MAX_FIX_ATTEMPTS,
   });
-  const recordedAt = clock().toISOString();
   const intentRecorded = await registry.recordArtifact(registryRoot, runId, {
     artifactPath: fixIntent.artifactPath,
     content: `${JSON.stringify(fixIntent.intent, null, 2)}\n`,
@@ -399,6 +509,24 @@ export async function runFixLoopStage({ registryRoot, runId, current, previousSt
     },
   });
   current = intentRecorded.run;
+  const workerTaskDispatched = await registry.recordWorkerTaskDispatch(registryRoot, runId, {
+    intent_ref: intentRecorded.artifact_ref,
+    dispatch_ref: intentRecorded.artifact_ref,
+    recorded_at: recordedAt,
+    actor,
+    idempotency_key: `${fixIntent.intent.completion_idempotency_key.replace(":worker_completion:", ":worker_dispatch:")}:${intentRecorded.artifact_ref.sha256}`,
+  });
+  current = workerTaskDispatched.run;
+  stepsTaken.push(buildStep({
+    action: "worker_task_dispatch_recorded",
+    status: workerTaskDispatched.status === "noop" ? "noop" : "completed",
+    fromState: "fix_loop",
+    toState: "fix_loop",
+    detail: "Fix-attempt WorkerTask dispatch intent was recorded as durable task evidence.",
+    sequence: workerTaskDispatched.event?.sequence ?? null,
+    artifactPath: intentRecorded.artifact_ref.path,
+    artifactSha256: intentRecorded.artifact_ref.sha256,
+  }));
   stepsTaken.push(buildStep({
     action: "fix_attempt_intent",
     status: intentRecorded.status === "noop" ? "noop" : "completed",
@@ -456,7 +584,45 @@ export async function runFixLoopStage({ registryRoot, runId, current, previousSt
     artifactSha256: resultRecorded.artifact_ref.sha256,
   }));
 
-  if (dispatchResult.status !== "COMPLETED") {
+  const completionIdempotencyKey = `${fixIntent.intent.completion_idempotency_key}:${resultRecorded.artifact_ref.sha256}`;
+  const completionRecorded = await registry.recordWorkerCompletion(registryRoot, runId, {
+    worker_task_id: fixIntent.intent.worker_task_id,
+    purpose: "fix_attempt",
+    epoch: fixIntent.intent.worker_task_epoch,
+    attempt: fixIntent.intent.worker_task_attempt,
+    authority: fixIntent.intent.completion_authority,
+    status: dispatchResult.status,
+    completion_ref: resultRecorded.artifact_ref,
+    evidence: dispatchResult.public_report?.evidence || {},
+    received_at: clock().toISOString(),
+    actor: dispatchResult.adapter || IMPLEMENTATION_DISPATCH_ADAPTER,
+    idempotency_key: completionIdempotencyKey,
+  });
+  current = completionRecorded.run;
+  const decisionRecorded = await registry.recordWorkerCompletionDecision(registryRoot, runId, {
+    completion: current.worker_tasks?.head?.completion,
+    decided_at: clock().toISOString(),
+    actor,
+    idempotency_key: `${completionIdempotencyKey}:decision`,
+  });
+  current = decisionRecorded.run;
+  implementationDispatch = {
+    ...implementationDispatch,
+    worker_task: current.worker_tasks?.head || null,
+  };
+  stepsTaken.push(buildStep({
+    action: "worker_completion_decided",
+    status: decisionRecorded.status === "noop" ? "noop" : "completed",
+    fromState: "fix_loop",
+    toState: "fix_loop",
+    detail: `Fix-attempt worker completion decision recorded as ${current.worker_tasks?.head?.decision?.decision || "unknown"} before outer transition.`,
+    sequence: decisionRecorded.event?.sequence ?? null,
+    artifactPath: resultRecorded.artifact_ref.path,
+    artifactSha256: resultRecorded.artifact_ref.sha256,
+  }));
+
+  const acceptedWorkerCompletion = current.worker_tasks?.head?.decision?.decision === "accepted";
+  if (dispatchResult.status !== "COMPLETED" || !acceptedWorkerCompletion) {
     blockers.push(buildIssue("fix_attempt_blocked", implementationBoundaryMessage(), {
       fix_attempt: attempt,
       max_fix_attempts: MAX_FIX_ATTEMPTS,
@@ -464,6 +630,7 @@ export async function runFixLoopStage({ registryRoot, runId, current, previousSt
       problem: dispatchResult.public_report?.problem || null,
       intent_artifact_ref: intentRecorded.artifact_ref,
       result_artifact_ref: resultRecorded.artifact_ref,
+      worker_decision: current.worker_tasks?.head?.decision?.decision || "",
     }));
     return buildRunnerReport({
       registryRoot,

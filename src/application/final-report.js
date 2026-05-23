@@ -1,5 +1,6 @@
 /** Public-safe local runner report and transition formatting helpers. */
 import { SCHEMA_VERSION } from "../core/modules/execution-runs/constants.js";
+import { deriveWorkerTaskSummary } from "../core/modules/execution-runs/entities/worker-task.js";
 import { implementationDispatchStatusSummary } from "../gates/implementation-contract.js";
 import { nonEmptyString } from "../shared/primitives.js";
 import { RUNNER_MODE } from "./mission-context.js";
@@ -59,6 +60,7 @@ export function buildRunnerReport({
     warnings,
     workspace_preparation: workspacePreparation,
     implementation_dispatch: implementationDispatch,
+    worker_task: implementationDispatch?.worker_task ? deriveWorkerTaskSummary(implementationDispatch.worker_task) : null,
     verification,
     internal_review: internalReview,
     fix_loop: fixLoop,

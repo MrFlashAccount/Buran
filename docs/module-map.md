@@ -101,3 +101,25 @@ recover -> replay + rebuild + quarantine when state is ambiguous
 - no direct implementation/fix worker execution in the runner;
 - no default remote provider write path;
 - no persisted schema migration for legacy provider-specific mirrors in this slice.
+
+## WorkerTask ownership map
+
+| Path | WorkerTask responsibility |
+| --- | --- |
+| `src/core/modules/execution-runs/entities/worker-task.js` | Core lifecycle semantics, ids, status/decision normalization, sanitized completion evidence, and public summary derivation. |
+| `src/execution-runs/schema/` | Durable snapshot/event validation for worker task heads/history and typed worker task events. |
+| `src/integrations/storage/json-registry/` | Atomic event/snapshot persistence, idempotency repair, and repository port implementation for worker task lifecycle writes. |
+| `src/execution-runs/recovery/` | Replay and quarantine of worker task events alongside existing run/gate/projection semantics. |
+| `src/application/mission-phase-runner.js` and `src/application/fix-review-loop.js` | Sequencing only: create task, record dispatch, ingest completion, require accepted decision before outer state transition. |
+| `src/observability/` | Privacy-safe summaries and redaction of raw worker payload fields. |
+
+## WorkerTask source ownership
+
+| Path | Responsibility |
+| --- | --- |
+| `src/core/modules/execution-runs/entities/worker-task.js` | Provider-neutral WorkerTask entity helpers, identity, lifecycle head updates, completion evaluation, and sanitized summary derivation. |
+| `src/execution-runs/schema/` | Worker task snapshot/event/completion/decision builders and validators. |
+| `src/integrations/storage/json-registry/store.js` | Concrete worker task event append, idempotency, snapshot merge, and quarantine persistence. |
+| `src/application/mission-phase-runner.js` | Running-stage worker task sequencing around implementation dispatch. |
+| `src/application/fix-review-loop.js` | Fix-attempt worker task sequencing and legacy recorded-result resume compatibility. |
+| `src/observability/` | Privacy-safe worker task summary output/redaction. |

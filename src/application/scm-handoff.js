@@ -48,7 +48,7 @@ function projectionProblemFromError(error) {
 }
 
 export async function runScmHandoffStage({ registryRoot, runId, current, previousState, stepsTaken, blockers, warnings, workspacePreparation, implementationDispatch, verification, internalReview, clock, actor, scmHandoffAdapter, registryRepository } = {}) {
-  const registry = assertRegistryRepository(registryRepository);
+  const registry = assertRegistryRepository(registryRepository, { methodNames: ["recordProjectionIntent", "recordProjectionResult", "transitionRun", "getRegistryPaths"] });
   const handoffAdapter = assertScmHandoffPort(scmHandoffAdapter);
   let projection = null;
   let plannedProjection;

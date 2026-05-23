@@ -225,6 +225,25 @@ export async function runImplementationDispatchStage({ runContext = {}, reportSt
         artifactSha256: recorded.artifact_ref.sha256,
       }));
 
+      const workerTaskCreated = await registry.recordWorkerTaskCreated(registryRoot, runId, {
+        purpose: "implementation_dispatch",
+        epoch: current.execution?.current_epoch || 0,
+        attempt: 1,
+        authority: IMPLEMENTATION_DISPATCH_ADAPTER,
+        recorded_at: recordedAt,
+        actor,
+        idempotency_key: `${runId}:worker_task:implementation_dispatch:${current.execution?.current_epoch || 0}:1`,
+      });
+      current = workerTaskCreated.run;
+      stepsTaken.push(buildStep({
+        action: "worker_task_created",
+        status: workerTaskCreated.status === "noop" ? "noop" : "completed",
+        fromState: "running",
+        toState: "running",
+        detail: "Durable implementation-dispatch WorkerTask was created before adapter execution.",
+        sequence: workerTaskCreated.event?.sequence ?? null,
+      }));
+
       const dispatchIntent = buildImplementationDispatchIntent(current, {
         workspacePreparationArtifactRef: recorded.artifact_ref,
       });
@@ -245,6 +264,24 @@ export async function runImplementationDispatchStage({ runContext = {}, reportSt
         },
       });
       current = dispatchRecorded.run;
+      const workerTaskDispatched = await registry.recordWorkerTaskDispatch(registryRoot, runId, {
+        intent_ref: dispatchRecorded.artifact_ref,
+        dispatch_ref: dispatchRecorded.artifact_ref,
+        recorded_at: recordedAt,
+        actor,
+        idempotency_key: `${dispatchIntent.intent.completion_idempotency_key.replace(":worker_completion:", ":worker_dispatch:")}:${dispatchRecorded.artifact_ref.sha256}`,
+      });
+      current = workerTaskDispatched.run;
+      stepsTaken.push(buildStep({
+        action: "worker_task_dispatch_recorded",
+        status: workerTaskDispatched.status === "noop" ? "noop" : "completed",
+        fromState: "running",
+        toState: "running",
+        detail: "WorkerTask dispatch intent was recorded as durable task evidence.",
+        sequence: workerTaskDispatched.event?.sequence ?? null,
+        artifactPath: dispatchRecorded.artifact_ref.path,
+        artifactSha256: dispatchRecorded.artifact_ref.sha256,
+      }));
       stepsTaken.push(buildStep({
         action: "implementation_dispatch_intent",
         status: dispatchRecorded.status === "noop" ? "noop" : "completed",
@@ -351,10 +388,51 @@ export async function runImplementationDispatchStage({ runContext = {}, reportSt
         }));
       }
 
+      if (implementationDispatch?.result_artifact_ref) {
+        const completionIdempotencyKey = `${dispatchIntent.intent.completion_idempotency_key}:${implementationDispatch.result_artifact_ref.sha256}`;
+        const completionRecorded = await registry.recordWorkerCompletion(registryRoot, runId, {
+          worker_task_id: dispatchIntent.intent.worker_task_id,
+          purpose: "implementation_dispatch",
+          epoch: dispatchIntent.intent.worker_task_epoch,
+          attempt: dispatchIntent.intent.worker_task_attempt,
+          authority: dispatchIntent.intent.completion_authority,
+          status: implementationDispatch.status,
+          completion_ref: implementationDispatch.result_artifact_ref,
+          evidence: implementationDispatch.evidence || {},
+          received_at: clock().toISOString(),
+          actor: implementationDispatch?.adapter || IMPLEMENTATION_DISPATCH_ADAPTER,
+          idempotency_key: completionIdempotencyKey,
+        });
+        current = completionRecorded.run;
+        const decisionRecorded = await registry.recordWorkerCompletionDecision(registryRoot, runId, {
+          completion: current.worker_tasks?.head?.completion,
+          decided_at: clock().toISOString(),
+          actor,
+          idempotency_key: `${completionIdempotencyKey}:decision`,
+        });
+        current = decisionRecorded.run;
+        implementationDispatch = {
+          ...implementationDispatch,
+          worker_task: current.worker_tasks?.head || null,
+        };
+        stepsTaken.push(buildStep({
+          action: "worker_completion_decided",
+          status: decisionRecorded.status === "noop" ? "noop" : "completed",
+          fromState: "running",
+          toState: "running",
+          detail: `Worker completion decision recorded as ${current.worker_tasks?.head?.decision?.decision || "unknown"} before any outer transition.`,
+          sequence: decisionRecorded.event?.sequence ?? null,
+          artifactPath: implementationDispatch.result_artifact_ref?.path || "",
+          artifactSha256: implementationDispatch.result_artifact_ref?.sha256 || "",
+        }));
+      }
+
       warnings.push(...inspected.warnings);
       const dispatchStatus = implementationDispatch?.status;
+      const acceptedWorkerCompletion = current.worker_tasks?.head?.decision?.decision === "accepted";
+      const workerDecision = current.worker_tasks?.head?.decision?.decision || "";
       const dispatchAdapter = dispatchResult?.adapter || implementationDispatch?.adapter || IMPLEMENTATION_DISPATCH_ADAPTER;
-      if (dispatchStatus === "COMPLETED") {
+      if (dispatchStatus === "COMPLETED" && acceptedWorkerCompletion) {
         const transitioned = await registry.transitionRun(registryRoot, runId, {
           toState: "verification",
           actor,
@@ -381,7 +459,7 @@ export async function runImplementationDispatchStage({ runContext = {}, reportSt
           artifactPath: implementationDispatch.result_artifact_ref.path,
           artifactSha256: implementationDispatch.result_artifact_ref.sha256,
         }));
-      } else if (dispatchStatus === "FAILED") {
+      } else if (dispatchStatus === "FAILED" && acceptedWorkerCompletion) {
         const transitioned = await registry.transitionRun(registryRoot, runId, {
           toState: "failed_execution",
           actor,
@@ -416,6 +494,12 @@ export async function runImplementationDispatchStage({ runContext = {}, reportSt
           result_artifact_ref: implementationDispatch.result_artifact_ref,
         }));
       } else if (reusableDispatchResult?.reusable !== false) {
+        if (dispatchStatus === "COMPLETED" || dispatchStatus === "FAILED") {
+          blockers.push(buildIssue("worker_completion_not_accepted", "Worker completion did not receive an accepted durable CompletionDecision; outer transition was not advanced.", {
+            worker_decision: workerDecision,
+            worker_task_id: current.worker_tasks?.head?.worker_task_id || "",
+          }));
+        }
         blockers.push(buildIssue("implementation_dispatch_blocked", implementationBoundaryMessage(), {
           dispatch_status: implementationDispatch.status,
           problem: implementationDispatch.problem || null,

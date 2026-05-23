@@ -8,6 +8,9 @@ import {
   GATE_STATUS_SET,
   SCHEMA_VERSION,
   TERMINAL_STATES,
+  WORKER_COMPLETION_DECISION_SET,
+  WORKER_TASK_EVENT_TYPES,
+  WORKER_TASK_STATUS_SET,
 } from "../../core/modules/execution-runs/constants.js";
 import { isKnownState } from "../../core/modules/execution-runs/state-machine.js";
 import { isRecord } from "../../shared/primitives.js";
@@ -639,6 +642,10 @@ export function validateRunSnapshot(snapshot, { expectedRunId = "", mode = "reco
   const projectionLedger = requireRecord(snapshot, "projection_ledger", errors);
   if (projectionLedger) validateProjectionSummary(snapshot, projectionLedger, errors, currentEpoch);
 
+  if (hasOwn(snapshot, "worker_tasks")) {
+    validateWorkerTasksSnapshot(snapshot.worker_tasks, errors, "worker_tasks");
+  }
+
   return { ok: errors.length === 0, errors, error: errors.join("; "), mode };
 }
 
@@ -658,4 +665,111 @@ export function findArtifactRefs(value, refs = []) {
   if (typeof value.path === "string" && typeof value.sha256 === "string") refs.push({ path: value.path, sha256: value.sha256 });
   for (const entry of Object.values(value)) findArtifactRefs(entry, refs);
   return refs;
+}
+
+function validateWorkerTaskDecision(decision, errors, fieldPath) {
+  if (!isRecord(decision)) {
+    errors.push(`run.json field ${fieldPath} must be an object`);
+    return;
+  }
+  if (!WORKER_COMPLETION_DECISION_SET.has(decision.decision)) errors.push(`run.json field ${fieldPath}.decision has unsupported value: ${decision.decision}`);
+  if (!nonEmptyString(decision.reason)) errors.push(`run.json field ${fieldPath}.reason must be a non-empty string`);
+  if (!isTimestampString(decision.decided_at)) errors.push(`run.json field ${fieldPath}.decided_at must be a timestamp string`);
+  if (!hasOwn(decision, "idempotency_key") || typeof decision.idempotency_key !== "string") errors.push(`run.json field ${fieldPath}.idempotency_key must be a string`);
+}
+
+export function validateWorkerTaskHead(head, errors = [], fieldPath = "worker_tasks.head") {
+  if (!isRecord(head)) {
+    errors.push(`run.json field ${fieldPath} must be an object`);
+    return errors;
+  }
+  for (const field of ["worker_task_id", "run_id", "task_id", "purpose", "authority", "status", "created_at", "updated_at"]) {
+    if (!nonEmptyString(head[field])) errors.push(`run.json field ${fieldPath}.${field} must be a non-empty string`);
+  }
+  if (!WORKER_TASK_STATUS_SET.has(head.status)) errors.push(`run.json field ${fieldPath}.status has unsupported value: ${head.status}`);
+  if (!isNonNegativeInteger(head.epoch)) errors.push(`run.json field ${fieldPath}.epoch must be a non-negative integer`);
+  if (!isPositiveInteger(head.attempt)) errors.push(`run.json field ${fieldPath}.attempt must be a positive integer`);
+  if (!isTimestampString(head.created_at)) errors.push(`run.json field ${fieldPath}.created_at must be a timestamp string`);
+  if (!isTimestampString(head.updated_at)) errors.push(`run.json field ${fieldPath}.updated_at must be a timestamp string`);
+  if (!(head.deadline_at === null || isTimestampString(head.deadline_at))) errors.push(`run.json field ${fieldPath}.deadline_at must be null or a timestamp string`);
+  if (!(head.dispatch === null || isRecord(head.dispatch))) errors.push(`run.json field ${fieldPath}.dispatch must be an object or null`);
+  if (!(head.completion === null || isRecord(head.completion))) errors.push(`run.json field ${fieldPath}.completion must be an object or null`);
+  if (isRecord(head.decision)) validateWorkerTaskDecision(head.decision, errors, `${fieldPath}.decision`);
+  else if (head.decision !== null) errors.push(`run.json field ${fieldPath}.decision must be an object or null`);
+  if (head.overdue_recorded_at && !isTimestampString(head.overdue_recorded_at)) errors.push(`run.json field ${fieldPath}.overdue_recorded_at must be a timestamp string when present`);
+  if (!(head.quarantine === null || isRecord(head.quarantine))) errors.push(`run.json field ${fieldPath}.quarantine must be an object or null`);
+  return errors;
+}
+
+function validateWorkerTasksSnapshot(workerTasks, errors, fieldPath) {
+  if (!isRecord(workerTasks)) {
+    errors.push(`run.json field ${fieldPath} must be an object`);
+    return;
+  }
+  if (!hasOwn(workerTasks, "head")) errors.push(`run.json missing required field: ${fieldPath}.head`);
+  else if (!(workerTasks.head === null || isRecord(workerTasks.head))) errors.push(`run.json field ${fieldPath}.head must be an object or null`);
+  else if (isRecord(workerTasks.head)) validateWorkerTaskHead(workerTasks.head, errors, `${fieldPath}.head`);
+  if (!Array.isArray(workerTasks.history)) errors.push(`run.json field ${fieldPath}.history must be an array`);
+  else workerTasks.history.forEach((entry, index) => validateWorkerTaskHead(entry, errors, `${fieldPath}.history[${index}]`));
+}
+
+function validateWorkerTaskCommonPayload(payload, errors, fieldPath) {
+  for (const field of ["worker_task_id", "run_id", "task_id", "purpose", "authority", "idempotency_key"]) {
+    if (!nonEmptyString(payload[field])) errors.push(`${fieldPath}.${field} must be a non-empty string`);
+  }
+  if (!isNonNegativeInteger(payload.epoch)) errors.push(`${fieldPath}.epoch must be a non-negative integer`);
+  if (!isPositiveInteger(payload.attempt)) errors.push(`${fieldPath}.attempt must be a positive integer`);
+}
+
+export function validateWorkerTaskEventPayload(payload, { fieldPath = "event.evidence" } = {}) {
+  const errors = [];
+  if (!isRecord(payload)) return { ok: false, errors: [`${fieldPath} must be an object`], error: `${fieldPath} must be an object` };
+  validateWorkerTaskCommonPayload(payload, errors, fieldPath);
+  if (!WORKER_TASK_STATUS_SET.has(payload.status)) errors.push(`${fieldPath}.status has unsupported value: ${payload.status}`);
+  if (!isTimestampString(payload.recorded_at)) errors.push(`${fieldPath}.recorded_at must be a timestamp string`);
+  if (!(payload.deadline_at === null || payload.deadline_at === undefined || isTimestampString(payload.deadline_at))) errors.push(`${fieldPath}.deadline_at must be null or a timestamp string`);
+  for (const key of ["intent_ref", "dispatch_ref"]) {
+    if (payload[key]) validateArtifactRef(payload[key], errors, `${fieldPath}.${key}`);
+  }
+  return { ok: errors.length === 0, errors, error: errors.join("; ") };
+}
+
+export function validateWorkerCompletionPayload(payload, { fieldPath = "event.evidence" } = {}) {
+  const errors = [];
+  if (!isRecord(payload)) return { ok: false, errors: [`${fieldPath} must be an object`], error: `${fieldPath} must be an object` };
+  validateWorkerTaskCommonPayload(payload, errors, fieldPath);
+  if (!["COMPLETED", "FAILED", "BLOCKED"].includes(payload.status)) errors.push(`${fieldPath}.status has unsupported value: ${payload.status}`);
+  if (!isTimestampString(payload.received_at)) errors.push(`${fieldPath}.received_at must be a timestamp string`);
+  if (payload.completion_ref) validateArtifactRef(payload.completion_ref, errors, `${fieldPath}.completion_ref`);
+  if (!Array.isArray(payload.evidence_refs)) errors.push(`${fieldPath}.evidence_refs must be an array`);
+  else payload.evidence_refs.forEach((ref, index) => validateArtifactRef(ref, errors, `${fieldPath}.evidence_refs[${index}]`));
+  return { ok: errors.length === 0, errors, error: errors.join("; ") };
+}
+
+export function validateCompletionDecisionPayload(payload, { fieldPath = "event.evidence" } = {}) {
+  const errors = [];
+  if (!isRecord(payload)) return { ok: false, errors: [`${fieldPath} must be an object`], error: `${fieldPath} must be an object` };
+  for (const field of ["worker_task_id", "run_id", "task_id", "idempotency_key", "completion_idempotency_key"]) {
+    if (!nonEmptyString(payload[field])) errors.push(`${fieldPath}.${field} must be a non-empty string`);
+  }
+  if (!WORKER_COMPLETION_DECISION_SET.has(payload.decision)) errors.push(`${fieldPath}.decision has unsupported value: ${payload.decision}`);
+  if (!nonEmptyString(payload.reason)) errors.push(`${fieldPath}.reason must be a non-empty string`);
+  if (!isTimestampString(payload.decided_at)) errors.push(`${fieldPath}.decided_at must be a timestamp string`);
+  return { ok: errors.length === 0, errors, error: errors.join("; ") };
+}
+
+export function validateWorkerTaskRecordedEvent(event, { expectedRunId = "", expectedSequence } = {}) {
+  if (!isRecord(event)) return { ok: false, errors: ["event is not an object"], error: "event is not an object" };
+  const errors = [];
+  if (event.schema_version !== SCHEMA_VERSION) errors.push(`unsupported event schema_version: ${event.schema_version}`);
+  if (expectedRunId && event.run_id !== expectedRunId) errors.push(`event run_id mismatch: ${event.run_id}`);
+  if (!Number.isSafeInteger(event.sequence)) errors.push("event sequence is not an integer");
+  else if (expectedSequence !== undefined && event.sequence !== expectedSequence) errors.push(`event sequence ${event.sequence} is not expected ${expectedSequence}`);
+  if (!WORKER_TASK_EVENT_TYPES.includes(event.type)) errors.push(`unexpected worker task event type: ${event.type}`);
+  if (!nonEmptyString(event.actor)) errors.push("event actor is missing");
+  if (!nonEmptyString(event.idempotency_key)) errors.push("event idempotency_key is missing");
+  if (["worker_task.completion_received"].includes(event.type)) errors.push(...validateWorkerCompletionPayload(event.evidence).errors);
+  else if (["worker_task.completion_decided"].includes(event.type)) errors.push(...validateCompletionDecisionPayload(event.evidence).errors);
+  else errors.push(...validateWorkerTaskEventPayload(event.evidence).errors);
+  return { ok: errors.length === 0, errors, error: errors.join("; ") };
 }

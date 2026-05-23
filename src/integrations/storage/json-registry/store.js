@@ -2,6 +2,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 
 import { ARTIFACT_STAGE_STATE_BY_NAME, GATE_STATE_BY_NAME, GATE_STATUS, SCHEMA_VERSION, TERMINAL_STATES } from "../../../core/modules/execution-runs/constants.js";
+import { applyCompletionDecisionToWorkerTask, completionDecisionMutatesCurrentTruth, createWorkerTask, deriveWorkerTaskSummary, evaluateWorkerCompletion, markWorkerTaskOverdue, normalizeWorkerCompletion, quarantineWorkerTask, recordWorkerTaskDispatch as recordWorkerTaskDispatchCore } from "../../../core/modules/execution-runs/entities/worker-task.js";
 import {
   buildBatchId,
   buildBatchSnapshot,
@@ -11,6 +12,9 @@ import {
   validateArtifactRecordedPayload,
   validateGateResultPayload,
   validateProjectionResultPayload,
+  validateWorkerTaskEventPayload,
+  validateWorkerCompletionPayload,
+  validateCompletionDecisionPayload,
 } from "../../../execution-runs/schema/index.js";
 import { appendJsonLine, writeJsonAtomic, writeTextAtomic } from "./atomic-read-write.js";
 import { getRegistryPaths, getRunPaths } from "./path-layout.js";
@@ -180,6 +184,15 @@ function sameArtifactRecordedPayload(left, right) {
   if (!left || !right) return false;
   const normalize = (payload) => {
     const { recorded_at: _recordedAt, ...rest } = payload;
+    return rest;
+  };
+  return samePayload(normalize(left), normalize(right));
+}
+
+function sameIdempotentWorkerTaskPayload(left, right) {
+  if (!left || !right) return false;
+  const normalize = (payload) => {
+    const { recorded_at: _recordedAt, received_at: _receivedAt, decided_at: _decidedAt, ...rest } = payload;
     return rest;
   };
   return samePayload(normalize(left), normalize(right));
@@ -759,3 +772,322 @@ export async function recordProjectionResult(registryRoot, runId, payload = {}) 
     type: "projection.result_recorded",
   });
 }
+
+function workerTaskSlice(snapshot) {
+  return isRecord(snapshot.worker_tasks) ? snapshot.worker_tasks : { head: null, history: [] };
+}
+
+function appendWorkerTaskHistory(snapshot, head) {
+  const slice = workerTaskSlice(snapshot);
+  return head ? [...(Array.isArray(slice.history) ? slice.history : []), head] : (Array.isArray(slice.history) ? slice.history : []);
+}
+
+function appendDistinctWorkerTaskHistory(snapshot, head) {
+  const history = appendWorkerTaskHistory(snapshot, null);
+  return head && !history.some((entry) => samePayload(entry, head)) ? [...history, head] : history;
+}
+
+function observedCompletionHead(currentHead, completion, decision = "late") {
+  return currentHead ? {
+    ...currentHead,
+    status: decision,
+    completion,
+    decision: {
+      decision,
+      reason: `observed ${decision} worker completion`,
+      decided_at: completion.received_at,
+      idempotency_key: completion.idempotency_key,
+    },
+    updated_at: completion.received_at,
+  } : null;
+}
+
+export function withWorkerTaskCreatedSnapshot(snapshot, head, sequence) {
+  const previousHead = snapshot.worker_tasks?.head || null;
+  return {
+    ...snapshot,
+    last_sequence: sequence,
+    updated_at: head.updated_at,
+    worker_tasks: { head, history: appendDistinctWorkerTaskHistory(snapshot, previousHead) },
+  };
+}
+
+export function withWorkerTaskDispatchSnapshot(snapshot, head, sequence) {
+  return {
+    ...snapshot,
+    last_sequence: sequence,
+    updated_at: head.updated_at,
+    worker_tasks: { head, history: appendWorkerTaskHistory(snapshot, head) },
+  };
+}
+
+export function withWorkerCompletionSnapshot(snapshot, completion, sequence) {
+  const currentHead = snapshot.worker_tasks?.head || null;
+  const evaluated = evaluateWorkerCompletion(currentHead, completion, { now: completion.received_at });
+  const mutates = completionDecisionMutatesCurrentTruth(evaluated.decision);
+  const head = mutates && currentHead ? { ...currentHead, status: "completion_received", completion, updated_at: completion.received_at } : currentHead;
+  const history = mutates ? appendWorkerTaskHistory(snapshot, head) : appendWorkerTaskHistory(snapshot, observedCompletionHead(currentHead, completion, evaluated.decision));
+  return {
+    ...snapshot,
+    last_sequence: sequence,
+    updated_at: completion.received_at,
+    worker_tasks: { head, history },
+  };
+}
+
+export function withWorkerCompletionDecisionSnapshot(snapshot, head, sequence) {
+  const currentHead = snapshot.worker_tasks?.head || null;
+  const mutates = !currentHead || !head ? false : !samePayload(currentHead, head);
+  return {
+    ...snapshot,
+    last_sequence: sequence,
+    updated_at: head?.updated_at || currentHead?.updated_at || snapshot.updated_at,
+    worker_tasks: { head: mutates ? head : currentHead, history: mutates ? appendWorkerTaskHistory(snapshot, head) : appendWorkerTaskHistory(snapshot, null) },
+  };
+}
+
+export function withWorkerTaskQuarantineSnapshot(snapshot, head, sequence) {
+  return withWorkerCompletionDecisionSnapshot(snapshot, head, sequence);
+}
+
+async function recordWorkerTaskEvent(registryRoot, runId, { type, payload, actor = "registry", timestamp = "", idempotencyKey = "", mergeSnapshot }) {
+  const paths = getRunPaths(registryRoot, runId);
+  const snapshot = await readRunSnapshot(paths.runPath);
+  const eventTimestamp = nonEmptyString(timestamp) || payload.recorded_at || payload.received_at || payload.decided_at || new Date().toISOString();
+  const eventKey = nonEmptyString(idempotencyKey) || nonEmptyString(payload.idempotency_key) || `${runId}:${type}:${payload.worker_task_id}:${eventTimestamp}`;
+  const priorEvents = await readEventsByIdempotency(paths.eventsPath, type, eventKey);
+  if (priorEvents.length > 0) {
+    const existingPayload = priorEvents[0].evidence || {};
+    if (!samePayload(existingPayload, payload) && !sameIdempotentWorkerTaskPayload(existingPayload, payload)) throw new Error(`${type} idempotency key ${eventKey} conflicts with an existing payload`);
+    const repairedSnapshot = mergeSnapshot(snapshot, priorEvents[0].sequence, existingPayload);
+    if (!samePayload(repairedSnapshot, snapshot)) await writeJsonAtomic(paths.runPath, repairedSnapshot);
+    return { status: "noop", run: repairedSnapshot, event: priorEvents[0] };
+  }
+  const sequence = await nextSequence(paths, snapshot);
+  const event = buildNonTransitionEvent({ runId, sequence, timestamp: eventTimestamp, type, actor, evidence: payload, idempotencyKey: eventKey });
+  const nextSnapshot = mergeSnapshot(snapshot, sequence, payload);
+  await appendJsonLine(paths.eventsPath, event);
+  await writeJsonAtomic(paths.runPath, nextSnapshot);
+  return { status: "recorded", run: nextSnapshot, event };
+}
+
+export async function recordWorkerTaskCreated(registryRoot, runId, input = {}) {
+  const paths = getRunPaths(registryRoot, runId);
+  const snapshot = await readRunSnapshot(paths.runPath);
+  const head = createWorkerTask({
+    run_id: snapshot.run_id,
+    task_id: snapshot.task_id,
+    purpose: input.purpose,
+    epoch: Number.isSafeInteger(input.epoch) ? input.epoch : snapshot.execution?.current_epoch || 0,
+    attempt: input.attempt || 1,
+    authority: input.authority,
+    deadline_at: input.deadline_at ?? null,
+    created_at: input.recorded_at || input.created_at || new Date().toISOString(),
+  });
+  const payload = {
+    worker_task_id: head.worker_task_id,
+    run_id: head.run_id,
+    task_id: head.task_id,
+    purpose: head.purpose,
+    epoch: head.epoch,
+    attempt: head.attempt,
+    authority: head.authority,
+    status: head.status,
+    deadline_at: head.deadline_at,
+    recorded_at: head.created_at,
+    idempotency_key: input.idempotency_key || `${head.worker_task_id}:created`,
+  };
+  const decision = validateWorkerTaskEventPayload(payload);
+  if (!decision.ok) throw new Error(decision.error);
+  return recordWorkerTaskEvent(registryRoot, runId, {
+    type: "worker_task.created",
+    payload,
+    actor: input.actor || "registry",
+    timestamp: payload.recorded_at,
+    idempotencyKey: payload.idempotency_key,
+    mergeSnapshot: (snap, sequence) => withWorkerTaskCreatedSnapshot(snap, head, sequence),
+  });
+}
+
+export async function recordWorkerTaskDispatch(registryRoot, runId, input = {}) {
+  const paths = getRunPaths(registryRoot, runId);
+  const snapshot = await readRunSnapshot(paths.runPath);
+  if (!isRecord(snapshot.worker_tasks?.head)) throw new Error("worker_task.dispatch_recorded requires worker_tasks.head");
+  const head = recordWorkerTaskDispatchCore(snapshot.worker_tasks.head, {
+    intent_ref: input.intent_ref,
+    dispatch_ref: input.dispatch_ref,
+    idempotency_key: input.idempotency_key,
+    recorded_at: input.recorded_at || new Date().toISOString(),
+  });
+  const payload = {
+    worker_task_id: head.worker_task_id,
+    run_id: head.run_id,
+    task_id: head.task_id,
+    purpose: head.purpose,
+    epoch: head.epoch,
+    attempt: head.attempt,
+    authority: head.authority,
+    status: head.status,
+    deadline_at: head.deadline_at,
+    recorded_at: head.updated_at,
+    idempotency_key: input.idempotency_key || `${head.worker_task_id}:dispatch`,
+    intent_ref: input.intent_ref || null,
+    dispatch_ref: input.dispatch_ref || null,
+  };
+  const decision = validateWorkerTaskEventPayload(payload);
+  if (!decision.ok) throw new Error(decision.error);
+  return recordWorkerTaskEvent(registryRoot, runId, {
+    type: "worker_task.dispatch_recorded",
+    payload,
+    actor: input.actor || "registry",
+    timestamp: payload.recorded_at,
+    idempotencyKey: payload.idempotency_key,
+    mergeSnapshot: (snap, sequence) => withWorkerTaskDispatchSnapshot(snap, head, sequence),
+  });
+}
+
+export async function recordWorkerCompletion(registryRoot, runId, input = {}) {
+  const paths = getRunPaths(registryRoot, runId);
+  const snapshot = await readRunSnapshot(paths.runPath);
+  const currentHead = snapshot.worker_tasks?.head || {};
+  const completion = normalizeWorkerCompletion({
+    worker_task_id: Object.prototype.hasOwnProperty.call(input, "worker_task_id") ? input.worker_task_id : currentHead.worker_task_id,
+    run_id: input.run_id || snapshot.run_id,
+    task_id: input.task_id || snapshot.task_id,
+    purpose: input.purpose || currentHead.purpose,
+    epoch: Number.isSafeInteger(input.epoch) ? input.epoch : currentHead.epoch,
+    attempt: input.attempt || currentHead.attempt,
+    authority: input.authority || currentHead.authority,
+    status: input.status,
+    completion_ref: input.completion_ref,
+    evidence: input.evidence,
+    idempotency_key: input.idempotency_key,
+    received_at: input.received_at || input.recorded_at || new Date().toISOString(),
+  });
+  const payload = { ...completion, evidence_refs: Object.values(completion.evidence || {}).flatMap((value) => Array.isArray(value) ? value : [value]).filter((value) => isRecord(value) && value.path && value.sha256) };
+  const decision = validateWorkerCompletionPayload(payload);
+  if (!decision.ok) throw new Error(decision.error);
+  return recordWorkerTaskEvent(registryRoot, runId, {
+    type: "worker_task.completion_received",
+    payload,
+    actor: input.actor || completion.authority,
+    timestamp: completion.received_at,
+    idempotencyKey: completion.idempotency_key,
+    mergeSnapshot: (snap, sequence) => withWorkerCompletionSnapshot(snap, completion, sequence),
+  });
+}
+
+export async function recordWorkerCompletionDecision(registryRoot, runId, input = {}) {
+  const paths = getRunPaths(registryRoot, runId);
+  const snapshot = await readRunSnapshot(paths.runPath);
+  if (!isRecord(snapshot.worker_tasks?.head)) throw new Error("worker_task.completion_decided requires worker_tasks.head");
+  const completionInput = input.completion || snapshot.worker_tasks.head.completion || {};
+  const completion = normalizeWorkerCompletion({
+    worker_task_id: completionInput.worker_task_id || snapshot.worker_tasks.head.worker_task_id,
+    run_id: completionInput.run_id || snapshot.run_id,
+    task_id: completionInput.task_id || snapshot.task_id,
+    purpose: completionInput.purpose || snapshot.worker_tasks.head.purpose,
+    epoch: Number.isSafeInteger(completionInput.epoch) ? completionInput.epoch : snapshot.worker_tasks.head.epoch,
+    attempt: completionInput.attempt || snapshot.worker_tasks.head.attempt,
+    authority: completionInput.authority || snapshot.worker_tasks.head.authority,
+    status: completionInput.status,
+    completion_ref: completionInput.completion_ref,
+    evidence: completionInput.evidence,
+    idempotency_key: completionInput.idempotency_key,
+    received_at: completionInput.received_at || completionInput.recorded_at || snapshot.worker_tasks.head.completion?.received_at,
+  });
+  const evaluated = evaluateWorkerCompletion(snapshot.worker_tasks.head, completion, { now: input.decided_at || new Date().toISOString() });
+  const callerForcedAccepted = String(input.decision || "").toLowerCase() === "accepted";
+  const effectiveDecision = input.decision && !callerForcedAccepted
+    ? { decision: input.decision, reason: input.reason || "completion decision recorded", decided_at: input.decided_at || new Date().toISOString() }
+    : evaluated;
+  const normalizedDecision = {
+    ...effectiveDecision,
+    idempotency_key: input.idempotency_key || `${completion.idempotency_key}:decision`,
+  };
+  const head = applyCompletionDecisionToWorkerTask(snapshot.worker_tasks.head, completion, normalizedDecision);
+  const payload = {
+    worker_task_id: completion.worker_task_id || snapshot.worker_tasks.head.worker_task_id,
+    run_id: snapshot.run_id,
+    task_id: snapshot.task_id,
+    decision: normalizedDecision.decision,
+    reason: normalizedDecision.reason,
+    decided_at: normalizedDecision.decided_at,
+    idempotency_key: normalizedDecision.idempotency_key,
+    completion_idempotency_key: completion.idempotency_key,
+  };
+  const decision = validateCompletionDecisionPayload(payload);
+  if (!decision.ok) throw new Error(decision.error);
+  return recordWorkerTaskEvent(registryRoot, runId, {
+    type: "worker_task.completion_decided",
+    payload,
+    actor: input.actor || "registry",
+    timestamp: payload.decided_at,
+    idempotencyKey: payload.idempotency_key,
+    mergeSnapshot: (snap, sequence) => withWorkerCompletionDecisionSnapshot(snap, head, sequence),
+  });
+}
+
+export async function recordWorkerTaskOverdue(registryRoot, runId, input = {}) {
+  const paths = getRunPaths(registryRoot, runId);
+  const snapshot = await readRunSnapshot(paths.runPath);
+  if (!isRecord(snapshot.worker_tasks?.head)) throw new Error("worker_task.overdue_recorded requires worker_tasks.head");
+  const head = markWorkerTaskOverdue(snapshot.worker_tasks.head, input);
+  const payload = {
+    worker_task_id: head.worker_task_id,
+    run_id: head.run_id,
+    task_id: head.task_id,
+    purpose: head.purpose,
+    epoch: head.epoch,
+    attempt: head.attempt,
+    authority: head.authority,
+    status: head.status,
+    deadline_at: head.deadline_at,
+    recorded_at: head.updated_at,
+    idempotency_key: input.idempotency_key || `${head.worker_task_id}:overdue`,
+    reason: input.reason || "worker task deadline passed",
+  };
+  const decision = validateWorkerTaskEventPayload(payload);
+  if (!decision.ok) throw new Error(decision.error);
+  return recordWorkerTaskEvent(registryRoot, runId, {
+    type: "worker_task.overdue_recorded",
+    payload,
+    actor: input.actor || "registry",
+    timestamp: payload.recorded_at,
+    idempotencyKey: payload.idempotency_key,
+    mergeSnapshot: (snap, sequence) => withWorkerCompletionDecisionSnapshot(snap, head, sequence),
+  });
+}
+
+export async function quarantineWorkerTaskRun(registryRoot, runId, input = {}) {
+  const paths = getRunPaths(registryRoot, runId);
+  const snapshot = await readRunSnapshot(paths.runPath);
+  if (!isRecord(snapshot.worker_tasks?.head)) throw new Error("worker_task.quarantined requires worker_tasks.head");
+  const head = quarantineWorkerTask(snapshot.worker_tasks.head, input);
+  const payload = {
+    worker_task_id: head.worker_task_id,
+    run_id: head.run_id,
+    task_id: head.task_id,
+    purpose: head.purpose,
+    epoch: head.epoch,
+    attempt: head.attempt,
+    authority: head.authority,
+    status: head.status,
+    deadline_at: head.deadline_at,
+    recorded_at: head.updated_at,
+    idempotency_key: input.idempotency_key || `${head.worker_task_id}:quarantine`,
+    reason: input.reason || "worker task requires human review",
+  };
+  const decision = validateWorkerTaskEventPayload(payload);
+  if (!decision.ok) throw new Error(decision.error);
+  return recordWorkerTaskEvent(registryRoot, runId, {
+    type: "worker_task.quarantined",
+    payload,
+    actor: input.actor || "registry",
+    timestamp: payload.recorded_at,
+    idempotencyKey: payload.idempotency_key,
+    mergeSnapshot: (snap, sequence) => withWorkerTaskQuarantineSnapshot(snap, head, sequence),
+  });
+}
+
+export { quarantineWorkerTaskRun as quarantineWorkerTask, deriveWorkerTaskSummary };

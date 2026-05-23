@@ -12,7 +12,9 @@ import {
   validateProjectionResultPayload,
   validateProjectionResultRecordedEvent,
   validateRunSnapshot,
+  validateWorkerTaskRecordedEvent,
 } from "../schema/index.js";
+import { applyCompletionDecisionToWorkerTask, completionDecisionMutatesCurrentTruth, createWorkerTask, evaluateWorkerCompletion, markWorkerTaskOverdue, normalizeWorkerCompletion, quarantineWorkerTask, recordWorkerTaskDispatch as recordWorkerTaskDispatchCore } from "../../core/modules/execution-runs/entities/worker-task.js";
 import { assertRegistryRepository } from "../../core/modules/execution-runs/ports/registry-repository.js";
 import { assertWorkspaceLeaseService } from "../../core/modules/workspace-leases/ports/workspace-lease-service.js";
 import { assertRegistryRecoveryStore } from "./store.js";
@@ -109,6 +111,10 @@ function replaySeed(snapshot) {
       },
     },
     projection_ledger: {},
+    worker_tasks: {
+      head: null,
+      history: [],
+    },
   };
 }
 
@@ -121,6 +127,7 @@ function compareSemanticSlice(snapshot, replay) {
     artifacts: snapshot.artifacts?.recorded || { by_path: {} },
     handoff_target: snapshot.handoff_target ?? null,
     projection_ledger: snapshot.projection_ledger || {},
+    worker_tasks: snapshot.worker_tasks || { head: null, history: [] },
   }) === canonicalJson({
     state: replay.state,
     last_sequence: replay.last_sequence,
@@ -129,6 +136,7 @@ function compareSemanticSlice(snapshot, replay) {
     artifacts: replay.artifacts.recorded,
     handoff_target: replay.handoff_target ?? null,
     projection_ledger: replay.projection_ledger,
+    worker_tasks: replay.worker_tasks || { head: null, history: [] },
   });
 }
 
@@ -234,6 +242,99 @@ function mergeProjectionSnapshot(snapshot, payload, sequence) {
     nextSnapshot.handoff_target = payload.handoff_target;
   }
   return nextSnapshot;
+}
+
+
+function appendWorkerTaskHistory(snapshot, head) {
+  const slice = snapshot.worker_tasks || { head: null, history: [] };
+  return head ? [...(Array.isArray(slice.history) ? slice.history : []), head] : (Array.isArray(slice.history) ? slice.history : []);
+}
+
+function appendDistinctWorkerTaskHistory(snapshot, head) {
+  const history = appendWorkerTaskHistory(snapshot, null);
+  return head && !history.some((entry) => canonicalJson(entry) === canonicalJson(head)) ? [...history, head] : history;
+}
+
+function observedCompletionHead(currentHead, completion, decision = "late") {
+  return currentHead ? {
+    ...currentHead,
+    status: decision,
+    completion,
+    decision: {
+      decision,
+      reason: `observed ${decision} worker completion`,
+      decided_at: completion.received_at,
+      idempotency_key: completion.idempotency_key,
+    },
+    updated_at: completion.received_at,
+  } : null;
+}
+
+function mergeWorkerTaskSnapshot(snapshot, type, payload, sequence) {
+  let head = snapshot.worker_tasks?.head || null;
+  let history = appendWorkerTaskHistory(snapshot, null);
+  if (type === "worker_task.created") {
+    history = appendDistinctWorkerTaskHistory(snapshot, head);
+    head = createWorkerTask({ ...payload, created_at: payload.recorded_at });
+  } else if (type === "worker_task.dispatch_recorded") {
+    if (!head) throw new Error("worker_task.dispatch_recorded requires prior worker task head");
+    head = recordWorkerTaskDispatchCore(head, {
+      intent_ref: payload.intent_ref,
+      dispatch_ref: payload.dispatch_ref,
+      idempotency_key: payload.idempotency_key,
+      recorded_at: payload.recorded_at,
+    });
+    history = appendWorkerTaskHistory(snapshot, head);
+  } else if (type === "worker_task.completion_received") {
+    if (!head) throw new Error("worker_task.completion_received requires prior worker task head");
+    const completion = normalizeWorkerCompletion(payload);
+    const evaluated = evaluateWorkerCompletion(head, completion, { now: completion.received_at });
+    if (completionDecisionMutatesCurrentTruth(evaluated.decision)) {
+      head = { ...head, status: "completion_received", completion, updated_at: completion.received_at };
+      history = appendWorkerTaskHistory(snapshot, head);
+    } else {
+      history = appendWorkerTaskHistory(snapshot, observedCompletionHead(head, completion, evaluated.decision));
+    }
+  } else if (type === "worker_task.completion_decided") {
+    if (!head) throw new Error("worker_task.completion_decided requires prior worker task head");
+    const nextHead = applyCompletionDecisionToWorkerTask(head, head.completion || {}, payload);
+    if (canonicalJson(nextHead) !== canonicalJson(head)) {
+      head = nextHead;
+      history = appendWorkerTaskHistory(snapshot, head);
+    }
+  } else if (type === "worker_task.overdue_recorded") {
+    if (!head) throw new Error("worker_task.overdue_recorded requires prior worker task head");
+    const nextHead = markWorkerTaskOverdue(head, { recorded_at: payload.recorded_at, reason: payload.reason });
+    if (canonicalJson(nextHead) !== canonicalJson(head)) {
+      head = nextHead;
+      history = appendWorkerTaskHistory(snapshot, head);
+    }
+  } else if (type === "worker_task.quarantined") {
+    if (!head) throw new Error("worker_task.quarantined requires prior worker task head");
+    head = quarantineWorkerTask(head, { recorded_at: payload.recorded_at, reason: payload.reason });
+    history = appendWorkerTaskHistory(snapshot, head);
+  }
+  return {
+    ...snapshot,
+    last_sequence: sequence,
+    updated_at: payload.recorded_at || payload.received_at || payload.decided_at || snapshot.updated_at,
+    worker_tasks: { head, history },
+  };
+}
+
+function validateWorkerTaskReplaySemantics(snapshot, type, payload, idempotencyPayloads) {
+  const payloadKey = payload.idempotency_key;
+  const canonicalPayload = canonicalJson(payload);
+  const priorPayload = idempotencyPayloads.get(payloadKey);
+  if (priorPayload && priorPayload !== canonicalPayload) return `${type} idempotency key ${payloadKey} conflicts with a different payload`;
+  if (type !== "worker_task.created" && !snapshot.worker_tasks?.head) return `${type} requires an existing worker task head`;
+  if (type === "worker_task.created") return "";
+  if (snapshot.worker_tasks?.head && payload.worker_task_id !== snapshot.worker_tasks.head.worker_task_id) {
+    if (type === "worker_task.completion_received") return "";
+    if (type === "worker_task.completion_decided" && !completionDecisionMutatesCurrentTruth(payload.decision)) return "";
+    return `${type} worker_task_id ${payload.worker_task_id} does not match current worker task ${snapshot.worker_tasks.head.worker_task_id}`;
+  }
+  return "";
 }
 
 function projectionHead(snapshot) {
@@ -342,6 +443,20 @@ function replayDomainEvents(events, runId, snapshot) {
       if (semanticError) return { ok: false, reason: semanticError };
       idempotencyPayloads.set(event.evidence.idempotency_key, canonicalJson(event.evidence));
       Object.assign(replay, mergeProjectionSnapshot(replay, { ...event.evidence, type: event.type }, event.sequence));
+      continue;
+    }
+
+    if (event.type?.startsWith("worker_task.")) {
+      const typedDecision = validateWorkerTaskRecordedEvent(event, { expectedRunId: runId, expectedSequence });
+      if (!typedDecision.ok) return { ok: false, reason: typedDecision.error };
+      const semanticError = validateWorkerTaskReplaySemantics(replay, event.type, event.evidence, idempotencyPayloads);
+      if (semanticError) return { ok: false, reason: semanticError };
+      idempotencyPayloads.set(event.evidence.idempotency_key, canonicalJson(event.evidence));
+      try {
+        Object.assign(replay, mergeWorkerTaskSnapshot(replay, event.type, event.evidence, event.sequence));
+      } catch (error) {
+        return { ok: false, reason: error?.message || String(error) };
+      }
       continue;
     }
 

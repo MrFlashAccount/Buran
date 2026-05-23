@@ -73,3 +73,7 @@ Buran does **not** discover work on its own, draft plans, or upgrade weak packet
 - registry contract: `docs/execution-run-schema.md`
 - projection semantics: `docs/github-projection-contract.md` (provider-neutral contract with current GitHub adapter notes)
 - runtime orchestration entrypoint: `src/application/run-local-mission.js`
+
+## Worker completion boundary
+
+At `running` and `fix_loop`, adapters are evidence providers only. Buran creates the expected `WorkerTask`, records dispatch intent evidence, receives `WorkerCompletion` evidence through the application boundary, asks execution-run authority for a `CompletionDecision`, persists that decision locally, and only then advances the outer run when the decision is `accepted`. Restart/recovery reads local registry truth, not adapter/provider state. Unknown, late, duplicate, unauthorized, and conflicting completions are surfaced as local task truth/recovery concerns rather than remote truth.

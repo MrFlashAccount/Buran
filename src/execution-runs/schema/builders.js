@@ -1,6 +1,6 @@
 /** Durable execution-run snapshot and summary builders. */
-import { SCHEMA_VERSION, GATE_STATUS } from "../../core/modules/execution-runs/constants.js";
-import { isRecord } from "../../shared/primitives.js";
+import { SCHEMA_VERSION, GATE_STATUS, WORKER_COMPLETION_DECISION_SET, WORKER_TASK_STATUS_SET } from "../../core/modules/execution-runs/constants.js";
+import { isRecord, nonEmptyString } from "../../shared/primitives.js";
 
 /**
  * @typedef {Record<string, unknown>} JsonRecord
@@ -134,6 +134,10 @@ export function buildInitialRunSnapshot(report, { createdAt, packetArtifactRef }
       },
     },
     projection_ledger: {},
+    worker_tasks: {
+      head: null,
+      history: [],
+    },
     created_at: createdAt,
     updated_at: createdAt,
     terminal_reason: "",
@@ -238,5 +242,111 @@ export function buildLeaseRecord(request, lock, { status = "acquired" } = {}) {
     acquired_at: request.acquired_at,
     expires_at: request.expires_at,
     ttl_ms: request.ttl_ms,
+  };
+}
+
+function cleanArtifactRef(ref) {
+  if (!isRecord(ref)) return null;
+  const path = nonEmptyString(ref.path);
+  const sha256 = nonEmptyString(ref.sha256);
+  if (!path && !sha256) return null;
+  return { ...(path ? { path } : {}), ...(sha256 ? { sha256 } : {}) };
+}
+
+function cleanRefs(refs) {
+  const entries = Array.isArray(refs) ? refs : isRecord(refs) ? [refs] : [];
+  return entries.map(cleanArtifactRef).filter(Boolean);
+}
+
+/** Builds the durable worker task head stored under run.json worker_tasks.head. */
+export function buildWorkerTaskHead(input = {}) {
+  const status = nonEmptyString(input.status);
+  return {
+    worker_task_id: nonEmptyString(input.worker_task_id),
+    run_id: nonEmptyString(input.run_id),
+    task_id: nonEmptyString(input.task_id),
+    purpose: nonEmptyString(input.purpose),
+    epoch: Number.isSafeInteger(input.epoch) ? input.epoch : 0,
+    attempt: Number.isSafeInteger(input.attempt) ? input.attempt : 1,
+    authority: nonEmptyString(input.authority),
+    status: WORKER_TASK_STATUS_SET.has(status) ? status : "created",
+    deadline_at: input.deadline_at ?? null,
+    created_at: input.created_at,
+    updated_at: input.updated_at || input.created_at,
+    dispatch: isRecord(input.dispatch) ? input.dispatch : null,
+    completion: isRecord(input.completion) ? input.completion : null,
+    decision: isRecord(input.decision) ? input.decision : null,
+    overdue_recorded_at: nonEmptyString(input.overdue_recorded_at),
+    quarantine: isRecord(input.quarantine) ? input.quarantine : null,
+  };
+}
+
+export function buildWorkerTaskEventPayload(input = {}) {
+  return {
+    worker_task_id: nonEmptyString(input.worker_task_id),
+    run_id: nonEmptyString(input.run_id),
+    task_id: nonEmptyString(input.task_id),
+    purpose: nonEmptyString(input.purpose),
+    epoch: Number.isSafeInteger(input.epoch) ? input.epoch : 0,
+    attempt: Number.isSafeInteger(input.attempt) ? input.attempt : 1,
+    authority: nonEmptyString(input.authority),
+    status: nonEmptyString(input.status),
+    deadline_at: input.deadline_at ?? null,
+    recorded_at: input.recorded_at,
+    idempotency_key: nonEmptyString(input.idempotency_key),
+    intent_ref: cleanArtifactRef(input.intent_ref),
+    dispatch_ref: cleanArtifactRef(input.dispatch_ref),
+    reason: nonEmptyString(input.reason),
+  };
+}
+
+export function buildWorkerCompletionPayload(input = {}) {
+  return {
+    worker_task_id: nonEmptyString(input.worker_task_id),
+    run_id: nonEmptyString(input.run_id),
+    task_id: nonEmptyString(input.task_id),
+    purpose: nonEmptyString(input.purpose),
+    epoch: Number.isSafeInteger(input.epoch) ? input.epoch : 0,
+    attempt: Number.isSafeInteger(input.attempt) ? input.attempt : 1,
+    authority: nonEmptyString(input.authority),
+    status: nonEmptyString(input.status).toUpperCase(),
+    completion_ref: cleanArtifactRef(input.completion_ref),
+    evidence_refs: cleanRefs(input.evidence_refs),
+    received_at: input.received_at || input.recorded_at,
+    idempotency_key: nonEmptyString(input.idempotency_key),
+  };
+}
+
+export function buildCompletionDecisionPayload(input = {}) {
+  const decision = nonEmptyString(input.decision);
+  return {
+    worker_task_id: nonEmptyString(input.worker_task_id),
+    run_id: nonEmptyString(input.run_id),
+    task_id: nonEmptyString(input.task_id),
+    decision: WORKER_COMPLETION_DECISION_SET.has(decision) ? decision : "deferred",
+    reason: nonEmptyString(input.reason),
+    decided_at: input.decided_at || input.recorded_at,
+    idempotency_key: nonEmptyString(input.idempotency_key),
+    completion_idempotency_key: nonEmptyString(input.completion_idempotency_key),
+  };
+}
+
+export function buildWorkerTaskSummary(input = {}) {
+  return {
+    active: Boolean(input.active),
+    worker_task_id: nonEmptyString(input.worker_task_id),
+    purpose: nonEmptyString(input.purpose),
+    epoch: Number.isSafeInteger(input.epoch) ? input.epoch : 0,
+    attempt: Number.isSafeInteger(input.attempt) ? input.attempt : 0,
+    authority: nonEmptyString(input.authority),
+    status: nonEmptyString(input.status) || "none",
+    decision: nonEmptyString(input.decision),
+    reason: nonEmptyString(input.reason),
+    deadline_at: input.deadline_at ?? null,
+    overdue: Boolean(input.overdue),
+    dispatch_ref: cleanArtifactRef(input.dispatch_ref),
+    completion_ref: cleanArtifactRef(input.completion_ref),
+    evidence: isRecord(input.evidence) ? input.evidence : {},
+    next_safe_action: nonEmptyString(input.next_safe_action),
   };
 }

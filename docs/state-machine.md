@@ -67,3 +67,11 @@ stateDiagram-v2
 - `blocked_needs_human`
 - `failed_execution`
 - `ready_for_manual_review`
+
+## WorkerTask transition guard
+
+Implementation-dispatch and fix-loop transitions have an inner durable worker lifecycle. Before `running -> verification`, `running -> failed_execution`, or `fix_loop -> verification`, the application records a `WorkerTask`, records dispatch evidence, ingests a sanitized `WorkerCompletion`, and requires an accepted `CompletionDecision`. Completion decisions are local registry truth; implementation adapters cannot advance the outer state directly.
+
+## Worker completion gate
+
+Implementation dispatch in `running` and fix attempts in `fix_loop` are gated by the `WorkerTask` sub-lifecycle. The runner records task creation, dispatch evidence, completion evidence, and a durable `CompletionDecision` before requesting an outer transition. `accepted` completion can advance `running -> verification`, `running -> failed_execution`, or `fix_loop -> verification` according to the existing transition table. Duplicate, late, conflict, unknown, unauthorized, deferred, or rejected decisions remain visible for recovery/operator review and must not advance the run twice or overwrite newer truth.

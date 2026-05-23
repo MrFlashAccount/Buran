@@ -7,6 +7,11 @@ export {
   buildInitialRunSnapshot,
   buildLeaseRecord,
   buildRecordedArtifactSummary,
+  buildWorkerTaskHead,
+  buildWorkerTaskEventPayload,
+  buildWorkerCompletionPayload,
+  buildCompletionDecisionPayload,
+  buildWorkerTaskSummary,
 } from "./builders.js";
 export {
   findArtifactRefs,
@@ -21,4 +26,9 @@ export {
   validateProjectionResultPayload,
   validateProjectionResultRecordedEvent,
   validateRunSnapshot,
+  validateWorkerTaskHead,
+  validateWorkerTaskEventPayload,
+  validateWorkerCompletionPayload,
+  validateCompletionDecisionPayload,
+  validateWorkerTaskRecordedEvent,
 } from "./validators.js";

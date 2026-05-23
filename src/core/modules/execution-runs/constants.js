@@ -63,6 +63,44 @@ export const GATE_STATUS = Object.freeze({
 });
 export const GATE_STATUS_SET = new Set(Object.values(GATE_STATUS));
 
+export const WORKER_TASK_STATUSES = Object.freeze([
+  "created",
+  "dispatched",
+  "completion_received",
+  "completed",
+  "failed",
+  "duplicate",
+  "late",
+  "conflict",
+  "unknown",
+  "unauthorized",
+  "overdue",
+  "quarantined",
+  "rejected",
+]);
+export const WORKER_TASK_STATUS_SET = new Set(WORKER_TASK_STATUSES);
+
+export const WORKER_COMPLETION_DECISIONS = Object.freeze([
+  "accepted",
+  "duplicate",
+  "late",
+  "conflict",
+  "unknown",
+  "unauthorized",
+  "deferred",
+  "rejected",
+]);
+export const WORKER_COMPLETION_DECISION_SET = new Set(WORKER_COMPLETION_DECISIONS);
+
+export const WORKER_TASK_EVENT_TYPES = Object.freeze([
+  "worker_task.created",
+  "worker_task.dispatch_recorded",
+  "worker_task.completion_received",
+  "worker_task.completion_decided",
+  "worker_task.overdue_recorded",
+  "worker_task.quarantined",
+]);
+
 export const TRANSITION_METADATA = Object.freeze([
   { from: null, to: "packet_received", reason: "approved packet received" },
   { from: "packet_received", to: "queued", reason: "packet sufficiency passed" },
@@ -93,6 +131,7 @@ export const NON_TRANSITION_EVENT_TYPES = Object.freeze([
   "projection.result_recorded",
   "recovery.lease_stale_reclaimed",
   "recovery.lease_record_removed",
+  ...WORKER_TASK_EVENT_TYPES,
 ]);
 
 export const ALLOWED_EVENT_TYPES = new Set(["transition", ...NON_TRANSITION_EVENT_TYPES]);

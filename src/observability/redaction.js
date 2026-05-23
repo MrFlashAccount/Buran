@@ -4,7 +4,7 @@ import path from "node:path";
 import { isRecord, nonEmptyString, sha256Hex } from "../shared/primitives.js";
 
 const SECRET_KEY_PATTERN = /(authorization|cookie|password|passwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credential|session)/i;
-const RAW_DOC_KEY_PATTERN = /^(raw|raw_packet|packet_raw|document|documents|body|content|markdown|user_doc|user_docs)$/i;
+const RAW_DOC_KEY_PATTERN = /^(raw|raw_packet|packet_raw|document|documents|body|content|markdown|user_doc|user_docs|completion_payload|worker_payload|transcript|stdout|stderr|session_blob)$/i;
 const RAW_PACKET_KEY_PATTERN = /^(packet|packets)$/i;
 
 export const SECRET_VALUE_PATTERNS = [

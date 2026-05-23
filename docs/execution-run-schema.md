@@ -242,3 +242,22 @@ The local recovery command writes `indexes/recovery-report.json`, rebuilds index
 - Migrations must be explicit, idempotent, and recorded as recovery/migration events.
 - No implementation may rely on undocumented fields.
 - Registry and recovery remain local-only and do not emit external telemetry.
+
+## Worker task fields and events
+
+`run.json` includes `worker_tasks.head` for the current implementation/fix worker and `worker_tasks.history` for immutable lifecycle snapshots. The lifecycle is persisted through typed events: `worker_task.created`, `worker_task.dispatch_recorded`, `worker_task.completion_received`, `worker_task.completion_decided`, `worker_task.overdue_recorded`, and `worker_task.quarantined`.
+
+`WorkerTask` identity is derived from `run_id`, `task_id`, purpose, epoch, attempt, and authority. `WorkerCompletion` stores only sanitized status, evidence, and artifact refs. `CompletionDecision` is registry/core-owned and may accept, defer, mark late/duplicate/conflict/unknown/unauthorized, or quarantine. Recovery replays these typed events and quarantines mismatched task ids, conflicting idempotency payloads, or completion events without a current task head.
+
+## Worker task registry slice
+
+`run.json.worker_tasks` stores durable delegated-work truth for the current `ExecutionRun`:
+
+| Field | Meaning |
+| --- | --- |
+| `head` | Current `WorkerTask` head, or `null` when no worker task is known. |
+| `history` | Ordered task-head history from worker task events. |
+
+Worker task events are first-class non-transition events in `events.jsonl`: `worker_task.created`, `worker_task.dispatch_recorded`, `worker_task.completion_received`, `worker_task.completion_decided`, `worker_task.overdue_recorded`, and `worker_task.quarantined`. Payloads carry task identity, epoch, attempt, authority, safe artifact refs, status/decision, and idempotency keys. Raw worker content is not part of the public schema; summaries and reports use sanitized refs only.
+
+A completion cannot move the outer run until a durable `worker_task.completion_decided` event records an `accepted` `CompletionDecision`. Duplicate idempotent events are `noop`; conflicting idempotency payloads fail instead of repairing into accepted truth.

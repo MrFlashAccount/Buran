@@ -178,6 +178,11 @@ function captureImplementationDispatchProvenance(snapshot, intent, { intentArtif
     dispatch_intent_artifact: buildImplementationDispatchIntentArtifactRef(capturedIntent, { intentArtifactPath }),
     packet_artifact: cloneJson(capturedIntent?.packet_artifact),
     workspace_preparation_artifact: cloneJson(capturedIntent?.workspace_preparation_artifact),
+    worker_task_id: nonEmptyString(capturedIntent?.worker_task_id),
+    worker_task_epoch: capturedIntent?.worker_task_epoch ?? null,
+    worker_task_attempt: capturedIntent?.worker_task_attempt ?? null,
+    completion_authority: nonEmptyString(capturedIntent?.completion_authority),
+    completion_idempotency_key: nonEmptyString(capturedIntent?.completion_idempotency_key),
   });
 }
 
@@ -229,6 +234,8 @@ export function validateImplementationDispatchResultProvenance(result, intent, {
     || validateRequiredStringField(result, captured, "task_id", { requireCompleteProvenance })
     || validateRequiredStringField(result, captured, "dispatch_intent_id", { requireCompleteProvenance });
   if (stringProblem) return stringProblem;
+  const workerTaskProblem = validateRequiredStringField(result, captured, "worker_task_id", { requireCompleteProvenance: false });
+  if (workerTaskProblem) return workerTaskProblem;
   const artifactProblem = validateArtifactRefField(result, captured, "dispatch_intent_artifact", { requireCompleteProvenance })
     || validateJsonArtifactField(result, captured, "packet_artifact", { requireCompleteProvenance })
     || validateJsonArtifactField(result, captured, "workspace_preparation_artifact", { requireCompleteProvenance });
@@ -330,11 +337,17 @@ export function buildImplementationDispatchIntent(snapshot, { workspacePreparati
       path: workspacePreparationArtifactRef.path,
       sha256: workspacePreparationArtifactRef.sha256,
     },
+    worker_task_id: nonEmptyString(snapshot.worker_tasks?.head?.worker_task_id),
+    worker_task_epoch: snapshot.worker_tasks?.head?.epoch ?? snapshot.execution?.current_epoch ?? 0,
+    worker_task_attempt: snapshot.worker_tasks?.head?.attempt ?? 1,
+    completion_authority: nonEmptyString(snapshot.worker_tasks?.head?.authority) || IMPLEMENTATION_DISPATCH_ADAPTER,
+    completion_idempotency_key: `${snapshot.run_id}:worker_completion:${nonEmptyString(snapshot.worker_tasks?.head?.worker_task_id) || "legacy"}`,
     execution_boundary: {
       status: DISPATCH_STATUS,
       adapter: IMPLEMENTATION_DISPATCH_ADAPTER,
       result_required_before_verification: true,
       scope_authority: "approved_packet_artifact",
+      worker_task_required: Boolean(snapshot.worker_tasks?.head?.worker_task_id),
     },
   };
 
@@ -431,6 +444,11 @@ export async function executeImplementationDispatch({ snapshot, intent, adapter 
     dispatch_intent_artifact: capturedDispatchIntentArtifact,
     packet_artifact: capturedProvenance.packet_artifact,
     workspace_preparation_artifact: capturedProvenance.workspace_preparation_artifact,
+    worker_task_id: capturedProvenance.worker_task_id,
+    worker_task_epoch: capturedProvenance.worker_task_epoch,
+    worker_task_attempt: capturedProvenance.worker_task_attempt,
+    completion_authority: capturedProvenance.completion_authority,
+    completion_idempotency_key: capturedProvenance.completion_idempotency_key,
     started_at: startedAt,
     finished_at: finishedAt,
     status: normalized.status,

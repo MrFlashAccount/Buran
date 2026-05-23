@@ -65,3 +65,11 @@ This context starts after external research/planning approval and ends before hu
 - Source-tree ownership changes should update `docs/module-map.md`.
 - Boundary or handoff changes should update `docs/context-map.md`.
 - Legacy/reference behavior must be copied only through explicit migration slices, not by quiet coupling.
+
+## WorkerTask placement
+
+`ExecutionRun` owns worker-task truth: lifecycle vocabulary, identity, completion legality, and the relationship between accepted completions and outer run transitions. Application code may sequence dispatch/completion ingestion through the registry port, but must not define canonical worker lifecycle rules. Integrations submit and persist evidence through seams only; summaries and recovery reports must stay sanitized and must not expose raw prompts, transcripts, stdout/stderr, session blobs, or raw completion payloads.
+
+## WorkerTask lifecycle note
+
+Issue #16 adds durable implementation/fix worker lifecycle tracking. Core owns WorkerTask and CompletionDecision semantics; application code sequences lifecycle writes; JSON registry persists and replays them; observability/reporting must expose only sanitized worker summaries and safe artifact refs.

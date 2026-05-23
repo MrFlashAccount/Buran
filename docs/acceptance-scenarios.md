@@ -179,3 +179,49 @@ Primary coverage lives in:
 - `test/runner.test.js`
 
 These scenarios are documentation of the tested slice, not a promise of unimplemented worker execution, default live provider writes, auto-merge, or Done automation. GitHub-specific scenarios describe the current adapter/profile, not core/domain language.
+
+## 8. Durable WorkerTask lifecycle
+
+### Scenario: implementation dispatch has durable inner lifecycle
+- Given a run enters `running`
+- When implementation dispatch starts
+- Then Buran records `worker_task.created` and `worker_task.dispatch_recorded` before adapter result handling
+- And it records completion plus completion decision before any outer transition
+- And only an accepted decision can advance the run to `verification` or `failed_execution`
+
+### Scenario: fix-loop resumes without duplicate worker dispatch
+- Given a current fix-attempt result was recorded before a crash
+- When the run is retried
+- Then Buran repairs/reuses the worker task lifecycle records idempotently
+- And does not invoke a second implementation adapter attempt
+
+### Scenario: worker summaries are privacy-safe
+- Given adapter evidence includes prompt/transcript/stdout/stderr/session/raw payload fields
+- When runner reports or observability summaries are produced
+- Then public output includes only status, decision, safe ids, and artifact refs, never raw worker content.
+
+## 9. WorkerTask completion ingestion
+
+### Scenario: implementation dispatch advances only after accepted completion
+- Given a leased run in `running`
+- When implementation dispatch returns `COMPLETED` evidence
+- Then Buran records a `WorkerTask`, dispatch evidence, completion evidence, and an accepted `CompletionDecision`
+- And only then transitions to `verification`
+
+### Scenario: duplicate completion is idempotent
+- Given a current worker completion has already been recorded for the same idempotency key
+- When the runner is retried
+- Then matching worker task events are treated as `noop`
+- And the run is not advanced twice
+
+### Scenario: invalid, late, or conflicting completion stays safe
+- Given a completion cannot be matched to the expected task identity, epoch, attempt, authority, or idempotency payload
+- When ingestion evaluates it
+- Then Buran rejects, defers, or quarantines the task truth
+- And does not silently overwrite accepted truth or advance the outer run
+
+### Scenario: public worker summary is sanitized
+- Given worker task state contains completion and evidence refs
+- When reports or recovery summaries are built
+- Then only task id, status, decision, safe artifact refs, and next-safe-action context may be shown
+- And raw prompts, transcripts, stdout/stderr, session blobs, file contents, and raw completion bodies are excluded

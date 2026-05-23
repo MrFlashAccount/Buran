@@ -27,6 +27,13 @@ export class ExecutionRun {
   hasState(state) { return this.state === state; }
   gate(name) { return isRecord(this.snapshot.gates?.[name]) ? this.snapshot.gates[name] : null; }
   scmTarget() { return isRecord(this.snapshot.scm_target) ? this.snapshot.scm_target : (isRecord(this.snapshot.github) ? this.snapshot.github : {}); }
+  workerTaskHead() { return isRecord(this.snapshot.worker_tasks?.head) ? this.snapshot.worker_tasks.head : null; }
+  workerTaskHistory() { return Array.isArray(this.snapshot.worker_tasks?.history) ? this.snapshot.worker_tasks.history : []; }
+  hasActiveWorkerTask() {
+    const status = nonEmptyString(this.workerTaskHead()?.status);
+    return ["created", "dispatched", "completion_received", "overdue"].includes(status);
+  }
+  currentWorkerTaskId() { return nonEmptyString(this.workerTaskHead()?.worker_task_id); }
   toSnapshot() { return this.snapshot; }
 }
 
