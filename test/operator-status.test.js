@@ -173,6 +173,40 @@ test("operator status maps corrupt events to corrupt status", async () => {
   assert.equal(report.next_safe_action.kind, "recover");
 });
 
+test("operator status reports quarantined snapshots without recovery mutation", async () => {
+  const repo = repository({ snapshot: activeSnapshot({ state: "quarantined", quarantined_at: "2026-05-23T18:00:00.000Z" }) });
+  repo.recoverRegistry = async () => assert.fail("status must not recover quarantined runs");
+  repo.writeRunSnapshot = async () => assert.fail("status must not write quarantined runs");
+
+  const report = await buildOperatorStatusReport({ registryRoot: "/tmp/registry", runId: "run_quarantined", registryRepository: repo });
+
+  assert.equal(report.status_kind, "quarantined");
+  assert.equal(report.next_safe_action.kind, "inspect_quarantine");
+  assert.equal(report.external_side_effects, false);
+  assert.equal(report.blockers.some((blocker) => blocker.code === "run_quarantined"), true);
+  assert.deepEqual(repo.calls.map((call) => call[0]), ["getRunPaths", "readRunSnapshot", "readEventsFile", "getRegistryPaths"]);
+});
+
+test("operator status maps blocked states to manual review", async () => {
+  const repo = repository({ snapshot: activeSnapshot({ state: "blocked_lock_conflict", worker_tasks: { head: null } }) });
+
+  const report = await buildOperatorStatusReport({ registryRoot: "/tmp/registry", runId: "run_blocked", registryRepository: repo });
+
+  assert.equal(report.status_kind, "blocked");
+  assert.equal(report.next_safe_action.kind, "manual_review");
+  assert.equal(report.blockers.some((blocker) => blocker.code === "blocked_lock_conflict"), true);
+});
+
+test("operator status maps terminal manual-review states to manual review", async () => {
+  const repo = repository({ snapshot: activeSnapshot({ state: "ready_for_manual_review", worker_tasks: { head: null } }) });
+
+  const report = await buildOperatorStatusReport({ registryRoot: "/tmp/registry", runId: "run_terminal", registryRepository: repo });
+
+  assert.equal(report.status_kind, "terminal");
+  assert.equal(report.next_safe_action.kind, "manual_review");
+  assert.equal(report.external_side_effects, false);
+});
+
 test("human status output includes compact operator fields", () => {
   const text = formatBuranReport({
     schema_version: SCHEMA_VERSION,
