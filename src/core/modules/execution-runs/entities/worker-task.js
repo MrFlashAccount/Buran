@@ -50,7 +50,7 @@ function sanitizeRefs(refs) {
 
 function normalizePurpose(value) {
   const purpose = nonEmptyString(value);
-  return ["implementation_dispatch", "fix_attempt"].includes(purpose) ? purpose : "implementation_dispatch";
+  return ["implementation_dispatch", "fix_attempt", "review_attempt", "resolver_attempt"].includes(purpose) ? purpose : "implementation_dispatch";
 }
 
 export function normalizeRole(value, { purpose = "" } = {}) {
@@ -197,6 +197,12 @@ export function recordWorkerTaskDispatch(head, dispatch = {}) {
     dispatch: {
       intent_ref: isRecord(dispatch.intent_ref) ? cloneJson(dispatch.intent_ref) : null,
       dispatch_ref: isRecord(dispatch.dispatch_ref) ? cloneJson(dispatch.dispatch_ref) : null,
+      adapter_id: safeText(dispatch.adapter_id || dispatch.adapter, 120),
+      adapter_task_id: safeText(dispatch.adapter_task_id, 160),
+      adapter_status: safeText(dispatch.adapter_status, 80),
+      heartbeat_at: nonEmptyString(dispatch.heartbeat_at),
+      status_summary_ref: isRecord(dispatch.status_summary_ref) ? cloneJson(dispatch.status_summary_ref) : null,
+      responsibility_zone: safeText(dispatch.responsibility_zone, 120),
       idempotency_key: nonEmptyString(dispatch.idempotency_key),
       recorded_at: recordedAt,
     },
@@ -354,6 +360,12 @@ export function deriveWorkerTaskSummary(head, { now = new Date().toISOString() }
     deadline_at: task.deadline_at || null,
     overdue,
     dispatch_ref: task.dispatch?.intent_ref || task.dispatch?.dispatch_ref || null,
+    adapter_id: task.dispatch?.adapter_id || "",
+    adapter_task_id: task.dispatch?.adapter_task_id || "",
+    adapter_status: task.dispatch?.adapter_status || "",
+    heartbeat_at: task.dispatch?.heartbeat_at || "",
+    status_summary_ref: task.dispatch?.status_summary_ref || null,
+    responsibility_zone: task.dispatch?.responsibility_zone || "",
     completion_ref: task.completion?.completion_ref || null,
     evidence: task.completion?.evidence || {},
     next_safe_action: nextSafeAction,

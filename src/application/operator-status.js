@@ -204,6 +204,11 @@ function workerSummary(snapshot, now) {
     decision: safeText(summary.decision, { max: 80 }) || "",
     overdue: Boolean(summary.overdue),
     deadline_at: summary.deadline_at || null,
+    adapter_id: safeText(summary.adapter_id, { max: 120 }) || undefined,
+    adapter_task_id: safeText(summary.adapter_task_id, { max: 160 }) || undefined,
+    adapter_status: safeText(summary.adapter_status, { max: 80 }) || undefined,
+    heartbeat_at: safeText(summary.heartbeat_at, { max: 80 }) || undefined,
+    responsibility_zone: safeText(summary.responsibility_zone, { max: 120 }) || undefined,
     artifact_refs: [safeRef(summary.dispatch_ref), safeRef(summary.completion_ref)].filter(Boolean),
   };
 }
@@ -325,13 +330,16 @@ function nextSafeAction(report) {
   if (report.status_kind === "quarantined") return { kind: "inspect_quarantine", command: null, reason: "run is quarantined and requires manual inspection" };
   const exhausted = report.retry_budgets.find((budget) => budget.exhausted);
   if (exhausted) return { kind: "manual_review", command: null, reason: `retry budget exhausted: ${exhausted.name}` };
-  if (report.workspace.stale_suspected || report.workspace.lease_status === "expired" || report.workspace.lease_status === "stale_suspected") {
-    return { kind: "recover", command: `/buran recover --registry ${report.registry_root}`, reason: "lease is expired or stale-suspected; status will not reclaim it" };
-  }
   if (report.status_kind === "blocked") {
     return report.state === "blocked_lock_conflict"
       ? { kind: "manual_review", command: null, reason: "lock conflict needs operator decision or waiting" }
       : { kind: "manual_review", command: null, reason: "run is blocked and needs human review" };
+  }
+  if (report.state === "ready_for_manual_review") return { kind: "manual_review", command: null, reason: "run is ready for manual review" };
+  if (FAILED_TERMINAL_STATES.has(report.state)) return { kind: "manual_review", command: null, reason: "run failed and needs operator review" };
+  if (report.status_kind === "terminal") return { kind: "none", command: null, reason: "run is terminal" };
+  if (report.workspace.stale_suspected || report.workspace.lease_status === "expired" || report.workspace.lease_status === "stale_suspected") {
+    return { kind: "recover", command: `/buran recover --registry ${report.registry_root}`, reason: "lease is expired or stale-suspected; status will not reclaim it" };
   }
   if (report.state === "queued") return { kind: "run", command: `/buran run --run ${report.run_id} --registry ${report.registry_root}`, reason: "run is queued and ready for the local runner" };
   if (report.state === "waiting_for_lock") {
@@ -341,9 +349,6 @@ function nextSafeAction(report) {
   }
   if (report.state === "running" && report.worker_task.active) return { kind: report.worker_task.overdue ? "recover" : "wait", command: report.worker_task.overdue ? `/buran recover --registry ${report.registry_root}` : null, reason: report.worker_task.overdue ? "worker task is overdue" : "implementation worker task is still pending" };
   if (["running", "verification", "internal_review", "fix_loop", "handoff_ready"].includes(report.state)) return { kind: "run", command: `/buran run --run ${report.run_id} --registry ${report.registry_root}`, reason: "run has a pending local runner gate" };
-  if (report.state === "ready_for_manual_review") return { kind: "manual_review", command: null, reason: "run is ready for manual review" };
-  if (FAILED_TERMINAL_STATES.has(report.state)) return { kind: "manual_review", command: null, reason: "run failed and needs operator review" };
-  if (report.status_kind === "terminal") return { kind: "none", command: null, reason: "run is terminal" };
   return { kind: "manual_review", command: null, reason: "operator review recommended for current run state" };
 }
 

@@ -943,6 +943,12 @@ export async function recordWorkerTaskDispatch(registryRoot, runId, input = {}) 
     dispatch_ref: input.dispatch_ref,
     idempotency_key: input.idempotency_key,
     recorded_at: input.recorded_at || new Date().toISOString(),
+    adapter_id: input.adapter_id || input.adapter,
+    adapter_task_id: input.adapter_task_id,
+    adapter_status: input.adapter_status,
+    heartbeat_at: input.heartbeat_at,
+    status_summary_ref: input.status_summary_ref,
+    responsibility_zone: input.responsibility_zone,
   });
   const payload = {
     worker_task_id: head.worker_task_id,
@@ -959,6 +965,12 @@ export async function recordWorkerTaskDispatch(registryRoot, runId, input = {}) 
     idempotency_key: input.idempotency_key || `${head.worker_task_id}:dispatch`,
     intent_ref: input.intent_ref || null,
     dispatch_ref: input.dispatch_ref || null,
+    adapter_id: input.adapter_id || input.adapter || "",
+    adapter_task_id: input.adapter_task_id || "",
+    adapter_status: input.adapter_status || "",
+    heartbeat_at: input.heartbeat_at || "",
+    status_summary_ref: input.status_summary_ref || null,
+    responsibility_zone: input.responsibility_zone || "",
   };
   const decision = validateWorkerTaskEventPayload(payload);
   if (!decision.ok) throw new Error(decision.error);
