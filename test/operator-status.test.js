@@ -194,6 +194,59 @@ test("operator status reports expired lease and exhausted retry budget read-only
 });
 
 
+
+test("operator status projects active fix and review worker adapter fields read-only", async () => {
+  for (const [state, purpose, role, taskId] of [
+    ["fix_loop", "fix_attempt", "fixer", "fix-adapter-task-42"],
+    ["internal_review", "review_attempt", "reviewer", "review-adapter-task-42"],
+  ]) {
+    const repo = repository({
+      snapshot: activeSnapshot({
+        state,
+        worker_tasks: {
+          head: {
+            worker_task_id: `wt_${purpose}`,
+            run_id: "run_active",
+            task_id: "task-active",
+            purpose,
+            role,
+            epoch: 1,
+            attempt: 1,
+            authority: "test",
+            status: "dispatched",
+            created_at: "2026-05-23T18:10:00.000Z",
+            updated_at: "2026-05-23T18:11:00.000Z",
+            deadline_at: "2026-05-23T19:10:00.000Z",
+            dispatch: {
+              intent_ref: { path: `artifacts/${purpose}/intent.json`, sha256: "a".repeat(64) },
+              dispatch_ref: { path: `artifacts/${purpose}/intent.json`, sha256: "a".repeat(64) },
+              adapter_id: `${purpose}-adapter`,
+              adapter_task_id: taskId,
+              adapter_status: "PENDING",
+              heartbeat_at: "2026-05-23T18:12:00.000Z",
+            },
+          },
+        },
+      }),
+    });
+
+    const report = await buildOperatorStatusReport({
+      registryRoot: "/tmp/registry",
+      runId: "run_active",
+      registryRepository: repo,
+      clock: () => new Date("2026-05-23T18:30:00.000Z"),
+    });
+
+    assert.equal(report.worker_task.purpose, purpose);
+    assert.equal(report.worker_task.role, role);
+    assert.equal(report.worker_task.adapter_id, `${purpose}-adapter`);
+    assert.equal(report.worker_task.adapter_task_id, taskId);
+    assert.equal(report.worker_task.adapter_status, "PENDING");
+    assert.equal(report.worker_task.heartbeat_at, "2026-05-23T18:12:00.000Z");
+    assert.equal(report.next_safe_action.kind, "run");
+  }
+});
+
 test("operator status counts only completed fix attempts for fix-loop budget", async () => {
   const repo = repository({
     snapshot: activeSnapshot({

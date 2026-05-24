@@ -12,6 +12,8 @@ import { nonEmptyString, resolveMaybeRelative } from "../shared/primitives.js";
 
 function configuredImplementationDispatchAdapter(config) {
   const candidates = [
+    config.harnessRuntime,
+    config.harness_runtime,
     config.implementationDispatchAdapter,
     config.implementation_dispatch_adapter,
     config.implementationDispatch?.adapter,
@@ -21,7 +23,7 @@ function configuredImplementationDispatchAdapter(config) {
     config.dev_harness?.implementation_dispatch_adapter,
     config.dev_harness?.dispatch_adapter,
   ];
-  return candidates.find((candidate) => candidate && typeof candidate.execute === "function") || null;
+  return candidates.find((candidate) => candidate && (typeof candidate.execute === "function" || typeof candidate.spawn === "function")) || null;
 }
 
 function configuredScmHandoffAdapter(config) {

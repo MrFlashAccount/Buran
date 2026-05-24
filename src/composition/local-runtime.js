@@ -20,6 +20,7 @@ import { assertWorkspaceLeaseService } from "../core/modules/workspace-leases/po
 import { createLocalJournalScmHandoffAdapter } from "../integrations/scm/local-journal/local-journal-scm-handoff-adapter.js";
 import { assertScmHandoffPort } from "../core/modules/scm-handoff/ports/scm-handoff-port.js";
 import { createWorkspacePreparationInspectorContract } from "../core/ports/workspace-preparation-inspector.js";
+import { createOpenClawHarnessAdapter } from "../integrations/harness/openclaw/openclaw-harness-adapter.js";
 
 /**
  * Runtime object exposing the concrete adapters used by local Buran execution.
@@ -30,7 +31,7 @@ import { createWorkspacePreparationInspectorContract } from "../core/ports/works
  * orchestration remains in application services.
  */
 export class LocalBuranRuntime {
-  constructor({ registryRepository, leaseRecordStore, registryRecoveryStore, workspaceLeaseService, workspacePreparationInspector, scmHandoffAdapter } = {}) {
+  constructor({ registryRepository, leaseRecordStore, registryRecoveryStore, workspaceLeaseService, workspacePreparationInspector, scmHandoffAdapter, harnessRuntime, openClawController } = {}) {
     this.registryRepository = assertRegistryRepository(registryRepository || createJsonRegistryRepository());
     this.leaseRecordStore = leaseRecordStore || createJsonLeaseRecordStore();
     this.registryRecoveryStore = registryRecoveryStore || createJsonRegistryRecoveryStore();
@@ -40,6 +41,8 @@ export class LocalBuranRuntime {
     }));
     this.workspacePreparationInspector = createWorkspacePreparationInspectorContract(workspacePreparationInspector || createFilesystemWorkspacePreparationInspector());
     this.scmHandoffAdapter = assertScmHandoffPort(scmHandoffAdapter || createLocalJournalScmHandoffAdapter());
+    this.harnessRuntime = harnessRuntime || createOpenClawHarnessAdapter({ controller: openClawController });
+    this.implementationDispatchAdapter = this.harnessRuntime;
   }
 }
 

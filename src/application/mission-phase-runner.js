@@ -6,8 +6,11 @@ import { assertRegistryRepository } from "../core/modules/execution-runs/ports/r
 import { nonEmptyString, sha256Hex } from "../shared/primitives.js";
 import { assertWorkspacePreparationInspector } from "../core/ports/workspace-preparation-inspector.js";
 import { RUNNER_ACTOR, hasActiveLease } from "./mission-context.js";
+
+const WAITING_DISPATCH_STATUSES = new Set(["PENDING", "UNKNOWN", "STALE"]);
 import { buildIssue, buildStep, implementationBoundaryMessage, leaseRequiredMessage, sanitizeImplementationDispatchProblem } from "./final-report.js";
 import { resolveRecordedArtifactPath } from "./recorded-artifacts.js";
+import { buildResponsibilityPlan } from "./responsibility-planner.js";
 
 function dispatchResultArtifactSummary(snapshot, dispatchIntentId) {
   const currentEpoch = snapshot?.execution?.current_epoch;
@@ -107,6 +110,12 @@ async function readReusableImplementationDispatchResult(runDir, snapshot, intent
     return null;
   }
 
+  if (WAITING_DISPATCH_STATUSES.has(artifactReport.status)
+    && nonEmptyString(artifactReport.adapter_task_id)
+    && nonEmptyString(snapshot?.worker_tasks?.head?.dispatch?.adapter_task_id) === nonEmptyString(artifactReport.adapter_task_id)) {
+    return null;
+  }
+
   const evidence = sanitizeImplementationDispatchEvidence(artifactReport.evidence);
   return {
     reusable: true,
@@ -123,6 +132,10 @@ async function readReusableImplementationDispatchResult(runDir, snapshot, intent
       problem: sanitizeImplementationDispatchProblem(artifactReport.status, artifactReport.problem),
       adapter: nonEmptyString(artifactReport.adapter) || IMPLEMENTATION_DISPATCH_ADAPTER,
       actor: nonEmptyString(artifactReport.actor) || IMPLEMENTATION_DISPATCH_ADAPTER,
+      adapter_task_id: nonEmptyString(artifactReport.adapter_task_id),
+      adapter_status: nonEmptyString(artifactReport.adapter_status) || artifactReport.status,
+      heartbeat_at: nonEmptyString(artifactReport.heartbeat_at),
+      status_summary_ref: artifactReport.status_summary_ref || null,
     },
     adapter: nonEmptyString(artifactReport.adapter) || IMPLEMENTATION_DISPATCH_ADAPTER,
     actor: nonEmptyString(artifactReport.actor) || IMPLEMENTATION_DISPATCH_ADAPTER,
@@ -142,7 +155,7 @@ export function buildImplementationDispatchStageResult({
     current,
     reportInput: {
       currentState: current?.state || "",
-      outcome: current?.state === "failed_execution" ? "failed" : blockers.length > 0 ? "blocked" : "completed",
+      outcome: WAITING_DISPATCH_STATUSES.has(implementationDispatch?.status) && blockers.length === 0 ? "waiting" : current?.state === "failed_execution" ? "failed" : blockers.length > 0 ? "blocked" : "completed",
       stepsTaken,
       blockers,
       warnings,
@@ -225,6 +238,11 @@ export async function runImplementationDispatchStage({ runContext = {}, reportSt
         artifactSha256: recorded.artifact_ref.sha256,
       }));
 
+      const responsibilityPlan = buildResponsibilityPlan(current, {
+        purpose: "implementation_dispatch",
+        sourceRefs: [current.artifacts?.packet, recorded.artifact_ref],
+      });
+
       const workerTaskCreated = await registry.recordWorkerTaskCreated(registryRoot, runId, {
         purpose: "implementation_dispatch",
         epoch: current.execution?.current_epoch || 0,
@@ -260,17 +278,21 @@ export async function runImplementationDispatchStage({ runContext = {}, reportSt
           kind: "implementation-dispatch-intent",
           workspace_preparation_artifact: recorded.artifact_ref,
           packet_artifact: current.artifacts?.packet || null,
+          responsibility_plan: responsibilityPlan.plan,
           dispatch_intent_id: dispatchIntent.intent.dispatch_intent_id,
         },
       });
       current = dispatchRecorded.run;
-      const workerTaskDispatched = await registry.recordWorkerTaskDispatch(registryRoot, runId, {
-        intent_ref: dispatchRecorded.artifact_ref,
-        dispatch_ref: dispatchRecorded.artifact_ref,
-        recorded_at: recordedAt,
-        actor,
-        idempotency_key: `${dispatchIntent.intent.completion_idempotency_key.replace(":worker_completion:", ":worker_dispatch:")}:${dispatchRecorded.artifact_ref.sha256}`,
-      });
+      const activeDispatch = current.worker_tasks?.head?.dispatch || {};
+      const workerTaskDispatched = activeDispatch.adapter_task_id
+        ? { status: "noop", run: current, event: null }
+        : await registry.recordWorkerTaskDispatch(registryRoot, runId, {
+          intent_ref: dispatchRecorded.artifact_ref,
+          dispatch_ref: dispatchRecorded.artifact_ref,
+          recorded_at: recordedAt,
+          actor,
+          idempotency_key: `${dispatchIntent.intent.completion_idempotency_key.replace(":worker_completion:", ":worker_dispatch:")}:${dispatchRecorded.artifact_ref.sha256}`,
+        });
       current = workerTaskDispatched.run;
       stepsTaken.push(buildStep({
         action: "worker_task_dispatch_recorded",
@@ -377,7 +399,7 @@ export async function runImplementationDispatchStage({ runContext = {}, reportSt
         };
         stepsTaken.push(buildStep({
           action: "implementation_dispatch_result",
-          status: dispatchResultRecorded.status === "noop" ? "noop" : dispatchResult.status === "COMPLETED" ? "completed" : dispatchResult.status === "FAILED" ? "failed" : "blocked",
+          status: dispatchResultRecorded.status === "noop" ? "noop" : dispatchResult.status === "COMPLETED" ? "completed" : dispatchResult.status === "FAILED" ? "failed" : WAITING_DISPATCH_STATUSES.has(dispatchResult.status) ? "waiting" : "blocked",
           fromState: "running",
           toState: "running",
           detail: dispatchResult.public_report.summary || implementationBoundaryMessage(),
@@ -388,7 +410,37 @@ export async function runImplementationDispatchStage({ runContext = {}, reportSt
         }));
       }
 
-      if (implementationDispatch?.result_artifact_ref) {
+      if (implementationDispatch?.adapter_task_id || implementationDispatch?.heartbeat_at || implementationDispatch?.status_summary_ref) {
+        const adapterDispatchRecorded = await registry.recordWorkerTaskDispatch(registryRoot, runId, {
+          intent_ref: dispatchRecorded.artifact_ref,
+          dispatch_ref: dispatchRecorded.artifact_ref,
+          adapter_id: implementationDispatch.adapter || dispatchResult?.adapter || IMPLEMENTATION_DISPATCH_ADAPTER,
+          adapter_task_id: implementationDispatch.adapter_task_id || "",
+          adapter_status: implementationDispatch.adapter_status || implementationDispatch.status || "",
+          heartbeat_at: implementationDispatch.heartbeat_at || "",
+          status_summary_ref: implementationDispatch.status_summary_ref || null,
+          recorded_at: clock().toISOString(),
+          actor: implementationDispatch.adapter || dispatchResult?.adapter || IMPLEMENTATION_DISPATCH_ADAPTER,
+          idempotency_key: `${dispatchIntent.intent.completion_idempotency_key.replace(":worker_completion:", ":worker_dispatch_adapter_status:")}:${implementationDispatch.adapter_task_id || implementationDispatch.adapter_status || implementationDispatch.status || "unknown"}:${implementationDispatch.result_artifact_ref?.sha256 || "no-result"}`,
+        });
+        current = adapterDispatchRecorded.run;
+        implementationDispatch = {
+          ...implementationDispatch,
+          worker_task: current.worker_tasks?.head || null,
+        };
+        stepsTaken.push(buildStep({
+          action: "worker_task_adapter_status_recorded",
+          status: adapterDispatchRecorded.status === "noop" ? "noop" : "completed",
+          fromState: "running",
+          toState: "running",
+          detail: "WorkerTask adapter task identity/status was recorded for bounded reattach/poll resume.",
+          sequence: adapterDispatchRecorded.event?.sequence ?? null,
+          artifactPath: implementationDispatch.result_artifact_ref?.path || "",
+          artifactSha256: implementationDispatch.result_artifact_ref?.sha256 || "",
+        }));
+      }
+
+      if (implementationDispatch?.result_artifact_ref && !WAITING_DISPATCH_STATUSES.has(implementationDispatch.status) && implementationDispatch.status !== "CANCELLED") {
         const completionIdempotencyKey = `${dispatchIntent.intent.completion_idempotency_key}:${implementationDispatch.result_artifact_ref.sha256}`;
         const completionRecorded = await registry.recordWorkerCompletion(registryRoot, runId, {
           worker_task_id: dispatchIntent.intent.worker_task_id,
@@ -493,6 +545,13 @@ export async function runImplementationDispatchStage({ runContext = {}, reportSt
           problem: implementationDispatch.problem || null,
           intent_artifact_ref: implementationDispatch.intent_artifact_ref,
           result_artifact_ref: implementationDispatch.result_artifact_ref,
+        }));
+      } else if (WAITING_DISPATCH_STATUSES.has(dispatchStatus)) {
+        warnings.push(buildIssue("implementation_dispatch_waiting", `${implementationDispatch.summary || implementationDispatchStatusSummary(dispatchStatus)} Reinvoke /buran run after worker heartbeat or completion evidence is available.`, {
+          dispatch_status: dispatchStatus,
+          intent_artifact_ref: implementationDispatch.intent_artifact_ref,
+          result_artifact_ref: implementationDispatch.result_artifact_ref,
+          adapter_task_id: implementationDispatch.adapter_task_id || "",
         }));
       } else if (reusableDispatchResult?.reusable !== false) {
         if (dispatchStatus === "COMPLETED" || dispatchStatus === "FAILED") {

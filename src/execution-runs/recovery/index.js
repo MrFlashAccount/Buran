@@ -312,6 +312,12 @@ function mergeWorkerTaskSnapshot(snapshot, type, payload, sequence) {
     head = recordWorkerTaskDispatchCore(head, {
       intent_ref: payload.intent_ref,
       dispatch_ref: payload.dispatch_ref,
+      adapter_id: payload.adapter_id,
+      adapter_task_id: payload.adapter_task_id,
+      adapter_status: payload.adapter_status,
+      heartbeat_at: payload.heartbeat_at,
+      status_summary_ref: payload.status_summary_ref,
+      responsibility_zone: payload.responsibility_zone,
       idempotency_key: payload.idempotency_key,
       recorded_at: payload.recorded_at,
     });

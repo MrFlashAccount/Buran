@@ -8,6 +8,7 @@ import { resolveRecordedArtifactPath } from "./recorded-artifacts.js";
 import { buildIssue, buildRunnerReport, buildStep, implementationBoundaryMessage, sanitizeImplementationDispatchProblem } from "./final-report.js";
 
 const MAX_FIX_ATTEMPTS = 2;
+const WAITING_FIX_ATTEMPT_STATUSES = new Set(["PENDING", "UNKNOWN", "STALE"]);
 
 function recordedFixAttemptArtifacts(snapshot) {
   const byPath = snapshot?.artifacts?.recorded?.by_path || {};
@@ -15,7 +16,10 @@ function recordedFixAttemptArtifacts(snapshot) {
 }
 
 function fixAttemptCount(snapshot) {
-  return recordedFixAttemptArtifacts(snapshot).filter((summary) => summary?.provenance?.kind === "fix-attempt-result").length;
+  return recordedFixAttemptArtifacts(snapshot)
+    .filter((summary) => summary?.provenance?.kind === "fix-attempt-result")
+    .filter((summary) => !WAITING_FIX_ATTEMPT_STATUSES.has(nonEmptyString(summary?.provenance?.status).toUpperCase()))
+    .length;
 }
 
 function buildFixAttemptIntent(snapshot, { attempt, maxAttempts, includeWorkerTask = true } = {}) {
@@ -188,6 +192,12 @@ async function readReusableFixAttemptResult(runDir, snapshot) {
     };
   }
 
+  if (WAITING_FIX_ATTEMPT_STATUSES.has(artifactReport.status)
+    && nonEmptyString(artifactReport.adapter_task_id)
+    && nonEmptyString(snapshot?.worker_tasks?.head?.dispatch?.adapter_task_id) === nonEmptyString(artifactReport.adapter_task_id)) {
+    return null;
+  }
+
   const evidence = sanitizeImplementationDispatchEvidence(artifactReport.evidence);
   const intentArtifactRef = isRecord(summary.provenance?.intent_artifact)
     ? summary.provenance.intent_artifact
@@ -210,6 +220,10 @@ async function readReusableFixAttemptResult(runDir, snapshot) {
       problem: sanitizeImplementationDispatchProblem(artifactReport.status, artifactReport.problem),
       adapter: nonEmptyString(artifactReport.adapter) || IMPLEMENTATION_DISPATCH_ADAPTER,
       actor: nonEmptyString(artifactReport.actor) || IMPLEMENTATION_DISPATCH_ADAPTER,
+      adapter_task_id: nonEmptyString(artifactReport.adapter_task_id),
+      adapter_status: nonEmptyString(artifactReport.adapter_status) || artifactReport.status,
+      heartbeat_at: nonEmptyString(artifactReport.heartbeat_at),
+      status_summary_ref: artifactReport.status_summary_ref || null,
     },
     adapter: nonEmptyString(artifactReport.adapter) || IMPLEMENTATION_DISPATCH_ADAPTER,
     actor: nonEmptyString(artifactReport.actor) || IMPLEMENTATION_DISPATCH_ADAPTER,
@@ -261,15 +275,43 @@ export async function runFixLoopStage({ registryRoot, runId, current, previousSt
     };
     stepsTaken.push(buildStep({
       action: "fix_attempt_resume",
-      status: reusableFixAttemptResult.status === "COMPLETED" ? "noop" : "blocked",
+      status: reusableFixAttemptResult.status === "COMPLETED" ? "noop" : WAITING_FIX_ATTEMPT_STATUSES.has(reusableFixAttemptResult.status) ? "waiting" : "blocked",
       fromState: "fix_loop",
       toState: "fix_loop",
       detail: reusableFixAttemptResult.status === "COMPLETED"
         ? `Existing recorded fix attempt ${reusableFixAttemptResult.fix_attempt}/${MAX_FIX_ATTEMPTS} result was reused.`
-        : implementationBoundaryMessage(),
+        : WAITING_FIX_ATTEMPT_STATUSES.has(reusableFixAttemptResult.status)
+          ? `Existing recorded fix attempt ${reusableFixAttemptResult.fix_attempt}/${MAX_FIX_ATTEMPTS} is ${reusableFixAttemptResult.status}; waiting for worker completion evidence.`
+          : implementationBoundaryMessage(),
       artifactPath: reusableFixAttemptResult.artifact_ref.path,
       artifactSha256: reusableFixAttemptResult.artifact_ref.sha256,
     }));
+
+    if (WAITING_FIX_ATTEMPT_STATUSES.has(reusableFixAttemptResult.status)) {
+      warnings.push(buildIssue("fix_attempt_waiting", `${implementationDispatch.summary || implementationDispatchStatusSummary(reusableFixAttemptResult.status)} Reinvoke /buran run after worker heartbeat or completion evidence is available.`, {
+        fix_attempt: reusableFixAttemptResult.fix_attempt,
+        max_fix_attempts: MAX_FIX_ATTEMPTS,
+        dispatch_status: reusableFixAttemptResult.status,
+        intent_artifact_ref: reusableFixAttemptResult.intent_artifact_ref,
+        result_artifact_ref: reusableFixAttemptResult.artifact_ref,
+        adapter_task_id: implementationDispatch.adapter_task_id || "",
+        resumed_recorded_result: true,
+      }));
+      return buildRunnerReport({
+        registryRoot,
+        runId,
+        previousState,
+        currentState: current.state,
+        outcome: "waiting",
+        stepsTaken,
+        blockers,
+        warnings,
+        workspacePreparation,
+        implementationDispatch,
+        verification,
+        internalReview,
+      });
+    }
 
     if (reusableFixAttemptResult.status !== "COMPLETED") {
       blockers.push(buildIssue("fix_attempt_blocked", implementationBoundaryMessage(), {
@@ -514,13 +556,16 @@ export async function runFixLoopStage({ registryRoot, runId, current, previousSt
     },
   });
   current = intentRecorded.run;
-  const workerTaskDispatched = await registry.recordWorkerTaskDispatch(registryRoot, runId, {
-    intent_ref: intentRecorded.artifact_ref,
-    dispatch_ref: intentRecorded.artifact_ref,
-    recorded_at: recordedAt,
-    actor,
-    idempotency_key: `${fixIntent.intent.completion_idempotency_key.replace(":worker_completion:", ":worker_dispatch:")}:${intentRecorded.artifact_ref.sha256}`,
-  });
+  const activeDispatch = current.worker_tasks?.head?.dispatch || {};
+  const workerTaskDispatched = activeDispatch.adapter_task_id || (workerTaskCreated.status === "noop" && intentRecorded.status === "noop")
+    ? { status: "noop", run: current, event: null }
+    : await registry.recordWorkerTaskDispatch(registryRoot, runId, {
+      intent_ref: intentRecorded.artifact_ref,
+      dispatch_ref: intentRecorded.artifact_ref,
+      recorded_at: recordedAt,
+      actor,
+      idempotency_key: `${fixIntent.intent.completion_idempotency_key.replace(":worker_completion:", ":worker_dispatch:")}:${intentRecorded.artifact_ref.sha256}`,
+    });
   current = workerTaskDispatched.run;
   stepsTaken.push(buildStep({
     action: "worker_task_dispatch_recorded",
@@ -580,7 +625,7 @@ export async function runFixLoopStage({ registryRoot, runId, current, previousSt
   };
   stepsTaken.push(buildStep({
     action: "fix_attempt_result",
-    status: resultRecorded.status === "noop" ? "noop" : dispatchResult.status === "COMPLETED" ? "completed" : "blocked",
+    status: resultRecorded.status === "noop" ? "noop" : dispatchResult.status === "COMPLETED" ? "completed" : WAITING_FIX_ATTEMPT_STATUSES.has(dispatchResult.status) ? "waiting" : "blocked",
     fromState: "fix_loop",
     toState: "fix_loop",
     detail: dispatchResult.public_report.summary || implementationBoundaryMessage(),
@@ -588,6 +633,61 @@ export async function runFixLoopStage({ registryRoot, runId, current, previousSt
     artifactPath: resultRecorded.artifact_ref.path,
     artifactSha256: resultRecorded.artifact_ref.sha256,
   }));
+
+  if (implementationDispatch?.adapter_task_id || implementationDispatch?.heartbeat_at || implementationDispatch?.status_summary_ref) {
+    const adapterDispatchRecorded = await registry.recordWorkerTaskDispatch(registryRoot, runId, {
+      intent_ref: intentRecorded.artifact_ref,
+      dispatch_ref: intentRecorded.artifact_ref,
+      adapter_id: implementationDispatch.adapter || dispatchResult.adapter || IMPLEMENTATION_DISPATCH_ADAPTER,
+      adapter_task_id: implementationDispatch.adapter_task_id || "",
+      adapter_status: implementationDispatch.adapter_status || implementationDispatch.status || "",
+      heartbeat_at: implementationDispatch.heartbeat_at || "",
+      status_summary_ref: implementationDispatch.status_summary_ref || null,
+      recorded_at: clock().toISOString(),
+      actor: implementationDispatch.adapter || dispatchResult.adapter || IMPLEMENTATION_DISPATCH_ADAPTER,
+      idempotency_key: `${fixIntent.intent.completion_idempotency_key.replace(":worker_completion:", ":worker_dispatch_adapter_status:")}:${implementationDispatch.adapter_task_id || implementationDispatch.adapter_status || implementationDispatch.status || "unknown"}:${implementationDispatch.result_artifact_ref?.sha256 || "no-result"}`,
+    });
+    current = adapterDispatchRecorded.run;
+    implementationDispatch = {
+      ...implementationDispatch,
+      worker_task: current.worker_tasks?.head || null,
+    };
+    stepsTaken.push(buildStep({
+      action: "worker_task_adapter_status_recorded",
+      status: adapterDispatchRecorded.status === "noop" ? "noop" : "completed",
+      fromState: "fix_loop",
+      toState: "fix_loop",
+      detail: "Fix-attempt WorkerTask adapter task identity/status was recorded for bounded reattach/poll resume.",
+      sequence: adapterDispatchRecorded.event?.sequence ?? null,
+      artifactPath: implementationDispatch.result_artifact_ref?.path || "",
+      artifactSha256: implementationDispatch.result_artifact_ref?.sha256 || "",
+    }));
+  }
+
+  if (WAITING_FIX_ATTEMPT_STATUSES.has(dispatchResult.status)) {
+    warnings.push(buildIssue("fix_attempt_waiting", `${implementationDispatch.summary || implementationDispatchStatusSummary(dispatchResult.status)} Reinvoke /buran run after worker heartbeat or completion evidence is available.`, {
+      fix_attempt: attempt,
+      max_fix_attempts: MAX_FIX_ATTEMPTS,
+      dispatch_status: dispatchResult.status,
+      intent_artifact_ref: intentRecorded.artifact_ref,
+      result_artifact_ref: resultRecorded.artifact_ref,
+      adapter_task_id: implementationDispatch.adapter_task_id || "",
+    }));
+    return buildRunnerReport({
+      registryRoot,
+      runId,
+      previousState,
+      currentState: current.state,
+      outcome: "waiting",
+      stepsTaken,
+      blockers,
+      warnings,
+      workspacePreparation,
+      implementationDispatch,
+      verification,
+      internalReview,
+    });
+  }
 
   const completionIdempotencyKey = `${fixIntent.intent.completion_idempotency_key}:${resultRecorded.artifact_ref.sha256}`;
   const completionRecorded = await registry.recordWorkerCompletion(registryRoot, runId, {

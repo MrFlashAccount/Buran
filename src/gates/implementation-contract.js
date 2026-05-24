@@ -1,5 +1,6 @@
 import { sanitizePublicReportForOutput } from "../observability/index.js";
 import { canonicalJson, isRecord, nonEmptyString, sha256Hex } from "../shared/primitives.js";
+import { harnessAdapterId, normalizeHarnessStatus } from "../core/ports/harness-runtime.js";
 
 const DISPATCH_STATUS = "dispatch_requested";
 const DISPATCH_SCHEMA_VERSION = "implementation-dispatch-intent.v1";
@@ -131,13 +132,17 @@ function sanitizeValue(value, snapshot) {
 
 function normalizeDispatchStatus(status) {
   const value = nonEmptyString(status).toUpperCase();
-  if (["COMPLETED", "BLOCKED", "FAILED"].includes(value)) return value;
+  const normalized = normalizeHarnessStatus(value);
+  if (["COMPLETED", "BLOCKED", "FAILED", "PENDING", "UNKNOWN", "STALE", "CANCELLED"].includes(normalized)) return normalized;
   return "BLOCKED";
 }
 
 export function implementationDispatchStatusSummary(status) {
   if (status === "COMPLETED") return "Implementation harness dispatch completed and returned durable implementation evidence.";
   if (status === "FAILED") return "Implementation harness dispatch failed inside the approved envelope.";
+  if (status === "PENDING") return "Implementation harness dispatch is pending; wait for worker completion evidence.";
+  if (status === "UNKNOWN" || status === "STALE") return "Implementation harness dispatch status is not currently provable.";
+  if (status === "CANCELLED") return "Implementation harness dispatch was cancelled before completion.";
   return "Implementation harness dispatch is blocked.";
 }
 
@@ -249,7 +254,7 @@ export function validateImplementationDispatchResultReport(result, intent, { req
   if (!isRecord(result)) return resultShapeProblem("result");
   if (result.schema_version !== DISPATCH_RESULT_SCHEMA_VERSION) return resultShapeProblem("schema_version");
   const status = nonEmptyString(result.status).toUpperCase();
-  if (!["COMPLETED", "BLOCKED", "FAILED"].includes(status)) return resultShapeProblem("status");
+  if (!["COMPLETED", "BLOCKED", "FAILED", "PENDING", "UNKNOWN", "STALE", "CANCELLED"].includes(status)) return resultShapeProblem("status");
   const provenanceProblem = validateImplementationDispatchResultProvenance(result, intent, { requireCompleteProvenance, intentArtifactPath });
   if (provenanceProblem) return provenanceProblem;
   if (status === "COMPLETED" && !hasMeaningfulImplementationDispatchCompletionEvidence(result.evidence)) {
@@ -299,8 +304,12 @@ function normalizeResult(rawResult, snapshot) {
     implementation_epoch: Number.isSafeInteger(result.implementation_epoch) ? result.implementation_epoch : 1,
     evidence,
     problem,
-    adapter: nonEmptyString(result.adapter) || IMPLEMENTATION_DISPATCH_ADAPTER,
-    actor: nonEmptyString(result.actor) || IMPLEMENTATION_DISPATCH_ADAPTER,
+    adapter: nonEmptyString(result.adapter || result.adapter_id) || IMPLEMENTATION_DISPATCH_ADAPTER,
+    actor: nonEmptyString(result.actor || result.adapter || result.adapter_id) || IMPLEMENTATION_DISPATCH_ADAPTER,
+    adapter_task_id: truncateDispatchString(result.adapter_task_id || result.task_id || result.session_id, 160),
+    adapter_status: truncateDispatchString(result.adapter_status || normalizedStatus, 80),
+    heartbeat_at: truncateDispatchString(result.heartbeat_at, 80),
+    status_summary_ref: sanitizeDispatchReference(result.status_summary_ref),
   }, snapshot);
 }
 
@@ -347,7 +356,7 @@ export function buildImplementationDispatchIntent(snapshot, { workspacePreparati
     completion_idempotency_key: `${snapshot.run_id}:worker_completion:${nonEmptyString(snapshot.worker_tasks?.head?.worker_task_id) || "legacy"}`,
     execution_boundary: {
       status: DISPATCH_STATUS,
-      adapter: IMPLEMENTATION_DISPATCH_ADAPTER,
+      adapter: "harness-runtime.v1",
       result_required_before_verification: true,
       scope_authority: "approved_packet_artifact",
       worker_task_required: Boolean(snapshot.worker_tasks?.head?.worker_task_id),
@@ -391,6 +400,60 @@ export function createUnavailableImplementationDispatchAdapter({ reason = "Imple
   };
 }
 
+function activeAdapterTask(snapshot) {
+  const dispatch = snapshot?.worker_tasks?.head?.dispatch;
+  const adapterTaskId = truncateDispatchString(dispatch?.adapter_task_id, 160);
+  if (!adapterTaskId) return null;
+  return {
+    adapter_task_id: adapterTaskId,
+    adapter_id: nonEmptyString(dispatch?.adapter_id),
+    adapter_status: nonEmptyString(dispatch?.adapter_status),
+    heartbeat_at: nonEmptyString(dispatch?.heartbeat_at),
+    status_summary_ref: sanitizeDispatchReference(dispatch?.status_summary_ref),
+  };
+}
+
+async function executeHarnessRuntime(adapter, envelope, context, snapshot) {
+  const activeTask = activeAdapterTask(snapshot);
+  if (activeTask && typeof adapter?.poll === "function") {
+    return adapter.poll(activeTask.adapter_task_id, { ...context, envelope, activeTask });
+  }
+  if (activeTask && typeof adapter?.reattach === "function") {
+    const reattached = await adapter.reattach(activeTask.adapter_task_id, { ...context, envelope, activeTask });
+    if (reattached && typeof adapter?.poll === "function") {
+      const taskId = nonEmptyString(reattached.adapter_task_id || reattached.task_id) || activeTask.adapter_task_id;
+      if (["PENDING", "UNKNOWN", "STALE"].includes(normalizeDispatchStatus(reattached.status))) {
+        return adapter.poll(taskId, { ...context, envelope, activeTask: { ...activeTask, adapter_task_id: taskId }, reattached });
+      }
+    }
+    return reattached;
+  }
+  if (activeTask) {
+    return {
+      status: "UNKNOWN",
+      adapter: nonEmptyString(activeTask.adapter_id) || harnessAdapterId(adapter),
+      actor: nonEmptyString(activeTask.adapter_id) || harnessAdapterId(adapter),
+      adapter_task_id: activeTask.adapter_task_id,
+      adapter_status: activeTask.adapter_status || "UNKNOWN",
+      heartbeat_at: activeTask.heartbeat_at || "",
+      status_summary_ref: activeTask.status_summary_ref || null,
+      problem: buildProblem("implementation_dispatch_status_unknown", "Active harness adapter task exists but this adapter cannot poll or reattach; waiting without spawning a duplicate task."),
+    };
+  }
+  if (typeof adapter?.spawn === "function") {
+    return adapter.spawn(envelope, context);
+  }
+  if (typeof adapter?.execute === "function") {
+    return adapter.execute({ ...context, envelope });
+  }
+  return {
+    status: "BLOCKED",
+    adapter: DEFAULT_UNAVAILABLE_ADAPTER,
+    actor: DEFAULT_UNAVAILABLE_ADAPTER,
+    problem: buildProblem("implementation_dispatch_unavailable", "Implementation-harness dispatch adapter is not available."),
+  };
+}
+
 export async function executeImplementationDispatch({ snapshot, intent, adapter = createUnavailableImplementationDispatchAdapter(), clock = () => new Date(), intentArtifactPath = "", artifactDirectory = "artifacts/implementation-dispatch" } = {}) {
   if (!snapshot?.run_id) throw new Error("run snapshot is required for implementation dispatch execution");
   if (!intent?.dispatch_intent_id) throw new Error("implementation dispatch intent is required");
@@ -405,7 +468,7 @@ export async function executeImplementationDispatch({ snapshot, intent, adapter 
   let finishedAt = "";
   let normalized;
   try {
-    if (!adapter || typeof adapter.execute !== "function") {
+    if (!adapter || (typeof adapter.execute !== "function" && typeof adapter.spawn !== "function" && typeof adapter.reattach !== "function" && typeof adapter.poll !== "function")) {
       normalized = normalizeResult({
         status: "BLOCKED",
         adapter: DEFAULT_UNAVAILABLE_ADAPTER,
@@ -413,12 +476,27 @@ export async function executeImplementationDispatch({ snapshot, intent, adapter 
         problem: buildProblem("implementation_dispatch_unavailable", "Implementation-harness dispatch adapter is not available."),
       }, snapshot);
     } else {
-      const rawResult = await adapter.execute({
-        snapshot: adapterSnapshot,
+      const envelope = {
+        schema_version: "harness-execution-envelope.v1",
+        run_id: adapterIntent.run_id,
+        task_id: adapterIntent.worker_task_id || adapterIntent.task_id,
+        execution_epoch: adapterIntent.worker_task_epoch,
+        attempt: adapterIntent.worker_task_attempt,
+        purpose: adapterIntent.worker_task_role === "reviewer" ? "review_attempt" : adapterIntent.dispatch_status === "fix_attempt" ? "fix_attempt" : "implementation_dispatch",
+        role: adapterIntent.worker_task_role,
+        packet_artifact: adapterPacketArtifact,
+        workspace_preparation_artifact: adapterIntent.workspace_preparation_artifact,
+        scope_boundary: "approved_packet_artifact",
+        expected_output_contract: "worker-completion-evidence.v1",
+        completion_idempotency_key: adapterIntent.completion_idempotency_key,
+      };
+      const rawResult = await executeHarnessRuntime(adapter, envelope, {
+        idempotencyKey: adapterIntent.completion_idempotency_key,
         intent: adapterIntent,
+        snapshot: adapterSnapshot,
         workspace_path: snapshot.workspace?.path || "",
         packet_artifact: adapterPacketArtifact,
-      });
+      }, snapshot);
       startedAt = nonEmptyString(rawResult?.started_at);
       finishedAt = nonEmptyString(rawResult?.finished_at);
       const provenanceProblem = validateImplementationDispatchResultProvenance(rawResult, intent, { intentArtifactPath: dispatchIntentArtifactPath });
@@ -431,8 +509,8 @@ export async function executeImplementationDispatch({ snapshot, intent, adapter 
   } catch (error) {
     normalized = normalizeResult({
       status: "BLOCKED",
-      adapter: nonEmptyString(adapter?.adapter) || IMPLEMENTATION_DISPATCH_ADAPTER,
-      actor: nonEmptyString(adapter?.adapter) || IMPLEMENTATION_DISPATCH_ADAPTER,
+      adapter: harnessAdapterId(adapter),
+      actor: harnessAdapterId(adapter),
       problem: buildProblem("implementation_dispatch_failed", nonEmptyString(error?.message) || "Implementation-harness dispatch failed."),
     }, snapshot);
   }
@@ -459,6 +537,10 @@ export async function executeImplementationDispatch({ snapshot, intent, adapter 
     summary: normalized.summary,
     implementation_epoch: normalized.implementation_epoch,
     evidence: normalized.evidence,
+    adapter_task_id: normalized.adapter_task_id,
+    adapter_status: normalized.adapter_status,
+    heartbeat_at: normalized.heartbeat_at,
+    status_summary_ref: normalized.status_summary_ref,
     problem: normalized.problem,
     actor: normalized.actor,
   }, snapshot);
@@ -480,6 +562,10 @@ export async function executeImplementationDispatch({ snapshot, intent, adapter 
       dispatch_intent_id: capturedProvenance.dispatch_intent_id,
       packet_artifact: capturedProvenance.packet_artifact,
       status: normalized.status,
+      adapter_task_id: normalized.adapter_task_id || "",
+      adapter_status: normalized.adapter_status || "",
+      heartbeat_at: normalized.heartbeat_at || "",
+      status_summary_ref: normalized.status_summary_ref || null,
     },
   };
 }
