@@ -11,7 +11,7 @@ import { readRecordedArtifactJson, resolveRecordedArtifactPath } from "./recorde
 
 async function recordReviewerAggregationWorker(registry, registryRoot, runId, current, { artifactRef, gateStatus, actor, clock } = {}) {
   if (!artifactRef?.path || !artifactRef?.sha256) return current;
-  const completionStatus = gateStatus === "PASS" ? "COMPLETED" : "BLOCKED";
+  const completionStatus = gateStatus === "PASS" ? "COMPLETED" : "FAILED";
   const recordedAt = clock().toISOString();
   const epoch = current.execution?.current_epoch || 0;
   const attempt = current.gates?.internal_review?.current_attempt || 1;
@@ -48,7 +48,7 @@ async function recordReviewerAggregationWorker(registry, registryRoot, runId, cu
     authority,
     status: completionStatus,
     completion_ref: artifactRef,
-    evidence: { status: completionStatus, artifact_ref: artifactRef },
+    evidence: { status: completionStatus, review_status: gateStatus, artifact_ref: artifactRef },
     received_at: clock().toISOString(),
     actor: authority,
     idempotency_key: completionKey,
@@ -60,7 +60,7 @@ async function recordReviewerAggregationWorker(registry, registryRoot, runId, cu
     actor,
     idempotency_key: `${completionKey}:decision`,
   });
-  return decision.run;
+  return { run: decision.run, decision: decision.run?.worker_tasks?.head?.decision || null, event: decision.event || null };
 }
 
 function hasFreshRecordedGate(snapshot, gateName) {
@@ -648,12 +648,34 @@ export async function runInternalReviewStage({ registryRoot, runId, current, pre
       detail: "Existing current-epoch internal review gate result was reused with independent reviewer verdict artifact evidence.",
     }));
 
-    current = await recordReviewerAggregationWorker(registry, registryRoot, runId, current, {
+    const reviewWorkerDecision = await recordReviewerAggregationWorker(registry, registryRoot, runId, current, {
       artifactRef: artifactIntegrity.artifact_refs[0] || null,
       gateStatus: current.gates.internal_review.status,
       actor,
       clock,
     });
+    current = reviewWorkerDecision.run;
+    if (current.worker_tasks?.head?.decision?.decision !== "accepted") {
+      blockers.push(buildIssue("review_worker_completion_not_accepted", "Internal-review WorkerTask completion did not receive an accepted durable CompletionDecision; outer transition was not advanced.", {
+        worker_decision: current.worker_tasks?.head?.decision?.decision || "",
+        worker_task_id: current.worker_tasks?.head?.worker_task_id || "",
+        review_status: internalReview.status,
+      }));
+      return buildRunnerReport({
+        registryRoot,
+        runId,
+        previousState,
+        currentState: current.state,
+        outcome: "blocked",
+        stepsTaken,
+        blockers,
+        warnings,
+        workspacePreparation,
+        implementationDispatch,
+        verification,
+        internalReview,
+      });
+    }
 
     const transitioned = await registry.transitionRun(registryRoot, runId, {
       toState: targetState,
@@ -757,12 +779,34 @@ export async function runInternalReviewStage({ registryRoot, runId, current, pre
     resumed_recorded_result: false,
   };
 
-  current = await recordReviewerAggregationWorker(registry, registryRoot, runId, current, {
+  const reviewWorkerDecision = await recordReviewerAggregationWorker(registry, registryRoot, runId, current, {
     artifactRef: recordedArtifact.artifact_ref,
     gateStatus: internalReviewRun.status,
     actor,
     clock,
   });
+  current = reviewWorkerDecision.run;
+  if (current.worker_tasks?.head?.decision?.decision !== "accepted") {
+    blockers.push(buildIssue("review_worker_completion_not_accepted", "Internal-review WorkerTask completion did not receive an accepted durable CompletionDecision; outer transition was not advanced.", {
+      worker_decision: current.worker_tasks?.head?.decision?.decision || "",
+      worker_task_id: current.worker_tasks?.head?.worker_task_id || "",
+      review_status: internalReview.status,
+    }));
+    return buildRunnerReport({
+      registryRoot,
+      runId,
+      previousState,
+      currentState: current.state,
+      outcome: "blocked",
+      stepsTaken,
+      blockers,
+      warnings,
+      workspacePreparation,
+      implementationDispatch,
+      verification,
+      internalReview,
+    });
+  }
 
   const targetState = internalReviewTransition(internalReviewRun.status);
   const transitioned = await registry.transitionRun(registryRoot, runId, {

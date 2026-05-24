@@ -978,6 +978,80 @@ test("local runner can acquire a local lease and blocks when implementation harn
   assert.equal(recovery.summary.quarantined_runs, 1);
 });
 
+
+test("local runner waits on recorded PENDING implementation result without adapter task id and does not spawn again", async () => {
+  const tempDir = await makeTempDir();
+  const registryRoot = path.join(tempDir, "registry");
+  const intendedBranch = "user/run_runner_dispatch_pending_no_task";
+  const workspacePath = await createLocalGitWorkspace(tempDir, intendedBranch);
+  const created = await createRunFromPacketReport(packetReport("run_runner_dispatch_pending_no_task", { intendedBranch }), {
+    registryRoot,
+    clock: () => new Date("2026-05-16T13:52:00.000Z"),
+  });
+
+  let adapterCalls = 0;
+  const first = await runLocalMission({
+    registryRoot,
+    runId: created.run.run_id,
+    workspaceId: "ws-runner-dispatch-pending-no-task",
+    workspacePath,
+    clock: () => new Date("2026-05-16T13:53:00.000Z"),
+    implementationDispatchAdapter: {
+      adapter: "test-pending-no-task-harness",
+      async execute() {
+        adapterCalls += 1;
+        return {
+          status: "PENDING",
+          adapter: "test-pending-no-task-harness",
+          actor: "test-pending-no-task-harness",
+          summary: "Worker accepted but has no durable adapter task id yet.",
+        };
+      },
+    },
+  });
+
+  assert.equal(adapterCalls, 1);
+  assert.equal(first.outcome, "waiting");
+  assert.equal(first.current_state, "running");
+  assert.equal(first.implementation_dispatch.status, "PENDING");
+  assert.equal(first.blockers.length, 0);
+  assert.deepEqual(first.steps_taken.map((step) => step.action), [
+    "transition",
+    "lease_acquire",
+    "workspace_preparation",
+    "worker_task_created",
+    "worker_task_dispatch_recorded",
+    "implementation_dispatch_intent",
+    "implementation_dispatch_result",
+  ]);
+
+  const paths = getRunPaths(registryRoot, created.run.run_id);
+  const eventsAfterFirst = await readEventsFile(paths.eventsPath);
+  assert.equal(eventsAfterFirst.some((event) => event.type === "worker_task.completion_received"), false);
+
+  const second = await runLocalMission({
+    registryRoot,
+    runId: created.run.run_id,
+    clock: () => new Date("2026-05-16T13:54:00.000Z"),
+    implementationDispatchAdapter: {
+      adapter: "test-pending-no-task-harness-should-not-spawn",
+      async execute() {
+        adapterCalls += 1;
+        throw new Error("pending recorded result without adapter_task_id must not spawn again");
+      },
+    },
+  });
+  const eventsAfterSecond = await readEventsFile(paths.eventsPath);
+
+  assert.equal(adapterCalls, 1);
+  assert.equal(second.outcome, "waiting");
+  assert.equal(second.current_state, "running");
+  assert.equal(second.implementation_dispatch.status, "PENDING");
+  assert.equal(second.implementation_dispatch.resumed_recorded_result, true);
+  assert.equal(second.implementation_dispatch.result_artifact_ref.path, first.implementation_dispatch.result_artifact_ref.path);
+  assert.equal(eventsAfterSecond.length, eventsAfterFirst.length);
+});
+
 test("run CLI forwards configured implementation dispatch adapter and does not reuse unavailable BLOCKED results", async () => {
   const tempDir = await makeTempDir();
   const registryRoot = path.join(tempDir, "registry");
@@ -2045,6 +2119,156 @@ test("local runner executes a bounded fix attempt and reruns verification in a f
   assert.equal(fixArtifacts.filter((entry) => entry.provenance.kind === "fix-attempt-result").length, 1);
 });
 
+
+test("local runner waits on PENDING fix attempts without recording completion or consuming another attempt", async () => {
+  const tempDir = await makeTempDir();
+  const registryRoot = path.join(tempDir, "registry");
+  const workspacePath = await createVerificationWorkspace(tempDir, {
+    testFile: "test/runner.test.js",
+    passing: false,
+  });
+  const runId = await prepareVerificationRun(registryRoot, workspacePath, {
+    runId: "run_runner_fix_loop_pending_wait",
+  });
+
+  const failedVerification = await runLocalMission({
+    registryRoot,
+    runId,
+    clock: () => new Date("2026-05-16T13:55:00.000Z"),
+  });
+  assert.equal(failedVerification.current_state, "fix_loop");
+
+  let spawnCalls = 0;
+  const pending = await runLocalMission({
+    registryRoot,
+    runId,
+    clock: () => new Date("2026-05-16T13:56:00.000Z"),
+    implementationDispatchAdapter: {
+      adapter: "test-fix-pending-no-task",
+      async execute() {
+        spawnCalls += 1;
+        return {
+          status: "PENDING",
+          adapter: "test-fix-pending-no-task",
+          actor: "test-fix-pending-no-task",
+          summary: "Fix worker is still running.",
+        };
+      },
+    },
+  });
+
+  assert.equal(spawnCalls, 1);
+  assert.equal(pending.outcome, "waiting");
+  assert.equal(pending.current_state, "fix_loop");
+  assert.equal(pending.implementation_dispatch.status, "PENDING");
+  assert.equal(pending.blockers.length, 0);
+  assert.deepEqual(pending.steps_taken.map((step) => step.action), ["worker_task_created", "worker_task_dispatch_recorded", "fix_attempt_intent", "fix_attempt_result"]);
+
+  const paths = getRunPaths(registryRoot, runId);
+  const eventsAfterPending = await readEventsFile(paths.eventsPath);
+  assert.equal(eventsAfterPending.some((event) => event.type === "worker_task.completion_received"), false);
+
+  const resumedWait = await runLocalMission({
+    registryRoot,
+    runId,
+    clock: () => new Date("2026-05-16T13:57:00.000Z"),
+    implementationDispatchAdapter: {
+      adapter: "test-fix-pending-should-not-spawn",
+      async execute() {
+        spawnCalls += 1;
+        throw new Error("recorded pending fix attempt without adapter_task_id must not spawn again");
+      },
+    },
+  });
+  const eventsAfterResume = await readEventsFile(paths.eventsPath);
+
+  assert.equal(spawnCalls, 1);
+  assert.equal(resumedWait.outcome, "waiting");
+  assert.equal(resumedWait.current_state, "fix_loop");
+  assert.equal(resumedWait.implementation_dispatch.status, "PENDING");
+  assert.equal(resumedWait.implementation_dispatch.resumed_recorded_result, true);
+  assert.equal(resumedWait.implementation_dispatch.fix_attempt, 1);
+  assert.equal(eventsAfterResume.length, eventsAfterPending.length);
+});
+
+test("local runner polls active PENDING fix adapter tasks instead of spawning duplicates", async () => {
+  const tempDir = await makeTempDir();
+  const registryRoot = path.join(tempDir, "registry");
+  const workspacePath = await createVerificationWorkspace(tempDir, {
+    testFile: "test/runner.test.js",
+    passing: false,
+  });
+  const runId = await prepareVerificationRun(registryRoot, workspacePath, {
+    runId: "run_runner_fix_loop_pending_poll",
+  });
+
+  await runLocalMission({
+    registryRoot,
+    runId,
+    clock: () => new Date("2026-05-16T13:55:00.000Z"),
+  });
+
+  const calls = [];
+  const pending = await runLocalMission({
+    registryRoot,
+    runId,
+    clock: () => new Date("2026-05-16T13:56:00.000Z"),
+    implementationDispatchAdapter: {
+      adapter_id: "test-fix-poll-harness",
+      async spawn() {
+        calls.push("spawn");
+        return {
+          status: "PENDING",
+          adapter: "test-fix-poll-harness",
+          actor: "test-fix-poll-harness",
+          adapter_task_id: "fix-adapter-task-1",
+        };
+      },
+      async poll() {
+        calls.push("poll-before-resume");
+        return { status: "PENDING", adapter_task_id: "fix-adapter-task-1", adapter: "test-fix-poll-harness" };
+      },
+    },
+  });
+  assert.equal(pending.outcome, "waiting");
+  assert.equal(pending.implementation_dispatch.adapter_task_id, "fix-adapter-task-1");
+  assert.deepEqual(calls, ["spawn"]);
+
+  const recovered = await runLocalMission({
+    registryRoot,
+    runId,
+    clock: () => new Date("2026-05-16T13:57:00.000Z"),
+    implementationDispatchAdapter: {
+      adapter_id: "test-fix-poll-harness",
+      async spawn() {
+        calls.push("duplicate-spawn");
+        throw new Error("active fix adapter task must be polled instead of respawned");
+      },
+      async poll(adapterTaskId, { workspace_path }) {
+        calls.push(`poll:${adapterTaskId}`);
+        await fs.writeFile(path.join(workspace_path, "test/runner.test.js"), [
+          'import test from "node:test";',
+          'import assert from "node:assert/strict";',
+          'test("polled fix verification passes", () => { assert.equal(1, 1); });',
+          "",
+        ].join("\n"), "utf8");
+        return {
+          status: "COMPLETED",
+          adapter: "test-fix-poll-harness",
+          actor: "test-fix-poll-harness",
+          adapter_task_id: adapterTaskId,
+          evidence: { files_changed: ["test/runner.test.js"], patch_sha: "polled-fix-patch" },
+        };
+      },
+    },
+  });
+
+  assert.deepEqual(calls, ["spawn", "poll:fix-adapter-task-1"]);
+  assert.equal(recovered.outcome, "completed");
+  assert.equal(recovered.current_state, "verification");
+  assert.equal(recovered.implementation_dispatch.status, "COMPLETED");
+});
+
 test("local runner accepts provenance-complete fix-loop dispatch result with a custom intent path after internal_review FAIL", async () => {
   const tempDir = await makeTempDir();
   const registryRoot = path.join(tempDir, "registry");
@@ -2325,6 +2549,9 @@ test("local runner ignores packet-text internal review verdict directives and bl
   assert.equal(events.filter((event) => event.type === "artifact.recorded" && event.evidence.gate_name === "internal_review").length, 1);
   assert.equal(events.filter((event) => event.type === "gate.result_recorded" && event.evidence.gate_name === "internal_review").length, 1);
   assert.equal(events.filter((event) => event.type === "gate.result_recorded").length, 2);
+  const reviewCompletionDecision = events.find((event) => event.type === "worker_task.completion_decided" && event.evidence?.purpose === "review_attempt");
+  assert.equal(reviewCompletionDecision?.evidence?.decision, "accepted");
+  assert.equal(reviewCompletionDecision?.evidence?.completion_status, "FAILED");
   assert.equal(events.filter((event) => event.type === "transition").at(-1)?.state_after, "blocked_needs_human");
   assert.equal(events.filter((event) => event.type === "transition").at(-1)?.evidence.reason, "internal review blocked on unsupported or unsafe surface");
 
@@ -2334,6 +2561,60 @@ test("local runner ignores packet-text internal review verdict directives and bl
   assert.equal(internalReviewArtifact.problem.code, "independent_internal_review_required");
   assert.equal(Object.hasOwn(internalReviewArtifact, "review_directive"), false);
   assert.match(internalReviewArtifact.packet_review.reviewer_plan, /buran:review=PASS/);
+});
+
+
+test("local runner blocks internal review transition when WorkerTask completion decision is not accepted", async () => {
+  const tempDir = await makeTempDir();
+  const registryRoot = path.join(tempDir, "registry");
+  const workspacePath = await createVerificationWorkspace(tempDir, {
+    testFile: "test/runner.test.js",
+    passing: true,
+  });
+  const verdictPath = "artifacts/internal-review/verdict-fail-decision.json";
+  const runId = await prepareVerificationRun(registryRoot, workspacePath, {
+    runId: "run_runner_internal_review_decision_enforced",
+    reviewVerdictArtifactPath: verdictPath,
+  });
+
+  await advanceRunToInternalReview(registryRoot, runId);
+  await writeReviewVerdictArtifact(registryRoot, runId, {
+    status: "FAIL",
+    summary: "Independent review failed.",
+    artifactPath: verdictPath,
+    findings: [{ severity: "must_fix", message: "Fix before handoff." }],
+  });
+
+  const nonAcceptedDecisionRepository = {
+    ...registryRepository,
+    async recordWorkerCompletionDecision(root, id, options = {}) {
+      return registryRepository.recordWorkerCompletionDecision(root, id, {
+        ...options,
+        completion: { ...(options.completion || {}), worker_task_id: "not-current-review-worker" },
+      });
+    },
+  };
+
+  const result = await runLocalMission({
+    registryRoot,
+    runId,
+    clock: () => new Date("2026-05-16T13:56:00.000Z"),
+    registryRepository: nonAcceptedDecisionRepository,
+  });
+
+  assert.equal(result.outcome, "blocked");
+  assert.equal(result.current_state, "internal_review");
+  assert.equal(result.internal_review.status, "FAIL");
+  assert.equal(result.blockers[0].code, "review_worker_completion_not_accepted");
+  assert.equal(result.blockers[0].worker_decision, "");
+  assert.equal(result.steps_taken.some((step) => step.action === "transition"), false);
+
+  const paths = getRunPaths(registryRoot, runId);
+  const snapshot = await readRunSnapshot(paths.runPath);
+  const events = await readEventsFile(paths.eventsPath);
+  assert.equal(snapshot.state, "internal_review");
+  assert.equal(events.find((event) => event.type === "worker_task.completion_decided" && event.evidence?.purpose === "review_attempt")?.evidence?.decision, "late");
+  assert.equal(events.filter((event) => event.type === "transition").at(-1)?.state_after, "internal_review");
 });
 
 

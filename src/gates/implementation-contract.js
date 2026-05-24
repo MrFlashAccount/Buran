@@ -428,6 +428,18 @@ async function executeHarnessRuntime(adapter, envelope, context, snapshot) {
     }
     return reattached;
   }
+  if (activeTask) {
+    return {
+      status: "UNKNOWN",
+      adapter: nonEmptyString(activeTask.adapter_id) || harnessAdapterId(adapter),
+      actor: nonEmptyString(activeTask.adapter_id) || harnessAdapterId(adapter),
+      adapter_task_id: activeTask.adapter_task_id,
+      adapter_status: activeTask.adapter_status || "UNKNOWN",
+      heartbeat_at: activeTask.heartbeat_at || "",
+      status_summary_ref: activeTask.status_summary_ref || null,
+      problem: buildProblem("implementation_dispatch_status_unknown", "Active harness adapter task exists but this adapter cannot poll or reattach; waiting without spawning a duplicate task."),
+    };
+  }
   if (typeof adapter?.spawn === "function") {
     return adapter.spawn(envelope, context);
   }

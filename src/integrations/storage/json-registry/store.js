@@ -827,11 +827,14 @@ function observedCompletionHistoryEntry(snapshot, completion, decision = "late")
 
 export function withWorkerTaskCreatedSnapshot(snapshot, head, sequence) {
   const previousHead = snapshot.worker_tasks?.head || null;
+  const sameWorkerTask = previousHead?.worker_task_id && previousHead.worker_task_id === head.worker_task_id;
+  const preservesLaterState = sameWorkerTask && ["dispatched", "overdue"].includes(previousHead.status);
+  const nextHead = preservesLaterState ? previousHead : head;
   return {
     ...snapshot,
     last_sequence: sequence,
-    updated_at: head.updated_at,
-    worker_tasks: { head, history: appendDistinctWorkerTaskHistory(snapshot, previousHead) },
+    updated_at: nextHead.updated_at,
+    worker_tasks: { head: nextHead, history: appendDistinctWorkerTaskHistory(snapshot, preservesLaterState ? null : previousHead) },
   };
 }
 

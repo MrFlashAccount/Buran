@@ -308,8 +308,11 @@ function normalizeBudget(budget) {
 }
 
 function fixLoopBudget(snapshot, events) {
+  const waitingStatuses = new Set(["PENDING", "UNKNOWN", "STALE"]);
   const recorded = Object.values(snapshot?.artifacts?.recorded?.by_path || {})
-    .filter((summary) => summary?.gate_name === "fix_attempt" && summary?.provenance?.kind === "fix-attempt-result").length;
+    .filter((summary) => summary?.gate_name === "fix_attempt" && summary?.provenance?.kind === "fix-attempt-result")
+    .filter((summary) => !waitingStatuses.has(nonEmptyString(summary?.provenance?.status).toUpperCase()))
+    .length;
   const used = recorded;
   if (used <= 0 && snapshot?.state !== "fix_loop") return null;
   return {
